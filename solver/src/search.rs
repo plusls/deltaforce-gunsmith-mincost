@@ -159,7 +159,7 @@ pub struct Solver<'a> {
     tune_dims: TuneDims,
     aim_dp: AimDir,
     panel_attrs: Vec<String>,
-    panel_dirs: Vec<bool>,
+    panel_dirs: Vec<PanelDir>,
     seed_panel_attrs: Vec<usize>,
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
     control_curve: Option<Curve>,
@@ -205,6 +205,15 @@ struct DpDims {
 enum AimDir {
     MoreHandling,
     LessHandling,
+    Equal,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelDir {
+    Higher,
+    Lower,
+    Equal,
     Ignore,
 }
 
@@ -339,17 +348,21 @@ fn channel_ok(a: f64, b: f64, dir: TuneDir) -> bool {
 }
 
 fn aim_direction(constraints: &[Constraint]) -> AimDir {
+    let mut has_min = false;
+    let mut has_max = false;
     for c in constraints {
         if c.id != "handling-aim-time" {
             continue;
         }
-        return match (c.min.is_some(), c.max.is_some()) {
-            (false, true) => AimDir::MoreHandling,
-            (true, false) => AimDir::LessHandling,
-            _ => AimDir::Ignore,
-        };
+        has_min |= c.min.is_some();
+        has_max |= c.max.is_some();
     }
-    AimDir::Ignore
+    match (has_min, has_max) {
+        (false, true) => AimDir::MoreHandling,
+        (true, false) => AimDir::LessHandling,
+        (true, true) => AimDir::Equal,
+        _ => AimDir::Ignore,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -448,15 +461,23 @@ impl<'a> Solver<'a> {
             .collect();
         panel_attrs.sort();
         panel_attrs.dedup();
-        let panel_dirs: Vec<bool> = panel_attrs
+        let panel_dirs: Vec<PanelDir> = panel_attrs
             .iter()
             .map(|attr| {
-                options
-                    .constraints
-                    .iter()
-                    .find(|c| &c.id == attr)
-                    .map(|c| c.min.is_some() && c.max.is_none())
-                    .unwrap_or(false)
+                let mut has_min = false;
+                let mut has_max = false;
+                for c in &options.constraints {
+                    if &c.id == attr {
+                        has_min |= c.min.is_some();
+                        has_max |= c.max.is_some();
+                    }
+                }
+                match (has_min, has_max) {
+                    (true, false) => PanelDir::Higher,
+                    (false, true) => PanelDir::Lower,
+                    (true, true) => PanelDir::Equal,
+                    (false, false) => PanelDir::Ignore,
+                }
             })
             .collect();
         let seed_panel_attrs: Vec<usize> = panel_attrs
@@ -2268,7 +2289,7 @@ fn dp_dominates(
     a: &DpState,
     b: &DpState,
     dims: &DpDims,
-    panel_dirs: &[bool],
+    panel_dirs: &[PanelDir],
     aim_dir: AimDir,
 ) -> bool {
     let x = &a.metric;
@@ -2321,6 +2342,14 @@ fn dp_dominates(
                     return false;
                 }
             }
+            AimDir::Equal => {
+                if (x.hs - y.hs).abs() > 1e-9
+                    || (x.adsm - y.adsm).abs() > 1e-9
+                    || (x.eopen - y.eopen).abs() > 1e-9
+                {
+                    return false;
+                }
+            }
             AimDir::Ignore => {}
         }
     }
@@ -2328,14 +2357,23 @@ fn dp_dominates(
         return false;
     }
     for (idx, (a, b)) in x.panel.iter().zip(y.panel.iter()).enumerate() {
-        let higher_is_better = panel_dirs.get(idx).copied().unwrap_or(false);
-        let a_better = if higher_is_better {
-            *a >= *b - 1e-9
-        } else {
-            *a <= *b + 1e-9
-        };
-        if !a_better {
-            return false;
+        match panel_dirs.get(idx).copied().unwrap_or(PanelDir::Ignore) {
+            PanelDir::Higher => {
+                if *a < *b - 1e-9 {
+                    return false;
+                }
+            }
+            PanelDir::Lower => {
+                if *a > *b + 1e-9 {
+                    return false;
+                }
+            }
+            PanelDir::Equal => {
+                if (*a - *b).abs() > 1e-9 {
+                    return false;
+                }
+            }
+            PanelDir::Ignore => {}
         }
     }
     true
@@ -2345,7 +2383,7 @@ fn dp_dominates(
 fn dp_pareto(
     states: Vec<DpState>,
     dims: &DpDims,
-    panel_dirs: &[bool],
+    panel_dirs: &[PanelDir],
     aim_dir: AimDir,
 ) -> Vec<DpState> {
     dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None).0
@@ -2354,7 +2392,7 @@ fn dp_pareto(
 fn dp_pareto_capped(
     mut states: Vec<DpState>,
     dims: &DpDims,
-    panel_dirs: &[bool],
+    panel_dirs: &[PanelDir],
     aim_dir: AimDir,
     limit: usize,
     deadline_at: Option<u64>,
@@ -3141,7 +3179,7 @@ mod tests {
         let higher = part(10.0, 10, vec![50.0]);
         let mut dims = DpDims::default();
         dims.d = true;
-        let out = dp_pareto(vec![higher, lower], &dims, &[false], AimDir::Ignore);
+        let out = dp_pareto(vec![higher, lower], &dims, &[PanelDir::Lower], AimDir::Ignore);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric.panel[0], 40.0);
     }
@@ -3150,7 +3188,7 @@ mod tests {
     fn pareto_respects_panel_min_direction() {
         let lower = part(10.0, 10, vec![40.0]);
         let higher = part(10.0, 10, vec![50.0]);
-        let out = dp_pareto(vec![lower, higher], &DpDims::default(), &[true], AimDir::Ignore);
+        let out = dp_pareto(vec![lower, higher], &DpDims::default(), &[PanelDir::Higher], AimDir::Ignore);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric.panel[0], 50.0);
     }
