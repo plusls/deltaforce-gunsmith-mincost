@@ -164,6 +164,7 @@ pub struct Solver<'a> {
     panel_attrs: Vec<String>,
     panel_dirs: Vec<PanelDir>,
     seed_panel_attrs: Vec<usize>,
+    seed_aim: f64,
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
     tune_frontier_cache: FxHashMap<String, Rc<Vec<Offer>>>,
     control_curve: Option<Curve>,
@@ -415,6 +416,43 @@ fn aim_direction(constraints: &[Constraint]) -> AimDir {
     }
 }
 
+fn seed_aim_weight(constraints: &[Constraint]) -> f64 {
+    let mut has_min = false;
+    let mut has_max = false;
+    for c in constraints {
+        if c.id != "handling-aim-time" {
+            continue;
+        }
+        has_min |= c.min.is_some();
+        has_max |= c.max.is_some();
+    }
+    match (has_min, has_max) {
+        (false, true) => 1.0,
+        (true, false) => -1.0,
+        _ => 0.0,
+    }
+}
+
+fn rank_seed_candidates(candidates: Vec<(String, f64, i64)>) -> Vec<String> {
+    let mut candidates = candidates;
+    candidates.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    candidates.into_iter().map(|(id, _, _)| id).collect()
+}
+
+fn seed_metric_rank(metric: &ExactPart, panel_attrs: &[usize], aim: f64) -> f64 {
+    let mut score = metric.score();
+    for idx in panel_attrs {
+        score += metric.panel.get(*idx).copied().unwrap_or(0.0) * 100.0;
+    }
+    score += aim * (-metric.adsm * 100.0 + metric.hs * 0.02 + metric.eopen * 2.0);
+    score
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TuneReq {
     lower_h: f64,
@@ -631,6 +669,7 @@ impl<'a> Solver<'a> {
             panel_attrs,
             panel_dirs,
             seed_panel_attrs,
+            seed_aim: seed_aim_weight(&options.constraints),
             dp_metric_cache: FxHashMap::default(),
             tune_frontier_cache: FxHashMap::default(),
             control_curve,
@@ -882,7 +921,7 @@ impl<'a> Solver<'a> {
     }
 
     fn slot_actions(
-        &self,
+        &mut self,
         slot: &VisibleSlot,
         selections: &FxHashMap<String, Option<String>>,
     ) -> Vec<Action> {
@@ -933,20 +972,21 @@ impl<'a> Solver<'a> {
         } else {
             forced.push(Action::Remove);
         }
-        parts.sort_by(|a, b| {
-            if self.seed && !self.seed_panel_attrs.is_empty() {
-                let sa = self.seed_panel_score(a);
-                let sb = self.seed_panel_score(b);
-                sb.partial_cmp(&sa)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| self.part_price(a).cmp(&self.part_price(b)))
-                    .then_with(|| a.cmp(b))
-            } else {
+        if self.seed {
+            let mut ranked: Vec<(String, f64, i64)> = Vec::with_capacity(parts.len());
+            for id in parts {
+                let score = self.seed_part_score(&id, &slot.slot.name);
+                let price = self.part_price(&id);
+                ranked.push((id, score, price));
+            }
+            parts = rank_seed_candidates(ranked);
+        } else {
+            parts.sort_by(|a, b| {
                 let pa = self.part_price(a);
                 let pb = self.part_price(b);
                 pa.cmp(&pb).then(a.cmp(b))
-            }
-        });
+            });
+        }
         let mut part_actions: Vec<Action> = Vec::new();
         for id in parts {
             if Some(id.as_str()) == unset.as_deref() {
@@ -1159,29 +1199,19 @@ impl<'a> Solver<'a> {
         self.part_prices.get(id).copied().unwrap_or(0)
     }
 
-    fn seed_panel_score(&self, id: &str) -> f64 {
-        let Some(part) = self.payload.parts.get(id) else {
-            return 0.0;
+    fn seed_metric_score(&self, metric: &ExactPart) -> f64 {
+        seed_metric_rank(metric, &self.seed_panel_attrs, self.seed_aim)
+    }
+
+    fn seed_part_score(&mut self, id: &str, slot_name: &str) -> f64 {
+        let payload = self.payload;
+        let Some(part) = payload.parts.get(id) else {
+            return f64::NEG_INFINITY;
         };
-        let Some(list) = part.display_mods.get(&self.options.mode) else {
-            return 0.0;
-        };
-        let mut score = 0.0;
-        for m in list {
-            if m.condition_id.is_some() || m.modifier_type != "Addend" {
-                continue;
-            }
-            let Some(idx) = panel_attr_index(normalize_attr(m.attribute_id.as_deref())) else {
-                continue;
-            };
-            if !self.seed_panel_attrs.contains(&idx) {
-                continue;
-            }
-            if let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) {
-                score += delta;
-            }
-        }
-        score
+        let metric = self
+            .dp_option_for_part(part, slot_name, SlotChoice::Part(id.to_string()), &[])
+            .metric;
+        self.seed_metric_score(&metric)
     }
 
 
@@ -1401,7 +1431,23 @@ impl<'a> Solver<'a> {
             }
         }
 
-        states.sort_by_key(|s| s.cost);
+        if self.seed {
+            let mut ranked: Vec<(f64, i64, DpState)> = states
+                .into_iter()
+                .map(|st| {
+                    let rank = self.seed_metric_score(&st.metric);
+                    (rank, st.cost, st)
+                })
+                .collect();
+            ranked.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            states = ranked.into_iter().map(|(_, _, st)| st).collect();
+        } else {
+            states.sort_by_key(|s| s.cost);
+        }
         let mut h_max: Option<f64> = None;
         let mut v_max: Option<f64> = None;
         let mut k_max: Option<f64> = None;
@@ -1414,6 +1460,7 @@ impl<'a> Solver<'a> {
                 _ => continue,
             };
             *slot = Some(slot.map_or(max, |cur| cur.min(max)));
+        }
         }
         let aim_max = self
             .options
@@ -4266,6 +4313,85 @@ mod tests {
         a.add_a(&b);
         assert!((a.max_d - 7.0).abs() < 1e-9);
         assert!((a.min_c_h - 0.72).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seed_aim_weight_tracks_constraint_direction() {
+        assert_eq!(
+            seed_aim_weight(&[Constraint::new("handling-aim-time", None, Some(400.0))]),
+            1.0
+        );
+        assert_eq!(
+            seed_aim_weight(&[Constraint::new("handling-aim-time", Some(300.0), None)]),
+            -1.0
+        );
+        assert_eq!(
+            seed_aim_weight(&[Constraint::new("handling-aim-time", Some(300.0), Some(400.0))]),
+            0.0
+        );
+        assert_eq!(seed_aim_weight(&[]), 0.0);
+    }
+
+    #[test]
+    fn seed_ranking_prefers_constraint_gain_then_price() {
+        let ranked = rank_seed_candidates(vec![
+            ("cheap".to_string(), 1.0, 10),
+            ("strong".to_string(), 5.0, 90),
+            ("strong-cheap".to_string(), 5.0, 20),
+        ]);
+        assert_eq!(ranked, vec!["strong-cheap", "strong", "cheap"]);
+    }
+
+    #[test]
+    fn seed_metric_rank_prefers_recoil_gain() {
+        let weak = ExactPart {
+            ah: 0.1,
+            ..ExactPart::neutral()
+        };
+        let strong = ExactPart {
+            d: 10.0,
+            ah: -0.2,
+            ch: 0.9,
+            eh: 5.0,
+            ..ExactPart::neutral()
+        };
+        assert!(seed_metric_rank(&strong, &[], 0.0) > seed_metric_rank(&weak, &[], 0.0));
+    }
+
+    #[test]
+    fn seed_metric_rank_respects_aim_direction() {
+        let lower_ads = ExactPart {
+            adsm: -0.2,
+            eopen: 10.0,
+            ..ExactPart::neutral()
+        };
+        let higher_ads = ExactPart {
+            adsm: 0.2,
+            eopen: 0.0,
+            ..ExactPart::neutral()
+        };
+        assert!(
+            seed_metric_rank(&lower_ads, &[], 1.0) > seed_metric_rank(&higher_ads, &[], 1.0)
+        );
+        assert!(
+            seed_metric_rank(&higher_ads, &[], -1.0) > seed_metric_rank(&lower_ads, &[], -1.0)
+        );
+    }
+
+    #[test]
+    fn seed_metric_rank_respects_panel_min() {
+        let higher_panel = ExactPart {
+            panel: vec![60.0],
+            ..ExactPart::neutral()
+        };
+        let lower_panel = ExactPart {
+            panel: vec![40.0],
+            ..ExactPart::neutral()
+        };
+        assert!(
+            seed_metric_rank(&higher_panel, &[0], 0.0)
+                > seed_metric_rank(&lower_panel, &[0], 0.0)
+        );
     }
 
     fn offer() -> Offer {
