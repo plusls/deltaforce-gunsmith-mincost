@@ -503,7 +503,7 @@ laserEnabled: false
 
 站点自带的"生成智能配件方案"在同一组约束下返回无解, 说明 beam search 的 128 状态 / 24 轮限制确实会漏解.
 
-安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及模式, 价格口径, 缺价策略三个下拉框.
+安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及"完整模式", "市场价", "缺价排除"三个开关. 开关样式沿用站点面板的深色风格; 取消"市场价"时"缺价排除"自动置灰.
 
 ## 12. 已知限制
 

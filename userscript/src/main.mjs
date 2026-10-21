@@ -311,18 +311,26 @@ function installWorkerHook() {
   return { trigger };
 }
 
-function makeSelect(values, current, labels) {
-  const select = document.createElement("select");
-  select.style.cssText =
-    "padding:5px 6px;border-radius:6px;border:1px solid #555;background:#1b1b1b;color:#ddd;font-size:12px";
-  for (const value of values) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = labels[value] || value;
-    if (value === current) option.selected = true;
-    select.append(option);
-  }
-  return select;
+const MINCOST_FONT =
+  "Bahnschrift, 'DIN Alternate', 'Microsoft YaHei', sans-serif";
+
+function makeToggle(text, checked, title) {
+  const label = document.createElement("label");
+  label.style.cssText =
+    "display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none;white-space:nowrap";
+  label.title = title;
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.style.cssText =
+    "margin:0;width:13px;height:13px;accent-color:#22c55e;cursor:pointer";
+
+  const span = document.createElement("span");
+  span.textContent = text;
+
+  label.append(input, span);
+  return { label, input, span };
 }
 
 function injectButton(trigger) {
@@ -332,36 +340,72 @@ function injectButton(trigger) {
 
   const bar = document.createElement("div");
   bar.className = "gunsmith-mincost-bar";
-  bar.style.cssText =
-    "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 4px";
+  bar.style.cssText = "display:grid;gap:6px;margin-top:6px";
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "gunsmith-mincost-run";
   button.textContent = "最低开销";
   button.title = "在硬条件约束下搜索总价最低的配件方案";
-  button.style.cssText =
-    "padding:6px 12px;border-radius:6px;border:1px solid #42a36b;background:#1f8a55;color:#fff;font-weight:600;cursor:pointer";
-
-  const mode = makeSelect(["full", "fast"], settings.mode, {
-    full: "完整模式",
-    fast: "快速模式",
+  button.style.cssText = [
+    "width:100%",
+    "height:34px",
+    "padding:0 12px",
+    "border-radius:4px",
+    "border:1px solid rgba(34,197,94,0.45)",
+    "background:rgba(34,197,94,0.16)",
+    "color:#86efac",
+    `font:700 12px/1 ${MINCOST_FONT}`,
+    "letter-spacing:0.04em",
+    "cursor:pointer",
+    "transition:background .15s,border-color .15s",
+  ].join(";");
+  button.addEventListener("mouseenter", () => {
+    button.style.background = "rgba(34,197,94,0.26)";
+    button.style.borderColor = "rgba(34,197,94,0.65)";
   });
-  mode.title = "完整模式证明最优, 快速模式只找可行解";
-
-  const price = makeSelect(["current", "system"], settings.priceSource, {
-    current: "市场价",
-    system: "系统价",
+  button.addEventListener("mouseleave", () => {
+    button.style.background = "rgba(34,197,94,0.16)";
+    button.style.borderColor = "rgba(34,197,94,0.45)";
   });
-  price.title = "最小化的价格口径";
 
-  const missing = makeSelect(["reject", "fallback-system"], settings.missingPricePolicy, {
-    reject: "缺价排除",
-    "fallback-system": "缺价用系统价",
-  });
-  missing.title = "市场价缺失时的处理方式";
+  const options = document.createElement("div");
+  options.style.cssText = [
+    "display:flex",
+    "flex-wrap:wrap",
+    "gap:10px",
+    "align-items:center",
+    `font:500 11px/16px ${MINCOST_FONT}`,
+    "color:#a2a5ad",
+  ].join(";");
 
-  bar.append(button, mode, price, missing);
+  const mode = makeToggle(
+    "完整模式",
+    settings.mode !== "fast",
+    "勾选: 完整搜索并证明最优; 取消: 快速模式, 只找第一个可行解",
+  );
+  const price = makeToggle(
+    "市场价",
+    settings.priceSource !== "system",
+    "勾选: 按市场价最小化; 取消: 按系统价最小化",
+  );
+  const missing = makeToggle(
+    "缺价排除",
+    settings.missingPricePolicy !== "fallback-system",
+    "市场价缺失时: 勾选排除该配件; 取消用系统价代替",
+  );
+
+  function syncMissing() {
+    const disabled = !price.input.checked;
+    missing.input.disabled = disabled;
+    missing.label.style.opacity = disabled ? "0.45" : "1";
+    missing.label.style.cursor = disabled ? "default" : "pointer";
+  }
+  price.input.addEventListener("change", syncMissing);
+  syncMissing();
+
+  options.append(mode.label, price.label, missing.label);
+  bar.append(button, options);
   siteButton.insertAdjacentElement("afterend", bar);
 
   button.addEventListener("click", () => {
@@ -374,9 +418,9 @@ function injectButton(trigger) {
       alert("智能配装面板当前不可用");
       return;
     }
-    settings.mode = mode.value;
-    settings.priceSource = price.value;
-    settings.missingPricePolicy = missing.value;
+    settings.mode = mode.input.checked ? "full" : "fast";
+    settings.priceSource = price.input.checked ? "current" : "system";
+    settings.missingPricePolicy = missing.input.checked ? "reject" : "fallback-system";
     saveSettings();
     trigger(settings.mode);
     target.click();
