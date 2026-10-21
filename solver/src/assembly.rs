@@ -90,6 +90,7 @@ pub struct Assembler<'a> {
     defaults: Map<String, DefaultNode>,
     virtual_groups: Vec<(String, Vec<&'a VirtualRule>)>,
     hide_overrides: Vec<&'a crate::model::CandidateOverride>,
+    excluded: FxHashSet<String>,
 }
 
 impl<'a> Assembler<'a> {
@@ -145,7 +146,17 @@ impl<'a> Assembler<'a> {
             defaults,
             virtual_groups,
             hide_overrides,
+            excluded: FxHashSet::default(),
         }
+    }
+
+    pub fn set_excluded(&mut self, excluded: FxHashSet<String>) {
+        if excluded.is_empty() {
+            return;
+        }
+        self.defaults
+            .retain(|_, node| !excluded.contains(&node.part_id));
+        self.excluded = excluded;
     }
 
     pub fn default_tune(&self, path: &str, part_id: &str, tune_id: &str) -> Option<f64> {
@@ -229,7 +240,7 @@ impl<'a> Assembler<'a> {
             let Some(part) = self.payload.parts.get(part_id) else {
                 continue;
             };
-            if part.is_virtual {
+            if part.is_virtual || self.excluded.contains(&part.id) {
                 continue;
             }
             if let Some(slot_id) = socket_id_from_path(path) {
@@ -291,7 +302,7 @@ impl<'a> Assembler<'a> {
                 let Some(part) = self.payload.parts.get(&rule.virtual_part_id) else {
                     continue;
                 };
-                if !part.is_virtual {
+                if !part.is_virtual || self.excluded.contains(&part.id) {
                     continue;
                 }
                 let sockets = socket_set(socket_id, part);
@@ -524,7 +535,7 @@ impl<'a> Assembler<'a> {
             .iter()
             .filter_map(|id| self.payload.parts.get(id))
             .filter(|part| {
-                if part.is_virtual || part.is_hidden() {
+                if part.is_virtual || part.is_hidden() || self.excluded.contains(&part.id) {
                     return false;
                 }
                 !self.hide_overrides.iter().any(|ov| {

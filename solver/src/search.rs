@@ -432,7 +432,8 @@ impl<'a> Solver<'a> {
         prices: &'a FxHashMap<String, i64>,
         options: &'a SolveOptions,
     ) -> Self {
-        let assembler = Assembler::new(payload, weapon_id);
+        let mut assembler = Assembler::new(payload, weapon_id);
+        assembler.set_excluded(options.excluded_part_ids.clone());
         let evaluator = Evaluator {
             payload,
             weapon_id,
