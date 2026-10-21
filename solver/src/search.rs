@@ -3368,7 +3368,13 @@ fn optimistic_recoil_exceeds(
         };
         if gunkick0 != 0.0 {
             let s = gk / gunkick0 * (1.0 - metric.ek / 100.0) * metric.ck;
-            if s > max + 1e-9 {
+            let rounded0 = ((gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
+            let lower = if rounded0 == 0.0 {
+                s
+            } else {
+                s - (0.005 / rounded0.abs() + 0.005)
+            };
+            if lower > max + 1e-9 {
                 return true;
             }
         }
@@ -3870,6 +3876,37 @@ mod tests {
             Some(&gunkick),
             1.0,
             &lowered,
+        ));
+    }
+
+    #[test]
+    fn optimistic_prefilter_keeps_fire_stability_rounding_slack() {
+        let control = curve(&[(0.0, 1.0), (100.0, 1.0)]);
+        let gunkick = curve(&[(0.0, 1.0), (100.0, 1.0)]);
+        let mut state = state_metric(0.0, 0.0, 1.0, 0.0);
+        state.ck = 0.772;
+        // The real metric is round2(round2(1.0) * 0.772) / 1.0 = 0.77, so the
+        // state is feasible even though the raw s is above the constraint.
+        assert!(!optimistic_recoil_exceeds(
+            &state,
+            None,
+            None,
+            Some(0.77),
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+        state.ck = 0.9;
+        assert!(optimistic_recoil_exceeds(
+            &state,
+            None,
+            None,
+            Some(0.77),
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
         ));
     }
 
