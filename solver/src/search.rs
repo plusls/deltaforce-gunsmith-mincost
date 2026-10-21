@@ -1502,12 +1502,7 @@ impl<'a> Solver<'a> {
             return;
         }
         let assembly = self.assembler.resolve(selections);
-        let installed: Vec<Part> = self
-            .evaluator
-            .installed_parts(&assembly)
-            .into_iter()
-            .cloned()
-            .collect();
+        let installed: Vec<&Part> = self.evaluator.installed_parts(&assembly);
         let rec = self.recoil_base(&installed);
         if rec.is_none()
             && self
@@ -1531,9 +1526,8 @@ impl<'a> Solver<'a> {
             },
             None => TuneReq::unconstrained(),
         };
-        let installed_refs: Vec<&Part> = installed.iter().collect();
         let Some((tuning_state, chosen)) =
-            self.pick_tuning(&instances, &req, &installed_refs)
+            self.pick_tuning(&instances, &req, &installed)
         else {
             return;
         };
@@ -1653,7 +1647,7 @@ impl<'a> Solver<'a> {
         }
     }
 
-    fn recoil_base(&self, parts: &[Part]) -> Option<BaseRecoil> {
+    fn recoil_base(&self, parts: &[&Part]) -> Option<BaseRecoil> {
         let profile = self.payload.numeric_profiles.get(self.evaluator.weapon_id)?;
         let mode = &self.options.mode;
         let mut d = 0.0;
