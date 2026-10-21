@@ -1,0 +1,15 @@
+# Python-generated files
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Rust / WASM
+/target
