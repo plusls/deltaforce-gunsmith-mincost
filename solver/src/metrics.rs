@@ -1165,7 +1165,7 @@ fn is_bipod_like(part: &Part) -> bool {
     has_gunkick && has_h && has_v && has_breath
 }
 
-fn scale_factor(base: Option<f64>, current: Option<f64>) -> f64 {
+pub(crate) fn scale_factor(base: Option<f64>, current: Option<f64>) -> f64 {
     match (base, current) {
         (Some(b), Some(c)) => {
             if b == 0.0 {

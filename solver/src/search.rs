@@ -1,9 +1,9 @@
 use crate::assembly::{Assembler, VisibleSlot};
 use crate::constraint_reduction::reduce_stability_constraints;
 use crate::metrics::{
-    eval_curve_points, quantize, tune_channels, tune_offer, tune_offer_values, tuning_available,
-    DetailMetrics, DetailSums, Evaluator, TuningInstance, TuningState, DETAIL_METRICS,
-    HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
+    eval_curve_points, quantize, scale_factor, tune_channels, tune_offer, tune_offer_values,
+    tuning_available, DetailMetrics, DetailSums, Evaluator, TuningInstance, TuningState,
+    DETAIL_METRICS, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
 };
 use crate::model::{Curve, CurveKey, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1279,8 +1279,14 @@ impl<'a> Solver<'a> {
         if !gk.is_finite() {
             return false;
         }
-        let f_h = cr * (1.0 + bound.min_a_h + bound.min_t_h) * bound.min_c_h;
-        let f_v = cr * (1.0 + bound.min_a_v + bound.min_t_v) * bound.min_c_v;
+        let mut f_h = cr * (1.0 + bound.min_a_h + bound.min_t_h) * bound.min_c_h;
+        let mut f_v = cr * (1.0 + bound.min_a_v + bound.min_t_v) * bound.min_c_v;
+        // The bound covers every installable part, so the optimistic recoil is
+        // the raw value times the smallest aim scale any part can apply.
+        if self.aim_scale.enabled {
+            f_h = f_h * self.aim_scale.h_factor - self.aim_scale.h_margin;
+            f_v = f_v * self.aim_scale.v_factor - self.aim_scale.v_margin;
+        }
         let s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
         for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
@@ -1396,14 +1402,18 @@ impl<'a> Solver<'a> {
                         } else {
                             (st.metric.ck * sb.ck_min).max(0.0)
                         };
-                        let f_h = cr.max(0.0)
+                        let mut f_h = cr.max(0.0)
                             * (1.0 + st.metric.ah + sb.ah_min - 0.01 * (st.metric.eh + sb.eh_max))
                                 .max(0.0)
                             * c_h;
-                        let f_v = cr.max(0.0)
+                        let mut f_v = cr.max(0.0)
                             * (1.0 + st.metric.av + sb.av_min - 0.01 * (st.metric.ev + sb.ev_max))
                                 .max(0.0)
                             * c_v;
+                        if self.aim_scale.enabled {
+                            f_h = f_h * self.aim_scale.h_factor - self.aim_scale.h_margin;
+                            f_v = f_v * self.aim_scale.v_factor - self.aim_scale.v_margin;
+                        }
                         let s = (gk / self.gunkick0).max(0.0)
                             * (1.0 - 0.01 * (st.metric.ek + sb.ek_max)).max(0.0)
                             * c_k;
@@ -2363,6 +2373,15 @@ impl<'a> Solver<'a> {
         if gk0 == 0.0 {
             return None;
         }
+        // The evaluator replaces the aim profile with the last installed part
+        // that provides one, then scales raw recoil by override / base.
+        let base_aim = &profile.linked_tables.aim_recoil;
+        let mut aim = base_aim;
+        for part in parts {
+            if let Some(over) = part.aim_recoil_profiles.get(mode) {
+                aim = over;
+            }
+        }
         Some(BaseRecoil {
             a_h,
             a_v,
@@ -2371,6 +2390,22 @@ impl<'a> Solver<'a> {
             c_k,
             cr,
             gk_ratio: gk / gk0,
+            cont_h_scale: scale_factor(
+                base_aim.continue_shoot.horizontal_scale,
+                aim.continue_shoot.horizontal_scale,
+            ),
+            cont_v_scale: scale_factor(
+                base_aim.continue_shoot.vertical_scale,
+                aim.continue_shoot.vertical_scale,
+            ),
+            single_h_scale: scale_factor(
+                base_aim.single_or_burst.horizontal_scale,
+                aim.single_or_burst.horizontal_scale,
+            ),
+            single_v_scale: scale_factor(
+                base_aim.single_or_burst.vertical_scale,
+                aim.single_or_burst.vertical_scale,
+            ),
         })
     }
 
@@ -2396,12 +2431,10 @@ impl<'a> Solver<'a> {
                 _ => continue,
             };
             let (k, base) = match c.id.as_str() {
-                "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
-                    (b.cr * b.c_h, 1.0 + b.a_h)
-                }
-                "recoil-continuous-vertical" | "recoil-single-vertical" => {
-                    (b.cr * b.c_v, 1.0 + b.a_v)
-                }
+                "recoil-continuous-horizontal" => (b.cr * b.c_h * b.cont_h_scale, 1.0 + b.a_h),
+                "recoil-single-horizontal" => (b.cr * b.c_h * b.single_h_scale, 1.0 + b.a_h),
+                "recoil-continuous-vertical" => (b.cr * b.c_v * b.cont_v_scale, 1.0 + b.a_v),
+                "recoil-single-vertical" => (b.cr * b.c_v * b.single_v_scale, 1.0 + b.a_v),
                 _ => (b.gk_ratio * b.c_k, 1.0),
             };
             if let Some(thr) = c.max {
@@ -4410,6 +4443,12 @@ struct BaseRecoil {
     c_k: f64,
     cr: f64,
     gk_ratio: f64,
+    /// Aim-profile scale applied to continuous horizontal/vertical recoil.
+    cont_h_scale: f64,
+    cont_v_scale: f64,
+    /// Aim-profile scale applied to single/burst horizontal/vertical recoil.
+    single_h_scale: f64,
+    single_v_scale: f64,
 }
 
 fn cubic_coeffs(a: &CurveKey, b: &CurveKey) -> (f64, f64, f64) {

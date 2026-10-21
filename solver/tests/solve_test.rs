@@ -614,6 +614,42 @@ fn audit_split_aim_constraints_use_the_equality_direction() {
     assert_eq!(audit_best_price(&payload, request), Some(1200));
 }
 
+#[test]
+fn audit_aim_scale_applies_to_recoil_feasibility_and_bounds() {
+    let parts = json!({
+        "w1": {"id": "w1", "name": "gun"},
+        "p1": audit_part("p1", json!({
+            "rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.2, "vertical": -0.2}}
+        })),
+        "p2": audit_part("p2", json!({
+            "rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.5, "vertical": -0.5}},
+            "aimRecoilProfilesByMode": {"operations": {
+                "ContinueShootRecoil": {"HorizontalScale": 1.0, "VerticalScale": 0.4},
+                "SingleOrBurstShootRecoil": {"HorizontalScale": 1.0, "VerticalScale": 0.4}
+            }}
+        }))
+    });
+    let payload = audit_payload(
+        json!([{"id": "1", "name": "Muzzle_point", "candidateIds": ["p1", "p2"]}]),
+        parts,
+        json!({}),
+    );
+    let prices = json!({"w1": 1000, "p1": 100, "p2": 50});
+    let tight = audit_request(
+        prices.clone(),
+        json!([{"id": "recoil-continuous-vertical", "max": 0.45}]),
+    );
+    let loose = audit_request(
+        prices,
+        json!([{"id": "recoil-continuous-vertical", "max": 0.5}]),
+    );
+    assert_eq!(audit_best_price(&payload, tight), Some(1050));
+    let out = run_payload(&payload, loose);
+    assert_eq!(out["optimal"], true);
+    assert_eq!(out["best"]["total_price"], 1050);
+    assert_eq!(out["best"]["recoil"]["continuous_v"], json!(0.12));
+}
+
 fn audit_tune_effect(name: &str, tune_id: &str) -> Value {
     json!({
         "tune_id": tune_id,
