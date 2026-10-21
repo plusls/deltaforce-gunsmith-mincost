@@ -1,4 +1,5 @@
 use crate::assembly::{Assembler, VisibleSlot};
+use crate::constraint_reduction::reduce_stability_constraints;
 use crate::metrics::{
     eval_curve_points, quantize, tune_channels, tune_offer, tune_offer_values, tuning_available,
     DetailMetrics, DetailSums, Evaluator, TuningInstance, TuningState, DETAIL_METRICS,
@@ -151,6 +152,7 @@ pub struct Solver<'a> {
     assembler: Assembler<'a>,
     evaluator: Evaluator<'a>,
     options: &'a SolveOptions,
+    search_constraints: Vec<Constraint>,
     relevance: Relevance,
     offer_cache: FxHashMap<(String, String), Vec<Offer>>,
     part_bounds: FxHashMap<String, MetricBound>,
@@ -622,7 +624,9 @@ impl<'a> Solver<'a> {
             bipod_deployed: options.bipod_deployed,
             prices,
         };
-        let relevance = compute_relevance(payload, weapon_id, options);
+        let search_constraints =
+            reduce_stability_constraints(payload, weapon_id, &options.mode, &options.constraints);
+        let relevance = compute_relevance(payload, weapon_id, &search_constraints);
         let flat_bounds = compute_bounds(payload, weapon_id, &options.mode, options.laser_enabled);
         let mut slot_bounds: FxHashMap<String, FxHashMap<String, MetricBound>> =
             FxHashMap::default();
@@ -706,8 +710,7 @@ impl<'a> Solver<'a> {
                 structural_parts.insert(id.clone());
             }
         }
-        let mut panel_attrs: Vec<String> = options
-            .constraints
+        let mut panel_attrs: Vec<String> = search_constraints
             .iter()
             .filter(|c| is_panel_attr(&c.id))
             .map(|c| c.id.clone())
@@ -719,7 +722,7 @@ impl<'a> Solver<'a> {
             .map(|attr| {
                 let mut has_min = false;
                 let mut has_max = false;
-                for c in &options.constraints {
+                for c in &search_constraints {
                     if &c.id == attr {
                         has_min |= c.min.is_some();
                         has_max |= c.max.is_some();
@@ -737,14 +740,13 @@ impl<'a> Solver<'a> {
             .iter()
             .enumerate()
             .filter(|(_, attr)| {
-                options
-                    .constraints
+                search_constraints
                     .iter()
                     .any(|c| &c.id == *attr && c.min.is_some())
             })
             .map(|(idx, _)| idx)
             .collect();
-        let mut dp_ok = options.constraints.iter().all(|c| {
+        let mut dp_ok = search_constraints.iter().all(|c| {
             if c.id == "10001" {
                 false
             } else if is_panel_attr(&c.id) {
@@ -757,7 +759,7 @@ impl<'a> Solver<'a> {
                 false
             }
         });
-        let dp_dims = DpDims::from_constraints(&options.constraints);
+        let dp_dims = DpDims::from_constraints(&search_constraints);
         if dp_dims.d && !curves_nonincreasing {
             dp_ok = false;
         }
@@ -795,12 +797,13 @@ impl<'a> Solver<'a> {
             structural_parts,
             dp_ok,
             dp_dims,
-            tune_dims: TuneDims::from_constraints(&options.constraints),
-            aim_dp: aim_direction(&options.constraints),
+            tune_dims: TuneDims::from_constraints(&search_constraints),
+            aim_dp: aim_direction(&search_constraints),
             panel_attrs,
             panel_dirs,
             seed_panel_attrs,
-            seed_aim: seed_aim_weight(&options.constraints),
+            seed_aim: seed_aim_weight(&search_constraints),
+            search_constraints,
             dp_metric_cache: FxHashMap::default(),
             tune_frontier_cache: FxHashMap::default(),
             control_curve,
@@ -1154,13 +1157,11 @@ impl<'a> Solver<'a> {
         decided: &FxHashSet<String>,
     ) -> bool {
         let has_panel = self
-            .options
-            .constraints
+            .search_constraints
             .iter()
             .any(|c| is_panel_attr(&c.id) && c.id != "10001");
         let has_recoil_max = self
-            .options
-            .constraints
+            .search_constraints
             .iter()
             .any(|c| c.max.is_some() && is_recoil_metric(&c.id));
         if !has_panel && !has_recoil_max {
@@ -1231,7 +1232,7 @@ impl<'a> Solver<'a> {
                 bound.add_a(b);
             }
         }
-        for c in &self.options.constraints {
+        for c in &self.search_constraints {
             if let Some(idx) = panel_attr_index(&c.id) {
                 if idx == 0 {
                     continue;
@@ -1281,7 +1282,7 @@ impl<'a> Solver<'a> {
         let f_h = cr * (1.0 + bound.min_a_h + bound.min_t_h) * bound.min_c_h;
         let f_v = cr * (1.0 + bound.min_a_v + bound.min_t_v) * bound.min_c_v;
         let s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
-        for c in &self.options.constraints {
+        for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
             let value = match c.id.as_str() {
                 "recoil-continuous-horizontal" => f_h,
@@ -1358,7 +1359,7 @@ impl<'a> Solver<'a> {
     fn dp_level_may_satisfy(&self, st: &DpState, sb: &DpSuffixBound) -> bool {
         let mut has_recoil = false;
         let mut aim_max: Option<f64> = None;
-        for c in &self.options.constraints {
+        for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
             match c.id.as_str() {
                 "recoil-continuous-horizontal"
@@ -1406,7 +1407,7 @@ impl<'a> Solver<'a> {
                         let s = (gk / self.gunkick0).max(0.0)
                             * (1.0 - 0.01 * (st.metric.ek + sb.ek_max)).max(0.0)
                             * c_k;
-                        for c in &self.options.constraints {
+                        for c in &self.search_constraints {
                             let Some(max) = c.max else { continue };
                             if max < 0.0 {
                                 continue;
@@ -1771,8 +1772,8 @@ impl<'a> Solver<'a> {
         } else {
             states.sort_by_key(|s| s.cost);
         }
-        let (h_max, v_max, k_max) = recoil_maxima(&self.options.constraints);
-        let aim_max = aim_time_max(&self.options.constraints);
+        let (h_max, v_max, k_max) = recoil_maxima(&self.search_constraints);
+        let aim_max = aim_time_max(&self.search_constraints);
         for st in states {
             if self.budget_exceeded() {
                 return;
@@ -1844,8 +1845,8 @@ impl<'a> Solver<'a> {
         if options_per_slot.is_empty() {
             return false;
         }
-        let (h_max, v_max, k_max) = recoil_maxima(&self.options.constraints);
-        let aim_max = aim_time_max(&self.options.constraints);
+        let (h_max, v_max, k_max) = recoil_maxima(&self.search_constraints);
+        let aim_max = aim_time_max(&self.search_constraints);
         if h_max.is_none() && v_max.is_none() && k_max.is_none() && aim_max.is_none() {
             return false;
         }
@@ -2383,7 +2384,7 @@ impl<'a> Solver<'a> {
             upper_k: f64::INFINITY,
             impossible: false,
         };
-        for c in &self.options.constraints {
+        for c in &self.search_constraints {
             let (lower, upper) = match c.id.as_str() {
                 "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
                     (&mut req.lower_h, &mut req.upper_h)
@@ -2440,7 +2441,7 @@ impl<'a> Solver<'a> {
             return ExactTune::Unsupported;
         }
         let mut aim_max: Option<f64> = None;
-        for c in &self.options.constraints {
+        for c in &self.search_constraints {
             if c.id == "handling-aim-time" {
                 if c.min.is_some() {
                     return ExactTune::Unsupported;
@@ -4983,18 +4984,17 @@ fn is_bipod(part: &Part) -> bool {
 fn compute_relevance(
     payload: &WeaponPayload,
     weapon_id: &str,
-    options: &SolveOptions,
+    constraints: &[Constraint],
 ) -> Relevance {
     let mut parts: FxHashSet<String> = FxHashSet::default();
     let mut direct: FxHashSet<String> = FxHashSet::default();
     let mut attribute_constraints: FxHashSet<String> = FxHashSet::default();
-    for c in &options.constraints {
+    for c in constraints {
         if c.id.chars().all(|ch| ch.is_ascii_digit()) {
             attribute_constraints.insert(c.id.clone());
         }
     }
-    let detail_ids: FxHashSet<&str> = options
-        .constraints
+    let detail_ids: FxHashSet<&str> = constraints
         .iter()
         .map(|c| c.id.as_str())
         .filter(|id| DETAIL_METRICS.contains(id))

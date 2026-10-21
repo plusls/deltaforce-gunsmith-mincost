@@ -1,4 +1,5 @@
 pub mod assembly;
+pub mod constraint_reduction;
 pub mod metrics;
 pub mod model;
 pub mod search;

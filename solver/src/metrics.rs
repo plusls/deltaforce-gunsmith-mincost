@@ -1,7 +1,6 @@
-use crate::assembly::{Assembly, Assembler};
+use crate::assembly::{Assembler, Assembly};
 use crate::model::{
-    AimRecoil, CurveKey, FlexibleId, Modifier, Part, TuningOption,
-    WeaponPayload,
+    AimRecoil, CurveKey, FlexibleId, Modifier, NumericProfile, Part, TuningOption, WeaponPayload,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -108,8 +107,8 @@ pub const HANDLING_ATTRS: [&str; 8] = [
     "10006", "10016", "10040", "10081", "10090", "100109", "100125", "100138",
 ];
 pub const STABILITY_ATTRS: [&str; 12] = [
-    "10007", "10044", "10056", "10083", "10086", "10087", "10088", "10089", "100101",
-    "100105", "100123", "100124",
+    "10007", "10044", "10056", "10083", "10086", "10087", "10088", "10089", "100101", "100105",
+    "100123", "100124",
 ];
 pub const HIPFIRE_ATTRS: [&str; 7] = [
     "10008", "10011", "100104", "100111", "100112", "100116", "100128",
@@ -175,10 +174,7 @@ impl<'a> Evaluator<'a> {
         out
     }
 
-    pub fn tunable_instances(
-        &self,
-        assembly: &Assembly,
-    ) -> Vec<TuningInstance<'a>> {
+    pub fn tunable_instances(&self, assembly: &Assembly) -> Vec<TuningInstance<'a>> {
         let mut out = Vec::new();
         for slot in &assembly.visible_slots {
             if let Some(id) = &slot.selected_part_id {
@@ -227,7 +223,10 @@ impl<'a> Evaluator<'a> {
                         .default_tune(&inst.slot_path, &inst.part.id, &tune.tune_id)
                         .unwrap_or(tune.default_value)
                 });
-                out.insert(key, quantize(raw, tune.min_value, tune.max_value, tune.step_value));
+                out.insert(
+                    key,
+                    quantize(raw, tune.min_value, tune.max_value, tune.step_value),
+                );
             }
         }
         out
@@ -254,7 +253,12 @@ impl<'a> Evaluator<'a> {
 
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = has_laser(part, mode);
-            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for m in part
+                .main_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 if !is_addend(m) {
                     continue;
                 }
@@ -285,7 +289,9 @@ impl<'a> Evaluator<'a> {
                 if m.modifier_type != "Mult_C" {
                     continue;
                 }
-                let Some(p) = m.param1.map(|v| v.0) else { continue };
+                let Some(p) = m.param1.map(|v| v.0) else {
+                    continue;
+                };
                 if !p.is_finite() {
                     continue;
                 }
@@ -303,7 +309,11 @@ impl<'a> Evaluator<'a> {
                 }
             }
             if (!bipod_like || self.bipod_deployed) && !has_explicit_spring_c {
-                if let Some(k) = part.raw_recoil.get(mode).and_then(|r| r.gunkick_spring_mult_c) {
+                if let Some(k) = part
+                    .raw_recoil
+                    .get(mode)
+                    .and_then(|r| r.gunkick_spring_mult_c)
+                {
                     if k.is_finite() {
                         spring_c *= 1.0 + k;
                     }
@@ -321,7 +331,10 @@ impl<'a> Evaluator<'a> {
 
         let curves = &profile.linked_tables.recoil_curves;
         let control = if self.mode == "warfare" {
-            curves.recoil_control_mp.as_ref().or(curves.recoil_control.as_ref())
+            curves
+                .recoil_control_mp
+                .as_ref()
+                .or(curves.recoil_control.as_ref())
         } else {
             curves.recoil_control.as_ref()
         }?;
@@ -353,19 +366,31 @@ impl<'a> Evaluator<'a> {
         let ratio = |base: Option<f64>, mult: f64| -> f64 { scale_ratio(base, mult) };
         let cont_h = ratio(
             base_aim.continue_shoot.horizontal_scale,
-            f_h * scale_factor(base_aim.continue_shoot.horizontal_scale, aim.continue_shoot.horizontal_scale),
+            f_h * scale_factor(
+                base_aim.continue_shoot.horizontal_scale,
+                aim.continue_shoot.horizontal_scale,
+            ),
         );
         let cont_v = ratio(
             base_aim.continue_shoot.vertical_scale,
-            f_v * scale_factor(base_aim.continue_shoot.vertical_scale, aim.continue_shoot.vertical_scale),
+            f_v * scale_factor(
+                base_aim.continue_shoot.vertical_scale,
+                aim.continue_shoot.vertical_scale,
+            ),
         );
         let single_h = ratio(
             base_aim.single_or_burst.horizontal_scale,
-            f_h * scale_factor(base_aim.single_or_burst.horizontal_scale, aim.single_or_burst.horizontal_scale),
+            f_h * scale_factor(
+                base_aim.single_or_burst.horizontal_scale,
+                aim.single_or_burst.horizontal_scale,
+            ),
         );
         let single_v = ratio(
             base_aim.single_or_burst.vertical_scale,
-            f_v * scale_factor(base_aim.single_or_burst.vertical_scale, aim.single_or_burst.vertical_scale),
+            f_v * scale_factor(
+                base_aim.single_or_burst.vertical_scale,
+                aim.single_or_burst.vertical_scale,
+            ),
         );
         let fire_stability = ratio(Some(p0), s);
 
@@ -402,7 +427,12 @@ impl<'a> Evaluator<'a> {
                     *effects
                         .entry(effect.attribute_name_snapshot.clone())
                         .or_insert(0.0) += effect_value;
-                    apply_runtime_targets(&mut runtime, tune, &effect.attribute_name_snapshot, effect_value);
+                    apply_runtime_targets(
+                        &mut runtime,
+                        tune,
+                        &effect.attribute_name_snapshot,
+                        effect_value,
+                    );
                 }
             }
         }
@@ -513,12 +543,7 @@ impl<'a> Evaluator<'a> {
         self.detail_with(parts, &sums)
     }
 
-    pub fn aim_time(
-        &self,
-        handling_add: f64,
-        ads_time_mult: f64,
-        open_speed: f64,
-    ) -> Option<f64> {
+    pub fn aim_time(&self, handling_add: f64, ads_time_mult: f64, open_speed: f64) -> Option<f64> {
         let profile = self.payload.numeric_profiles.get(self.weapon_id)?;
         let stats = self.payload.weapon_stats.get(self.weapon_id)?;
         let mode_stats = stats.by_mode.get(self.mode)?;
@@ -558,7 +583,12 @@ impl<'a> Evaluator<'a> {
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
-            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for m in part
+                .main_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
                     continue;
                 }
@@ -567,7 +597,9 @@ impl<'a> Evaluator<'a> {
                 }
             }
             for m in part.raw_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
-                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                let Some(param) = m.param1.map(|v| v.0) else {
+                    continue;
+                };
                 if !param.is_finite() {
                     continue;
                 }
@@ -605,18 +637,24 @@ impl<'a> Evaluator<'a> {
         let mut breath_c = 1.0;
         let mut ads_time_mult = 0.0;
         let mut move_addend = 0.0;
-        let mut seen_raw: FxHashSet<(String, String, String, u64, String)> =
-            FxHashSet::default();
+        let mut seen_raw: FxHashSet<(String, String, String, u64, String)> = FxHashSet::default();
         let mut reload = jnum(&profile.detail.raw_weapon_attribute, "ChangeClipTime");
-        let mut empty_reload =
-            jnum(&profile.detail.raw_weapon_attribute, "ChangeClipTimeWhenEmpty");
+        let mut empty_reload = jnum(
+            &profile.detail.raw_weapon_attribute,
+            "ChangeClipTimeWhenEmpty",
+        );
 
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = has_laser(part, mode);
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
-            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for m in part
+                .main_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
                     continue;
                 }
@@ -649,7 +687,9 @@ impl<'a> Evaluator<'a> {
             }
             let bipod_like = is_bipod_like(part);
             for m in part.raw_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
-                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                let Some(param) = m.param1.map(|v| v.0) else {
+                    continue;
+                };
                 if !param.is_finite() {
                     continue;
                 }
@@ -659,8 +699,7 @@ impl<'a> Evaluator<'a> {
                 {
                     breath_c *= param;
                 }
-                let counted = m.target_path == "GAiming_ADSTime"
-                    && m.modifier_type == "Mult_A"
+                let counted = m.target_path == "GAiming_ADSTime" && m.modifier_type == "Mult_A"
                     || m.target_path == "GMovement_ADSSpeed" && m.modifier_type == "Addend";
                 if !counted {
                     continue;
@@ -687,7 +726,9 @@ impl<'a> Evaluator<'a> {
                 .map(|v| v.as_slice())
                 .unwrap_or(&[])
             {
-                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                let Some(param) = m.param1.map(|v| v.0) else {
+                    continue;
+                };
                 if !param.is_finite() {
                     continue;
                 }
@@ -749,9 +790,7 @@ impl<'a> Evaluator<'a> {
         let move_stability = sums.move_stability;
         let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
         let handling_score = base_stat("10006").unwrap_or(0.0) + handling;
-        let baseline = ops_base_10006
-            .or_else(|| base_stat("10006"))
-            .unwrap_or(0.0);
+        let baseline = ops_base_10006.or_else(|| base_stat("10006")).unwrap_or(0.0);
         let handling_delta = handling_score - baseline;
 
         let curves = &profile.linked_tables.handling_curves;
@@ -759,7 +798,10 @@ impl<'a> Evaluator<'a> {
 
         let sprint_speed = jnum(&profile.detail.raw_weapon_attribute, "SprintToFireSpeed");
         let sprint_curve = if mode == "warfare" {
-            curves.sprint_to_fire_mp.as_ref().or(curves.sprint_to_fire.as_ref())
+            curves
+                .sprint_to_fire_mp
+                .as_ref()
+                .or(curves.sprint_to_fire.as_ref())
         } else {
             curves.sprint_to_fire.as_ref()
         };
@@ -776,9 +818,7 @@ impl<'a> Evaluator<'a> {
         });
         out.sprint_fire_delay = sprint_ms.or_else(|| {
             sprint_speed.map(|base| {
-                ms_floor(
-                    base * clamp_factor((1.0 - handling * 0.015) / (1.0 + open_speed / 100.0)),
-                )
+                ms_floor(base * clamp_factor((1.0 - handling * 0.015) / (1.0 + open_speed / 100.0)))
             })
         });
 
@@ -799,15 +839,14 @@ impl<'a> Evaluator<'a> {
         };
         let tune_move = sums.move_runtime;
         out.aim_move_speed = match (base_aim_speed, stand_run, strafe_curve) {
-            (Some(base), Some(run), Some(curve)) => curve.eval(handling_delta).map(|scale| {
-                base + run * scale / 100.0 + run * (move_addend + tune_move) / 100.0
-            }),
+            (Some(base), Some(run), Some(curve)) => curve
+                .eval(handling_delta)
+                .map(|scale| base + run * scale / 100.0 + run * (move_addend + tune_move) / 100.0),
             _ => None,
         };
         if out.aim_move_speed.is_none() {
-            out.aim_move_speed = base_aim_speed.map(|base| {
-                base * clamp_factor(1.0 + handling * 0.015 + move_speed / 100.0)
-            });
+            out.aim_move_speed = base_aim_speed
+                .map(|base| base * clamp_factor(1.0 + handling * 0.015 + move_speed / 100.0));
         }
 
         out.reload_time = reload;
@@ -823,7 +862,9 @@ impl<'a> Evaluator<'a> {
             .as_array()
             .and_then(|list| list.first());
         let hold = hold.unwrap_or(&serde_json::Value::Null);
-        let breath_config = hold.get("WeaponBreathConfig").unwrap_or(&serde_json::Value::Null);
+        let breath_config = hold
+            .get("WeaponBreathConfig")
+            .unwrap_or(&serde_json::Value::Null);
         let breath_factor = jnum(hold, "StandBreathFactor");
         let atten_speed = jnum(breath_config, "AttenSpeed");
         let movement_camera_scale = profile
@@ -831,8 +872,14 @@ impl<'a> Evaluator<'a> {
             .raw_supporting_values
             .get("stability")
             .and_then(|s| jnum(s, "GSMovement_CameraScale"));
-        let pitch_amp = jnum(&profile.linked_tables.aim_recoil.shake_pitch, "WholeAmplitude");
-        let yaw_amp = jnum(&profile.linked_tables.aim_recoil.shake_yaw, "WholeAmplitude");
+        let pitch_amp = jnum(
+            &profile.linked_tables.aim_recoil.shake_pitch,
+            "WholeAmplitude",
+        );
+        let yaw_amp = jnum(
+            &profile.linked_tables.aim_recoil.shake_yaw,
+            "WholeAmplitude",
+        );
         let recoil_scale_x = hold.get("RecoilScale").and_then(|v| jnum(v, "X"));
         let recoil_scale_y = hold.get("RecoilScale").and_then(|v| jnum(v, "Y"));
         let stability_curves = &profile.linked_tables.stability_curves;
@@ -869,7 +916,13 @@ impl<'a> Evaluator<'a> {
                 .hold_breath_recoil
                 .as_ref()
                 .and_then(|c| c.eval(stability));
-            if let (Some(breath_scale), Some(breath_time), Some(fire_camera), Some(movement_camera), Some(hold_recoil)) = (
+            if let (
+                Some(breath_scale),
+                Some(breath_time),
+                Some(fire_camera),
+                Some(movement_camera),
+                Some(hold_recoil),
+            ) = (
                 breath_scale,
                 breath_time,
                 fire_camera,
@@ -878,8 +931,7 @@ impl<'a> Evaluator<'a> {
             ) {
                 let breath_inv = 1.0 / (1.0 + breath_stability / 100.0).max(0.1);
                 let move_inv = 1.0 / (1.0 + move_stability / 100.0).max(0.1);
-                let raw_range =
-                    breath_factor.unwrap() * breath_c * 0.4 * breath_scale * breath_inv;
+                let raw_range = breath_factor.unwrap() * breath_c * 0.4 * breath_scale * breath_inv;
                 let raw_duration =
                     100.0 / (atten_speed.unwrap() * breath_time) * (1.0 / breath_inv);
                 let movement_ratio = movement_camera * move_inv;
@@ -915,8 +967,12 @@ impl<'a> Evaluator<'a> {
         let mut attachment = 0i64;
         let mut missing = 0usize;
         for slot in &assembly.visible_slots {
-            let Some(id) = &slot.selected_part_id else { continue };
-            let Some(part) = self.payload.parts.get(id) else { continue };
+            let Some(id) = &slot.selected_part_id else {
+                continue;
+            };
+            let Some(part) = self.payload.parts.get(id) else {
+                continue;
+            };
             if part.is_virtual {
                 continue;
             }
@@ -926,7 +982,9 @@ impl<'a> Evaluator<'a> {
             }
         }
         for item in &assembly.internal_parts {
-            let Some(part) = self.payload.parts.get(&item.part_id) else { continue };
+            let Some(part) = self.payload.parts.get(&item.part_id) else {
+                continue;
+            };
             if part.is_virtual {
                 continue;
             }
@@ -1111,7 +1169,11 @@ fn scale_factor(base: Option<f64>, current: Option<f64>) -> f64 {
     match (base, current) {
         (Some(b), Some(c)) => {
             if b == 0.0 {
-                if c == 0.0 { 1.0 } else { 0.0 }
+                if c == 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
                 c / b
             }
@@ -1122,6 +1184,54 @@ fn scale_factor(base: Option<f64>, current: Option<f64>) -> f64 {
 
 fn round2(value: f64) -> f64 {
     ((value + f64::EPSILON) * 100.0).round() / 100.0
+}
+
+/// Value of a stability detail metric when every non-`dS` input is neutral:
+/// breath scale multiplier 1, breath stability divisor 1 and movement
+/// stability divisor 1. Mirrors the corresponding branches of `detail_with`
+/// so callers may invert the metric against the stability score.
+///
+/// Returns `None` when the profile lacks any value that `detail_with` requires
+/// before it emits stability metrics at all (all five curves must evaluate).
+pub fn stability_metric_at(profile: &NumericProfile, id: &str, stability: f64) -> Option<f64> {
+    let hold = profile.linked_tables.hold_breath.as_array()?.first()?;
+    let breath_config = hold.get("WeaponBreathConfig")?;
+    let breath_factor = jnum(hold, "StandBreathFactor")?;
+    let atten_speed = jnum(breath_config, "AttenSpeed").filter(|v| *v > 0.0)?;
+    let movement_camera_scale = jnum(
+        profile.detail.raw_supporting_values.get("stability")?,
+        "GSMovement_CameraScale",
+    )?;
+    jnum(
+        &profile.linked_tables.aim_recoil.shake_pitch,
+        "WholeAmplitude",
+    )?;
+    jnum(
+        &profile.linked_tables.aim_recoil.shake_yaw,
+        "WholeAmplitude",
+    )?;
+    hold.get("RecoilScale").and_then(|v| jnum(v, "X"))?;
+    hold.get("RecoilScale").and_then(|v| jnum(v, "Y"))?;
+
+    let curves = &profile.linked_tables.stability_curves;
+    let breath_scale = curves.breath_scale.as_ref()?.eval(stability)?;
+    let breath_time = curves
+        .breath_time
+        .as_ref()?
+        .eval(stability)
+        .filter(|v| *v != 0.0)?;
+    let fire_camera = curves.fire_camera_stability.as_ref()?.eval(stability)?;
+    let movement_camera = curves.movement_camera_stability.as_ref()?.eval(stability)?;
+    let hold_recoil = curves.hold_breath_recoil.as_ref()?.eval(stability)?;
+
+    match id {
+        "stability-fire-camera" => Some(round2(fire_camera)),
+        "stability-movement-camera" => Some(round2(movement_camera * movement_camera_scale)),
+        "stability-hold-breath-recoil" => Some(hold_recoil),
+        "stability-breath-range" => Some(breath_factor * 0.4 * breath_scale),
+        "stability-breath-duration" => Some(100.0 / (atten_speed * breath_time)),
+        _ => None,
+    }
 }
 
 fn fround(value: f64) -> f64 {
@@ -1350,11 +1460,7 @@ pub fn tune_offer(tune: &TuningOption, value: f64) -> (f64, f64, f64) {
 }
 
 pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
-    let mut values = vec![
-        tune.min_value,
-        tune.max_value,
-        tune.default_value,
-    ];
+    let mut values = vec![tune.min_value, tune.max_value, tune.default_value];
     for effect in &tune.display_effects {
         for key in &effect.curve_points {
             values.push(key.time);
