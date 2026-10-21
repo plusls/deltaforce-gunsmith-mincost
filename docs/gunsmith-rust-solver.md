@@ -109,7 +109,7 @@
 - `D`: 主属性 `10005` 加成之和
 - `A_H/A_V`: 原始 `rawRecoil.horizontal/vertical` 之和
 - `C_H/C_V/C_K`: 原始 `Mult_C` 倍率之积
-- `E_H/E_V/E_K`: 该配件精校能提供的最大通道收益
+- `E_H/E_V/E_K`: 该配件精校可达的通道收益集合. 各通道上限不能同时取到, 因此状态上记录的是四维 (H/V/K/开镜) 收益向量的可达包络, 不是逐维最大值
 - `hs`: handling 分数 (主要来自 `10006` Addend), 决定 `adsTime` 曲线输入
 - `adsm`: `GAiming_ADSTime` 的 `Mult_A` 倍率之和
 - `eopen`: 精校在 `handling-aim-time` 方向上的最大收益
@@ -121,21 +121,21 @@
     A.D    >= B.D
     A.A    <= B.A
     A.C    <= B.C
-    A.E    >= B.E
+    A.E    >= B.E          (能力包络包含, 不是逐维比较)
     A.panel <= B.panel   (仅对 max 约束)
     A.hs   >= B.hs       (仅当 aim 约束是 max, 即需要更大 handling)
     A.hs   <= B.hs       (仅当 aim 约束是 min)
     A.adsm <= B.adsm
     A.eopen >= B.eopen   (max 约束) / <= (min 约束)
 
-`handling-aim-time` 的 `min` 和 `max` 都参与 DP, 方向由 `AimDir` 决定; 同时出现 min 和 max 时方向退化为 `Ignore`, 该维度不做支配剪枝. 其余 14 个细分指标在 `dp_ok` 中被判为不可 DP, 直接退回逐组合枚举.
+`handling-aim-time` 的 `min` 和 `max` 都参与 DP, 方向由 `AimDir` 决定; 同时出现 min 和 max 时方向退化为 `Ignore`, 该维度不做支配剪枝. 其余细分指标在 `dp_ok` 中被判为不可 DP, 直接退回逐组合枚举; 其中可归约的单调稳定性曲线指标按下一节映射到面板约束, 不落入这条回退.
 
 每个槽位的选项包括 unset, remove 和所有非结构候选. 逐槽做笛卡尔积后立即做 Pareto 剪枝.
 
 设计要点:
 
 - `D` 越大, 后坐力曲线 `Cr(D)` 和 `Gk(D)` 通常越小, 所以 `D` 方向为越大越好. 实现在做界时同时评估曲线两端, 兼容非单调曲线.
-- 精校每个 tune 只影响一个后坐力通道 (`%额外后坐力控制` 同时作用于 H/V, 值是同一个). 因此各通道取最大收益是可同时达到的, 不会出现"取了 H 最大值就达不到 V 最大值"的问题.
+- 精校每个 tune 只影响一个后坐力通道 (`%额外后坐力控制` 同时作用于 H/V, 值是同一个). 但精校通道互斥, 逐维取最大会剪掉真实可行的解, 所以支配判定比较的是状态上的可达能力包络: 只有当 A 的包络在每一维都覆盖 B 的包络时, A 才支配 B. 包络随状态合并, 去重也按包络等价判断.
 - 激光/两脚架/瞄准镜这些带条件或 profile 的配件都在结构层, 不会进入 DP 的乐观估计.
 - 精校可用性用 `tuningSocketAvailability` 和槽位名判断, 不可用时不记收益.
 - 面板 DP 支持单独的 max 或 min 约束; 同一属性同时有 min 和 max 时关闭 DP. `10001` 始终关闭 DP.
