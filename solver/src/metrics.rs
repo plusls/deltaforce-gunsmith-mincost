@@ -934,7 +934,7 @@ impl<'a> Evaluator<'a> {
                 let raw_range = breath_factor.unwrap() * breath_c * 0.4 * breath_scale * breath_inv;
                 let raw_duration =
                     100.0 / (atten_speed.unwrap() * breath_time) * (1.0 / breath_inv);
-                let movement_ratio = movement_camera * move_inv;
+                let movement_ratio = movement_camera * movement_camera_scale.unwrap() * move_inv;
                 out.breath_range = Some(raw_range);
                 out.breath_duration = Some(raw_duration);
                 out.movement_camera = Some(round2(movement_ratio));
@@ -1263,7 +1263,7 @@ fn effect_sum(effects: &FxHashMap<String, f64>, needles: &[&str]) -> f64 {
         .sum()
 }
 
-fn scale_ratio(base: Option<f64>, multiplier: f64) -> f64 {
+pub(crate) fn scale_ratio(base: Option<f64>, multiplier: f64) -> f64 {
     let Some(base) = base else { return multiplier };
     let b = round2(base);
     if b == 0.0 {
