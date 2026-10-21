@@ -1609,14 +1609,13 @@ impl<'a> Solver<'a> {
         };
         self.best_cost = total_price;
         if self.best.is_some() {
-            let prev = self.best.replace(solution.clone());
+            let prev = self.best.replace(solution);
             if let Some(prev) = prev {
                 self.push_alternative(prev);
             }
         } else {
-            self.best = Some(solution.clone());
+            self.best = Some(solution);
         }
-        self.push_alternative(solution);
         self.run_found = true;
         if self.seed {
             self.stop = true;
