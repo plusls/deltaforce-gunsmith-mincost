@@ -1,0 +1,25 @@
+{
+ "prices": {
+  "w1": 1000,
+  "p_spike": 100,
+  "p_low": 50
+ },
+ "weaponId": "w1",
+ "mode": "operations",
+ "laserEnabled": true,
+ "bipodDeployed": false,
+ "lockedPathKeys": {},
+ "lockedTuningKeys": {},
+ "excludedPartIds": [],
+ "constraints": [
+  {
+   "id": "stability-fire-camera",
+   "min": 0.44193661511015364
+  }
+ ],
+ "maxEvaluations": 5000000,
+ "maxLeaves": 2000000,
+ "maxResults": 0,
+ "firstSolution": false,
+ "deadlineMs": 20000
+}

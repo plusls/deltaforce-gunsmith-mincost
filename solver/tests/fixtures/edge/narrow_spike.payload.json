@@ -1,0 +1,305 @@
+{
+ "dataVersion": "edgehunt-narrow",
+ "parts": {
+  "w1": {
+   "id": "w1",
+   "name": "gun"
+  },
+  "p_spike": {
+   "id": "p_spike",
+   "name": "p_spike",
+   "modifiersByMode": {
+    "operations": [
+     {
+      "attributeId": "10007",
+      "modifierType": "Addend",
+      "delta": 33.7803
+     }
+    ]
+   }
+  },
+  "p_low": {
+   "id": "p_low",
+   "name": "p_low",
+   "modifiersByMode": {
+    "operations": [
+     {
+      "attributeId": "10007",
+      "modifierType": "Addend",
+      "delta": 10.0
+     }
+    ]
+   }
+  }
+ },
+ "slotsByHost": {
+  "w1": [
+   {
+    "id": "1",
+    "name": "Muzzle_point",
+    "candidateIds": [
+     "p_spike",
+     "p_low"
+    ]
+   }
+  ]
+ },
+ "defaultPresetsByWeapon": {
+  "w1": {
+   "nodes": [
+    {
+     "isRoot": true,
+     "partId": "w1"
+    }
+   ]
+  }
+ },
+ "virtualRulesByWeapon": {
+  "w1": []
+ },
+ "candidateOverridesByWeapon": {},
+ "weaponStatsById": {
+  "w1": {
+   "byMode": {
+    "operations": {
+     "base": {
+      "10001": 55,
+      "10005": 48,
+      "10006": 50,
+      "10007": 50,
+      "10008": 50
+     },
+     "display": {
+      "10001": 55,
+      "10005": 48,
+      "10006": 50,
+      "10007": 50,
+      "10008": 50
+     }
+    }
+   }
+  }
+ },
+ "weaponNumericProfilesById": {
+  "w1": {
+   "linkedTables": {
+    "aimRecoil": {
+     "ContinueShootRecoil": {
+      "HorizontalScale": 1.5,
+      "VerticalScale": 1.7
+     },
+     "SingleOrBurstShootRecoil": {
+      "HorizontalScale": 1.2,
+      "VerticalScale": 1.3
+     },
+     "RecoilShakePitchWithCurve": {
+      "WholeAmplitude": 1.0
+     },
+     "RecoilShakeYawWithCurve": {
+      "WholeAmplitude": 1.0
+     }
+    },
+    "recoilCurves": {
+     "recoilControl": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     },
+     "gunkick": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     }
+    },
+    "handlingCurves": {
+     "adsTime": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 2.0
+       },
+       {
+        "Time": 100,
+        "Value": 1.0
+       }
+      ]
+     },
+     "sprintToFire": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     },
+     "adsStrafeSpeed": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 0.0
+       },
+       {
+        "Time": 100,
+        "Value": 1.0
+       }
+      ]
+     },
+     "hipSpread": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     }
+    },
+    "stabilityCurves": {
+     "breathScale": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     },
+     "breathTime": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 2.0
+       }
+      ]
+     },
+     "fireCameraStability": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 0.0
+       },
+       {
+        "Time": 33.77907408868787,
+        "Value": 0.3377907408868787
+       },
+       {
+        "Time": 33.78068946895568,
+        "Value": 0.5042613163675739
+       },
+       {
+        "Time": 33.78291182614341,
+        "Value": 0.3378291182614341
+       },
+       {
+        "Time": 100,
+        "Value": 1.0
+       }
+      ]
+     },
+     "movementCameraStability": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     },
+     "holdBreathRecoil": {
+      "keys": [
+       {
+        "Time": 0,
+        "Value": 1.0
+       },
+       {
+        "Time": 100,
+        "Value": 0.5
+       }
+      ]
+     }
+    },
+    "waistSpread": {
+     "AreaSize": [
+      10.0
+     ],
+     "SpreadMax": {
+      "X": 20.0,
+      "Y": 20.0
+     },
+     "LuaDisplaySpreadFactor": 1.0,
+     "LuaDisplaySpreadUIFactor": 1.25
+    },
+    "aiming": {
+     "AimingOnAnimTime": 0.5
+    },
+    "movementByMode": {
+     "operations": {
+      "StandRunSpeed": 300.0,
+      "StandAimSpeedFactor": -0.5
+     }
+    },
+    "holdBreath": [
+     {
+      "StandBreathFactor": 1.0,
+      "WeaponBreathConfig": {
+       "AttenSpeed": 1.0
+      },
+      "RecoilScale": {
+       "X": 1.0,
+       "Y": 1.0
+      }
+     }
+    ]
+   },
+   "detail": {
+    "raw_weapon_attribute": {
+     "ChangeClipTime": 2.0,
+     "ChangeClipTimeWhenEmpty": 2.5,
+     "EquipTime": 0.7,
+     "UnEquipTime": 0.8,
+     "SprintToFireSpeed": 0.3,
+     "GunSwayBeHitScale": 1.0
+    },
+    "raw_supporting_values": {
+     "handling": {
+      "AimingOnAnimTime": 0.5
+     },
+     "stability": {
+      "GSMovement_CameraScale": 1.0
+     }
+    }
+   }
+  }
+ }
+}

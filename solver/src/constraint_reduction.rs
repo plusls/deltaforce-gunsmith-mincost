@@ -14,7 +14,7 @@
 //! never correctness of the reported build.
 
 use crate::metrics::{stability_metric_at, STABILITY_ATTRS};
-use crate::model::WeaponPayload;
+use crate::model::{Curve, NumericProfile, WeaponPayload};
 use crate::search::Constraint;
 
 pub const REDUCIBLE_STABILITY_METRICS: [&str; 5] = [
@@ -26,7 +26,6 @@ pub const REDUCIBLE_STABILITY_METRICS: [&str; 5] = [
 ];
 
 const STABILITY_PANEL_ATTR: &str = "10007";
-const SAMPLES: usize = 8192;
 const BISECT_STEPS: usize = 128;
 const BOUND_EPS: f64 = 1e-7;
 
@@ -120,7 +119,9 @@ fn reduce_one(
 ) -> Option<Reduction> {
     let metric = c.id.as_str();
     let f = |x: f64| stability_metric_at(profile, metric, x);
-    let dir = classify_direction(&f, domain_lo, domain_hi)?;
+    let curve = stability_curve_for_metric(profile, metric)?;
+    let points = critical_points(curve, domain_lo, domain_hi);
+    let dir = classify_direction(&f, &points)?;
 
     if let Some(max) = c.max {
         let sat = |v: f64| v <= max + 1e-9;
@@ -228,16 +229,97 @@ fn bisect(
     Some(if lowest { b } else { a })
 }
 
-fn classify_direction(f: &impl Fn(f64) -> Option<f64>, lo: f64, hi: f64) -> Option<Direction> {
-    if !(hi > lo) {
+fn stability_curve_for_metric<'a>(profile: &'a NumericProfile, metric: &str) -> Option<&'a Curve> {
+    let curves = &profile.linked_tables.stability_curves;
+    match metric {
+        "stability-fire-camera" => curves.fire_camera_stability.as_ref(),
+        "stability-movement-camera" => curves.movement_camera_stability.as_ref(),
+        "stability-hold-breath-recoil" => curves.hold_breath_recoil.as_ref(),
+        "stability-breath-range" => curves.breath_scale.as_ref(),
+        "stability-breath-duration" => curves.breath_time.as_ref(),
+        _ => None,
+    }
+}
+
+/// Every point where the composed metric can change direction: curve keys,
+/// interior extrema of cubic segments, segment midpoints and both sides of a
+/// key. Between two consecutive points the metric is monotone, so checking
+/// these points decides the direction exactly. Uniform sampling can step over
+/// a non-monotone feature that is narrower than the sample spacing.
+fn critical_points(curve: &Curve, lo: f64, hi: f64) -> Vec<f64> {
+    let mut points = vec![lo, hi];
+    let keys = &curve.keys;
+    if keys.is_empty() {
+        return points;
+    }
+    let span = (hi - lo).abs().max(1.0);
+    let eps = span * 1e-9;
+    for key in keys {
+        points.push(key.time);
+        points.push(key.time - eps);
+        points.push(key.time + eps);
+    }
+    for pair in keys.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        let dt = b.time - a.time;
+        if dt <= 0.0 {
+            continue;
+        }
+        points.push(a.time + dt * 0.5);
+        if a.interp_mode == "RCIM_Cubic" {
+            // p'(t) = A t^2 + B t + C with
+            // A = 6(v0-v1) + 3 dt (m0+m1)
+            // B = 6(v1-v0) - 4 dt m0 - 2 dt m1
+            // C = dt m0
+            let v0 = a.value;
+            let v1 = b.value;
+            let m0 = a.leave_tangent;
+            let m1 = b.arrive_tangent;
+            let qa = 6.0 * (v0 - v1) + 3.0 * dt * (m0 + m1);
+            let qb = 6.0 * (v1 - v0) - 4.0 * dt * m0 - 2.0 * dt * m1;
+            let qc = dt * m0;
+            let mut roots = [f64::NAN; 2];
+            let mut count = 0;
+            if qa.abs() <= f64::EPSILON {
+                if qb.abs() > f64::EPSILON {
+                    roots[0] = -qc / qb;
+                    count = 1;
+                }
+            } else {
+                let disc = qb * qb - 4.0 * qa * qc;
+                if disc >= 0.0 {
+                    let root = disc.sqrt();
+                    roots[0] = (-qb - root) / (2.0 * qa);
+                    roots[1] = (-qb + root) / (2.0 * qa);
+                    count = 2;
+                }
+            }
+            for root in roots.into_iter().take(count) {
+                if root > 0.0 && root < 1.0 {
+                    points.push(a.time + dt * root);
+                }
+            }
+        }
+    }
+    points.retain(|x| x.is_finite() && *x >= lo && *x <= hi);
+    points.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    points.dedup_by(|a, b| *a == *b);
+    points
+}
+
+fn classify_direction(f: &impl Fn(f64) -> Option<f64>, points: &[f64]) -> Option<Direction> {
+    let mut prev = f(*points.first()?)?;
+    if !prev.is_finite() {
         return None;
     }
-    let mut prev = f(lo)?;
     let mut increasing = true;
     let mut decreasing = true;
-    for index in 1..=SAMPLES {
-        let x = lo + (hi - lo) * (index as f64) / (SAMPLES as f64);
+    for &x in &points[1..] {
         let value = f(x)?;
+        if !value.is_finite() {
+            return None;
+        }
         if value < prev - 1e-12 {
             increasing = false;
         }
