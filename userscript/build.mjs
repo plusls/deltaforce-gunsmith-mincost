@@ -57,7 +57,7 @@ ${mainSource}
 const metadata = `// ==UserScript==
 // @name         moligod 改枪最低开销
 // @namespace    https://github.com/plusls/delta-weapon-custom
-// @version      0.2.0
+// @version      0.3.0
 // @description  在硬条件约束下搜索总价最低的改枪方案
 // @match        https://moligod.com/gunsmith/*
 // @match        https://moligod.com/gunsmith
