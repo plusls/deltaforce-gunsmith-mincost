@@ -337,6 +337,16 @@ node solver/js/smoke.mjs \
 
 ## 7. 实测结果
 
+### 性能回归用例
+
+`solver/tests/slow_regression_test.rs` 固化了曾经很慢的真实请求 (开镜时间 mix、no_aim、aim400 等), 断言最优价格、`optimal=true`、`truncated=false`. 这些用例默认标记为 ignored, 改动求解器后需要显式跑一遍:
+
+```bash
+cargo test --release --test slow_regression_test -- --ignored --nocapture
+```
+
+原生 release 下单线程耗时合计约 9.5 s (测试默认并行执行).
+
 环境: WSL2, Rust 1.98.1, release + LTO.
 
 ### 7.1 RM277 约束搜索
