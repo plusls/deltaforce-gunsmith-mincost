@@ -171,6 +171,7 @@ pub struct Solver<'a> {
     control_min: Option<f64>,
     gunkick_min: Option<f64>,
     gunkick0: f64,
+    aim_scale: AimScaleFloor,
     weapon_price: i64,
     seed: bool,
     cost_cap: i64,
@@ -636,6 +637,7 @@ impl<'a> Solver<'a> {
             control_min,
             gunkick_min,
             gunkick0,
+            aim_scale: aim_scale_floor(payload, weapon_id, &options.mode),
             weapon_price,
             seed: false,
             cost_cap: i64::MAX,
@@ -1388,6 +1390,19 @@ impl<'a> Solver<'a> {
         }
 
         states.sort_by_key(|s| s.cost);
+        let mut h_max: Option<f64> = None;
+        let mut v_max: Option<f64> = None;
+        let mut k_max: Option<f64> = None;
+        for c in &self.options.constraints {
+            let Some(max) = c.max else { continue };
+            let slot = match c.id.as_str() {
+                "recoil-continuous-horizontal" | "recoil-single-horizontal" => &mut h_max,
+                "recoil-continuous-vertical" | "recoil-single-vertical" => &mut v_max,
+                "recoil-fire-stability" => &mut k_max,
+                _ => continue,
+            };
+            *slot = Some(slot.map_or(max, |cur| cur.min(max)));
+        }
         let aim_max = self
             .options
             .constraints
@@ -1397,6 +1412,18 @@ impl<'a> Solver<'a> {
         for st in states {
             if self.budget_exceeded() {
                 return;
+            }
+            if optimistic_recoil_exceeds(
+                &st.metric,
+                h_max,
+                v_max,
+                k_max,
+                self.control_curve.as_ref(),
+                self.gunkick_curve.as_ref(),
+                self.gunkick0,
+                &self.aim_scale,
+            ) {
+                continue;
             }
             if let Some(max) = aim_max {
                 if let Some(best) = self.evaluator.aim_time(
@@ -3168,6 +3195,187 @@ fn apply_linear_req(
 }
 
 
+/// Lower bound on the aim-scale multiplier applied to raw recoil, per axis.
+/// A part with `aimRecoilProfilesByMode` can replace the base aim profile, and
+/// `Evaluator::evaluate` multiplies the raw recoil by `override / base`. Values
+/// below 1 shrink the constrained metric, so the prefilter must scale its
+/// optimistic value by the smallest factor any installable part could apply,
+/// and subtract the rounding error of `scale_ratio`.
+#[derive(Debug, Clone, Copy)]
+struct AimScaleFloor {
+    h_factor: f64,
+    v_factor: f64,
+    h_margin: f64,
+    v_margin: f64,
+    enabled: bool,
+}
+
+impl AimScaleFloor {
+    fn identity() -> Self {
+        Self {
+            h_factor: 1.0,
+            v_factor: 1.0,
+            h_margin: 0.0,
+            v_margin: 0.0,
+            enabled: true,
+        }
+    }
+}
+
+fn aim_round2(value: f64) -> f64 {
+    ((value + f64::EPSILON) * 100.0).round() / 100.0
+}
+
+/// Folds one base/override pair into `(min factor, max rounding margin)`.
+/// Returns false when the pair leaves the domain where the factor is a
+/// monotone lower bound; the caller then disables the axis prefilter.
+fn fold_aim_scale(acc: &mut (f64, f64), base: Option<f64>, current: Option<f64>) -> bool {
+    let Some(base) = base else {
+        return true;
+    };
+    if !base.is_finite() || current.is_some_and(|c| !c.is_finite()) {
+        return false;
+    }
+    if base == 0.0 {
+        if current.is_some_and(|c| c != 0.0) {
+            acc.0 = 0.0;
+        }
+        return true;
+    }
+    let rounded = aim_round2(base);
+    if rounded == 0.0 {
+        let factor = current.map_or(1.0, |c| c / base);
+        acc.0 = acc.0.min(factor);
+        return true;
+    }
+    if rounded < 0.0 || current.is_some_and(|c| c < 0.0) {
+        return false;
+    }
+    let factor = current.map_or(1.0, |c| c / base);
+    let margin = 0.005 / rounded + 0.005;
+    acc.0 = acc.0.min(factor);
+    acc.1 = acc.1.max(margin);
+    true
+}
+
+fn aim_scale_floor(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> AimScaleFloor {
+    let mut floor = AimScaleFloor::identity();
+    let Some(base) = payload
+        .numeric_profiles
+        .get(weapon_id)
+        .map(|p| &p.linked_tables.aim_recoil)
+    else {
+        return floor;
+    };
+    let mut h = (1.0f64, 0.0f64);
+    let mut v = (1.0f64, 0.0f64);
+    if !fold_aim_scale(
+        &mut h,
+        base.continue_shoot.horizontal_scale,
+        base.continue_shoot.horizontal_scale,
+    ) || !fold_aim_scale(
+        &mut h,
+        base.single_or_burst.horizontal_scale,
+        base.single_or_burst.horizontal_scale,
+    ) || !fold_aim_scale(
+        &mut v,
+        base.continue_shoot.vertical_scale,
+        base.continue_shoot.vertical_scale,
+    ) || !fold_aim_scale(
+        &mut v,
+        base.single_or_burst.vertical_scale,
+        base.single_or_burst.vertical_scale,
+    ) {
+        floor.enabled = false;
+        return floor;
+    }
+    for part in payload.parts.values() {
+        let Some(over) = part.aim_recoil_profiles.get(mode) else {
+            continue;
+        };
+        if !fold_aim_scale(
+            &mut h,
+            base.continue_shoot.horizontal_scale,
+            over.continue_shoot.horizontal_scale,
+        ) || !fold_aim_scale(
+            &mut h,
+            base.single_or_burst.horizontal_scale,
+            over.single_or_burst.horizontal_scale,
+        ) || !fold_aim_scale(
+            &mut v,
+            base.continue_shoot.vertical_scale,
+            over.continue_shoot.vertical_scale,
+        ) || !fold_aim_scale(
+            &mut v,
+            base.single_or_burst.vertical_scale,
+            over.single_or_burst.vertical_scale,
+        ) {
+            floor.enabled = false;
+            return floor;
+        }
+    }
+    floor.h_factor = h.0;
+    floor.v_factor = v.0;
+    floor.h_margin = h.1;
+    floor.v_margin = v.1;
+    floor
+}
+
+/// Reject a fully assembled DP state when even the best possible tuning cannot
+/// bring recoil under a max constraint. `ExactPart.eh/ev/ek` are per-part maxima
+/// over every tuning value, so `-eh/100` is the largest recoil reduction the
+/// tuning pass could apply; the result is a lower bound on the real recoil.
+/// The raw recoil is additionally scaled by the aim profile override, so the
+/// bound uses the smallest multiplier any candidate part could apply.
+#[allow(clippy::too_many_arguments)]
+fn optimistic_recoil_exceeds(
+    metric: &ExactPart,
+    h_max: Option<f64>,
+    v_max: Option<f64>,
+    k_max: Option<f64>,
+    control: Option<&Curve>,
+    gunkick: Option<&Curve>,
+    gunkick0: f64,
+    aim: &AimScaleFloor,
+) -> bool {
+    if h_max.is_none() && v_max.is_none() && k_max.is_none() {
+        return false;
+    }
+    let Some(cr) = control.and_then(|c| c.eval(metric.d)) else {
+        return false;
+    };
+    if let Some(max) = h_max {
+        if aim.enabled {
+            let f_h = cr * (1.0 + metric.ah - metric.eh / 100.0) * metric.ch;
+            let lower = f_h * aim.h_factor - aim.h_margin;
+            if lower > max + 1e-9 {
+                return true;
+            }
+        }
+    }
+    if let Some(max) = v_max {
+        if aim.enabled {
+            let f_v = cr * (1.0 + metric.av - metric.ev / 100.0) * metric.cv;
+            let lower = f_v * aim.v_factor - aim.v_margin;
+            if lower > max + 1e-9 {
+                return true;
+            }
+        }
+    }
+    if let Some(max) = k_max {
+        let Some(gk) = gunkick.and_then(|c| c.eval(metric.d)) else {
+            return false;
+        };
+        if gunkick0 != 0.0 {
+            let s = gk / gunkick0 * (1.0 - metric.ek / 100.0) * metric.ck;
+            if s > max + 1e-9 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn metric_value(id: &str, metrics: &crate::metrics::BuildMetrics) -> Option<f64> {
     match id {
         "recoil-continuous-horizontal" => Some(metrics.recoil.continuous_h),
@@ -3523,6 +3731,327 @@ mod tests {
                 .collect(),
             ..serde_json::from_value(serde_json::json!({ "id": id })).unwrap()
         }
+    }
+
+    fn curve(points: &[(f64, f64)]) -> Curve {
+        Curve {
+            keys: points
+                .iter()
+                .map(|(time, value)| crate::model::CurveKey {
+                    time: *time,
+                    value: *value,
+                    interp_mode: "RCIM_Linear".to_string(),
+                    leave_tangent: 0.0,
+                    arrive_tangent: 0.0,
+                    key_index: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn state_metric(d: f64, ah: f64, ch: f64, eh: f64) -> ExactPart {
+        ExactPart {
+            d,
+            ah,
+            ch,
+            eh,
+            cv: 1.0,
+            ck: 1.0,
+            panel: Vec::new(),
+            ..ExactPart::neutral()
+        }
+    }
+
+    #[test]
+    fn optimistic_prefilter_rejects_only_unreachable_states() {
+        let control = curve(&[(0.0, 1.0), (100.0, 0.5)]);
+        let gunkick = curve(&[(0.0, 1.0), (100.0, 0.5)]);
+        // f_h = 1.0 * (1 + 0 - 0.5) * 1 = 0.5
+        let tuned = state_metric(0.0, 0.0, 1.0, 50.0);
+        assert!(!optimistic_recoil_exceeds(
+            &tuned,
+            Some(0.55),
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+        assert!(optimistic_recoil_exceeds(
+            &tuned,
+            Some(0.49),
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+        // Without tuning headroom the same state is already at 1.0.
+        let untuned = state_metric(0.0, 0.0, 1.0, 0.0);
+        assert!(optimistic_recoil_exceeds(
+            &untuned,
+            Some(0.9),
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+    }
+
+    #[test]
+    fn optimistic_prefilter_is_disabled_without_curves_or_bounds() {
+        let state = state_metric(0.0, 0.0, 1.0, 0.0);
+        assert!(!optimistic_recoil_exceeds(
+            &state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+        assert!(!optimistic_recoil_exceeds(
+            &state,
+            Some(0.1),
+            None,
+            None,
+            None,
+            None,
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+    }
+
+    #[test]
+    fn optimistic_prefilter_honors_aim_scale_overrides() {
+        let control = curve(&[(0.0, 0.5), (100.0, 0.5)]);
+        let gunkick = curve(&[(0.0, 1.0), (100.0, 0.5)]);
+        // f_v = 0.5 and no tuning headroom.
+        let state = state_metric(0.0, 0.0, 1.0, 0.0);
+        assert!(optimistic_recoil_exceeds(
+            &state,
+            None,
+            Some(0.46),
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        ));
+        // A candidate override with VerticalScale 0.8 lowers the real value to
+        // 0.4, so the same state is feasible and must not be rejected.
+        let lowered = AimScaleFloor {
+            v_factor: 0.8,
+            v_margin: 0.01,
+            ..AimScaleFloor::identity()
+        };
+        assert!(!optimistic_recoil_exceeds(
+            &state,
+            None,
+            Some(0.46),
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &lowered,
+        ));
+        // Even the scaled value is too high here.
+        assert!(optimistic_recoil_exceeds(
+            &state,
+            None,
+            Some(0.3),
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &lowered,
+        ));
+    }
+
+    #[test]
+    fn aim_scale_floor_takes_minimum_over_candidate_overrides() {
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": {
+                "w": { "id": "w" },
+                "p1": {
+                    "id": "p1",
+                    "aimRecoilProfilesByMode": {
+                        "operations": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.8,
+                                "VerticalScale": 1.0
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 0.9,
+                                "VerticalScale": 0.8
+                            }
+                        }
+                    }
+                },
+                "p2": {
+                    "id": "p2",
+                    "aimRecoilProfilesByMode": {
+                        "operations": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.5,
+                                "VerticalScale": 1.2
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 1.0,
+                                "VerticalScale": 1.0
+                            }
+                        }
+                    }
+                }
+            },
+            "weaponNumericProfilesById": {
+                "w": {
+                    "linkedTables": {
+                        "aimRecoil": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 1.0,
+                                "VerticalScale": 1.0
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 1.0,
+                                "VerticalScale": 1.0
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let floor = aim_scale_floor(&payload, "w", "operations");
+        assert!(floor.enabled);
+        assert!((floor.h_factor - 0.5).abs() < 1e-9);
+        assert!((floor.v_factor - 0.8).abs() < 1e-9);
+        assert!(floor.h_margin > 0.0);
+        assert!(floor.v_margin > 0.0);
+    }
+
+    #[test]
+    fn aim_scale_floor_treats_zero_base_as_zero_metric() {
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": {
+                "w": { "id": "w" },
+                "p": {
+                    "id": "p",
+                    "aimRecoilProfilesByMode": {
+                        "operations": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.5,
+                                "VerticalScale": 0.5
+                            }
+                        }
+                    }
+                }
+            },
+            "weaponNumericProfilesById": {
+                "w": {
+                    "linkedTables": {
+                        "aimRecoil": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.0,
+                                "VerticalScale": 0.0
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 0.0,
+                                "VerticalScale": 0.0
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        // scale_factor(Some(0), Some(nonzero)) is 0, so the real metric is 0.
+        let floor = aim_scale_floor(&payload, "w", "operations");
+        assert!(floor.enabled);
+        assert_eq!(floor.h_factor, 0.0);
+        assert_eq!(floor.v_factor, 0.0);
+        // No override means scale_factor(Some(0), None) is 1 and scale_ratio
+        // returns the raw multiplier, so nothing is scaled.
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": { "w": { "id": "w" } },
+            "weaponNumericProfilesById": {
+                "w": {
+                    "linkedTables": {
+                        "aimRecoil": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.0,
+                                "VerticalScale": 0.0
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 0.0,
+                                "VerticalScale": 0.0
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let floor = aim_scale_floor(&payload, "w", "operations");
+        assert!(floor.enabled);
+        assert_eq!(floor.h_factor, 1.0);
+        assert_eq!(floor.v_factor, 1.0);
+        // No profile at all also means no scaling.
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": { "w": { "id": "w" } }
+        }))
+        .unwrap();
+        let floor = aim_scale_floor(&payload, "w", "operations");
+        assert!(floor.enabled);
+        assert!((floor.h_factor - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aim_scale_floor_folds_tiny_base_scales_without_rounding_margin() {
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": {
+                "w": { "id": "w" },
+                "p": {
+                    "id": "p",
+                    "aimRecoilProfilesByMode": {
+                        "operations": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.002,
+                                "VerticalScale": 0.002
+                            }
+                        }
+                    }
+                }
+            },
+            "weaponNumericProfilesById": {
+                "w": {
+                    "linkedTables": {
+                        "aimRecoil": {
+                            "ContinueShootRecoil": {
+                                "HorizontalScale": 0.004,
+                                "VerticalScale": 0.004
+                            },
+                            "SingleOrBurstShootRecoil": {
+                                "HorizontalScale": 0.004,
+                                "VerticalScale": 0.004
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let floor = aim_scale_floor(&payload, "w", "operations");
+        assert!(floor.enabled);
+        assert!((floor.h_factor - 0.5).abs() < 1e-9);
+        assert!((floor.v_factor - 0.5).abs() < 1e-9);
+        assert_eq!(floor.h_margin, 0.0);
+        assert_eq!(floor.v_margin, 0.0);
     }
 
     #[test]
