@@ -193,9 +193,9 @@ pub struct Solver<'a> {
     seed: bool,
     seed_continue: bool,
     seed_continue_until: u64,
-    seed_continue_deadline: Option<std::time::Instant>,
+    seed_continue_deadline: Option<u64>,
     frontier_abort: Option<usize>,
-    frontier_abort_not_before: Option<std::time::Instant>,
+    frontier_abort_not_before: Option<u64>,
     aborted_pass: bool,
     cost_cap: i64,
     run_found: bool,
@@ -981,10 +981,7 @@ impl<'a> Solver<'a> {
                         self.seed = true;
                         self.seed_continue = true;
                         self.seed_continue_until = self.work() + SEED_IMPROVE_WORK;
-                        self.seed_continue_deadline = Some(
-                            std::time::Instant::now()
-                                + std::time::Duration::from_millis(SEED_IMPROVE_MS),
-                        );
+                        self.seed_continue_deadline = Some(now_ms() + SEED_IMPROVE_MS);
                         self.dfs(&mut selections, &mut decided, &mut deferred);
                         self.seed = false;
                         self.seed_continue = false;
@@ -1049,9 +1046,7 @@ impl<'a> Solver<'a> {
         self.seed
             && self.seed_continue
             && (self.work() >= self.seed_continue_until
-                || self
-                    .seed_continue_deadline
-                    .is_some_and(|d| std::time::Instant::now() >= d))
+                || self.seed_continue_deadline.is_some_and(|d| now_ms() >= d))
     }
 
     fn budget_exceeded(&mut self) -> bool {
@@ -1838,10 +1833,7 @@ impl<'a> Solver<'a> {
             // cost-ranked frontier intact.
             let dp_limit = if self.seed { 8192 } else { 200_000 };
             if !self.seed && self.frontier_abort.is_some() {
-                self.frontier_abort_not_before = Some(
-                    std::time::Instant::now()
-                        + std::time::Duration::from_millis(FRONTIER_ABORT_LEVEL_MS),
-                );
+                self.frontier_abort_not_before = Some(now_ms() + FRONTIER_ABORT_LEVEL_MS);
             }
             let (pruned, cut) = dp_pareto_capped(
                 next,
@@ -4161,7 +4153,7 @@ fn dp_pareto_capped(
     deadline_at: Option<u64>,
     seed: bool,
     abort_at: Option<usize>,
-    abort_not_before: Option<std::time::Instant>,
+    abort_not_before: Option<u64>,
 ) -> (Vec<DpState>, Trim) {
     if seed {
         // The seed pass only has to return one feasible build, and the cap
@@ -4216,7 +4208,7 @@ fn dp_pareto_capped(
             break;
         }
         if abort_at.is_some_and(|a| out.len() >= a)
-            && abort_not_before.is_none_or(|t| std::time::Instant::now() >= t)
+            && abort_not_before.is_none_or(|t| now_ms() >= t)
         {
             trim.aborted = true;
             break;
@@ -6285,7 +6277,7 @@ mod tests {
         let mut dims = DpDims::default();
         dims.d = true;
         let states: Vec<DpState> = (0..8).map(|i| part(i as f64, i, vec![])).collect();
-        let not_before = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let not_before = now_ms() + 60_000;
         let (out, trim) = dp_pareto_capped(
             states,
             &dims,
