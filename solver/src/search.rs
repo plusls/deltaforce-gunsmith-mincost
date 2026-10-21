@@ -2362,6 +2362,49 @@ fn exact_part_metric(
     m
 }
 
+/// True when a DP state carries no tuning headroom. `eh/ev/ek/eopen` are
+/// optimistic maxima over the tuning values, not the joint tuning state, so
+/// two states with equal fixed dims but different tuning headroom may resolve
+/// to different final metrics. Only states with no tuning contribution at all
+/// are provably interchangeable for dedup.
+fn dp_metric_dedupable(m: &ExactPart) -> bool {
+    m.eh == 0.0 && m.ev == 0.0 && m.ek == 0.0 && m.eopen == 0.0
+}
+
+fn metric_hash(m: &ExactPart) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: f64| {
+        h ^= v.to_bits();
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(m.d);
+    mix(m.ah);
+    mix(m.av);
+    mix(m.ch);
+    mix(m.cv);
+    mix(m.ck);
+    mix(m.hs);
+    mix(m.adsm);
+    for p in &m.panel {
+        mix(*p);
+    }
+    h
+}
+
+fn metric_eq(a: &ExactPart, b: &ExactPart) -> bool {
+    dp_metric_dedupable(a)
+        && dp_metric_dedupable(b)
+        && a.d == b.d
+        && a.ah == b.ah
+        && a.av == b.av
+        && a.ch == b.ch
+        && a.cv == b.cv
+        && a.ck == b.ck
+        && a.hs == b.hs
+        && a.adsm == b.adsm
+        && a.panel == b.panel
+}
+
 fn dp_dominates(
     a: &DpState,
     b: &DpState,
@@ -2479,6 +2522,31 @@ fn dp_pareto_capped(
             .cmp(&b.cost)
             .then(b.metric.score().partial_cmp(&a.metric.score()).unwrap_or(Ordering::Equal))
     });
+    // The cartesian product repeats the same metric vector under many different
+    // choice lists (slots that do not affect any constrained metric). Sorting by
+    // cost first means the first occurrence is the cheapest one, so the rest can
+    // be dropped without touching the optimality argument. States with tuning
+    // headroom are kept unconditionally: the key deliberately excludes the
+    // optimistic tuning maxima, and those states may resolve differently.
+    let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+    let mut deduped: Vec<DpState> = Vec::with_capacity(states.len());
+    for st in states {
+        if !dp_metric_dedupable(&st.metric) {
+            deduped.push(st);
+            continue;
+        }
+        let hash = metric_hash(&st.metric);
+        let bucket = buckets.entry(hash).or_default();
+        if bucket
+            .iter()
+            .any(|&idx| metric_eq(&deduped[idx].metric, &st.metric))
+        {
+            continue;
+        }
+        bucket.push(deduped.len());
+        deduped.push(st);
+    }
+    let states = deduped;
     let mut truncated = false;
     let mut out: Vec<DpState> = Vec::new();
     for (idx, st) in states.into_iter().enumerate() {
@@ -3410,6 +3478,64 @@ mod tests {
         let out = dp_pareto(vec![pricey_strong, cheap_weak], &DpDims::default(), &[], AimDir::Ignore);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].cost, 5);
+    }
+
+    #[test]
+    fn pareto_dedups_identical_metrics_and_keeps_the_cheapest() {
+        let mut cheap = part(10.0, 5, vec![]);
+        cheap.choices.push(SlotChoice::Part("a".to_string()));
+        let mut pricey = part(10.0, 7, vec![]);
+        pricey.choices.push(SlotChoice::Part("b".to_string()));
+        let distinct = part(11.0, 6, vec![]);
+        let dims = DpDims {
+            d: true,
+            ..DpDims::default()
+        };
+        let out = dp_pareto(vec![pricey, distinct, cheap], &dims, &[], AimDir::Ignore);
+        assert_eq!(out.len(), 2);
+        let deduped = out.iter().find(|s| s.metric.d == 10.0).unwrap();
+        assert_eq!(deduped.cost, 5);
+        assert!(matches!(&deduped.choices[0], SlotChoice::Part(id) if id == "a"));
+    }
+
+    #[test]
+    fn metric_hash_distinguishes_multiplicative_dims() {
+        let mut a = ExactPart::neutral();
+        let mut b = ExactPart::neutral();
+        b.ch = 0.5;
+        assert_ne!(metric_hash(&a), metric_hash(&b));
+        assert_eq!(metric_hash(&a), metric_hash(&a.clone()));
+        a.panel = vec![1.0, 2.0];
+        b.panel = vec![1.0, 3.0];
+        assert_ne!(metric_hash(&a), metric_hash(&b));
+        let mut c = ExactPart::neutral();
+        c.ck = 0.25;
+        assert_ne!(metric_hash(&a), metric_hash(&c));
+    }
+
+    #[test]
+    fn dedup_is_restricted_to_states_without_tuning_headroom() {
+        let mut m = ExactPart::neutral();
+        assert!(dp_metric_dedupable(&m));
+        assert!(metric_eq(&m, &m.clone()));
+        for set in [
+            |v: &mut ExactPart| v.eh = 5.0,
+            |v: &mut ExactPart| v.ev = 5.0,
+            |v: &mut ExactPart| v.ek = 5.0,
+            |v: &mut ExactPart| v.eopen = 1.0,
+        ] {
+            let mut with_headroom = ExactPart::neutral();
+            set(&mut with_headroom);
+            assert!(!dp_metric_dedupable(&with_headroom));
+            // The hash deliberately ignores tuning fields, so equality must not.
+            assert!(!metric_eq(&m, &with_headroom));
+        }
+        let mut tuned_a = ExactPart::neutral();
+        tuned_a.eh = 1.0;
+        let mut tuned_b = ExactPart::neutral();
+        tuned_b.eh = 2.0;
+        assert_eq!(metric_hash(&tuned_a), metric_hash(&tuned_b));
+        assert!(!metric_eq(&tuned_a, &tuned_b));
     }
 
     #[test]
