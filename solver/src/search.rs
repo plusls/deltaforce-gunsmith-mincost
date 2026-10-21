@@ -1499,21 +1499,36 @@ impl<'a> Solver<'a> {
                 base_cost += self.dp_part_price(part);
             }
         }
-        let only_parts: Vec<&Part> = base_parts.iter().map(|(p, _)| *p).collect();
-        let laser_index = self.laser_index(&only_parts);
-        for (idx, (part, slot_name)) in base_parts.iter().enumerate() {
-            let is_laser = crate::metrics::has_laser(part, &self.options.mode);
-            let include_pro = is_laser && self.options.laser_enabled && Some(idx) == laser_index;
+        let mode = &self.options.mode;
+        let mut base_laser_pro: Option<LaserPro> = None;
+        for (part, slot_name) in &base_parts {
+            let is_laser = crate::metrics::has_laser(part, mode);
             let m = exact_part_metric(
                 part,
                 slot_name,
-                &self.options.mode,
+                mode,
                 self.options.bipod_deployed,
                 is_laser,
-                include_pro,
+                false,
                 &self.panel_attrs,
             );
             base.add(&m);
+            if is_laser && self.options.laser_enabled {
+                let score = crate::metrics::laser_pro_score(part, mode);
+                if base_laser_pro
+                    .as_ref()
+                    .map(|cur| score > cur.score)
+                    .unwrap_or(true)
+                {
+                    base_laser_pro = Some(LaserPro {
+                        score,
+                        metric: exact_laser_pro(part, mode, &self.panel_attrs),
+                    });
+                }
+            }
+        }
+        if let Some(pro) = &base_laser_pro {
+            base.add_laser_pro(&pro.metric);
         }
 
         let mut options_per_slot: Vec<Vec<DpOption>> = Vec::new();
@@ -1531,6 +1546,7 @@ impl<'a> Solver<'a> {
                 opts.push(DpOption {
                     cost: 0,
                     metric: ExactPart::neutral_panel(self.panel_attrs.len()),
+                    laser_pro: None,
                     choice: SlotChoice::Unset,
                 });
             }
@@ -1550,6 +1566,7 @@ impl<'a> Solver<'a> {
                     opts.push(DpOption {
                         cost: 0,
                         metric: ExactPart::neutral_panel(self.panel_attrs.len()),
+                        laser_pro: None,
                         choice: SlotChoice::Remove,
                     });
                 }
@@ -1608,6 +1625,7 @@ impl<'a> Solver<'a> {
         let mut states: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base,
+            laser_pro: base_laser_pro,
             choices: Vec::new(),
         }];
         for (slot_idx, opts) in options_per_slot.iter().enumerate() {
@@ -1631,11 +1649,7 @@ impl<'a> Solver<'a> {
                     if self.best_cost < i64::MAX && total + rest_cost >= self.best_cost {
                         continue;
                     }
-                    let mut metric = st.metric.clone();
-                    metric.add(&opt.metric);
-                    let mut choices = st.choices.clone();
-                    choices.push(opt.choice.clone());
-                    next.push(DpState { cost, metric, choices });
+                    next.push(dp_advance(st, opt, cost));
                 }
             }
             next.retain(|st| self.dp_level_may_satisfy(st, &suffix_bound[slot_idx + 1]));
@@ -1759,6 +1773,7 @@ impl<'a> Solver<'a> {
         let mut beam: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base.clone(),
+            laser_pro: None,
             choices: Vec::new(),
         }];
         for opts in options_per_slot {
@@ -1788,7 +1803,7 @@ impl<'a> Solver<'a> {
                         &self.evaluator,
                     );
                     let rank = self.seed_metric_score(&metric);
-                    scored.push((margin, rank, cost, DpState { cost, metric, choices }));
+                    scored.push((margin, rank, cost, DpState { cost, metric, laser_pro: None, choices }));
                 }
             }
             scored.sort_by(|a, b| match (a.0 >= 0.0, b.0 >= 0.0) {
@@ -1897,8 +1912,8 @@ impl<'a> Solver<'a> {
         choice: SlotChoice,
         existing: &[DpOption],
     ) -> DpOption {
-        let is_laser = crate::metrics::has_laser(part, &self.options.mode);
-        let include_pro = is_laser && self.options.laser_enabled;
+        let mode = &self.options.mode;
+        let is_laser = crate::metrics::has_laser(part, mode);
         let key = (part.id.clone(), slot_name.to_string());
         let metric = if let Some(m) = self.dp_metric_cache.get(&key) {
             m.clone()
@@ -1906,18 +1921,34 @@ impl<'a> Solver<'a> {
             let m = exact_part_metric(
                 part,
                 slot_name,
-                &self.options.mode,
+                mode,
                 self.options.bipod_deployed,
                 is_laser,
-                include_pro,
+                false,
                 &self.panel_attrs,
             );
             self.dp_metric_cache.insert(key, m.clone());
             m
         };
+        // A laser part only contributes its `pro` modifiers when the evaluator
+        // selects it as the single best laser of the assembly, so the option
+        // carries the pro delta separately and the DP state applies it once.
+        let laser_pro = if is_laser && self.options.laser_enabled {
+            Some(LaserPro {
+                score: crate::metrics::laser_pro_score(part, mode),
+                metric: exact_laser_pro(part, mode, &self.panel_attrs),
+            })
+        } else {
+            None
+        };
         let cost = self.dp_part_price(part);
         let _ = existing;
-        DpOption { cost, metric, choice }
+        DpOption {
+            cost,
+            metric,
+            laser_pro,
+            choice,
+        }
     }
 
     fn effective_none_part(
@@ -1937,33 +1968,6 @@ impl<'a> Solver<'a> {
             }
         }
         None
-    }
-
-    fn laser_index(&self, parts: &[&Part]) -> Option<usize> {
-        let mut best: Option<(usize, f64)> = None;
-        for (idx, part) in parts.iter().enumerate() {
-            if !crate::metrics::has_laser(part, &self.options.mode) {
-                continue;
-            }
-            let score: f64 = part
-                .display_mods
-                .get(&self.options.mode)
-                .map(|list| {
-                    list.iter()
-                        .filter(|m| {
-                            m.condition_id.is_none()
-                                && m.modifier_type == "Addend"
-                                && m.polarity.as_deref() == Some("pro")
-                        })
-                        .map(|m| m.delta.map(|v| v.0.abs()).unwrap_or(0.0))
-                        .sum()
-                })
-                .unwrap_or(0.0);
-            if best.map(|(_, s)| score > s).unwrap_or(true) {
-                best = Some((idx, score));
-            }
-        }
-        best.map(|(idx, _)| idx)
     }
 
     fn leaf(&mut self, selections: &FxHashMap<String, Option<String>>) {
@@ -2928,6 +2932,28 @@ impl ExactPart {
         }
     }
 
+    /// `exact_laser_pro` only fills the additive fields below; the
+    /// multiplicative and tuning fields stay neutral, so applying and
+    /// removing the delta is exact.
+    fn add_laser_pro(&mut self, pro: &ExactPart) {
+        self.d += pro.d;
+        self.hs += pro.hs;
+        if self.panel.len() < pro.panel.len() {
+            self.panel.resize(pro.panel.len(), 0.0);
+        }
+        for (i, v) in pro.panel.iter().enumerate() {
+            self.panel[i] += *v;
+        }
+    }
+
+    fn remove_laser_pro(&mut self, pro: &ExactPart) {
+        self.d -= pro.d;
+        self.hs -= pro.hs;
+        for (i, v) in pro.panel.iter().enumerate() {
+            self.panel[i] -= *v;
+        }
+    }
+
     fn score(&self) -> f64 {
         self.d * 10.0 - (self.ah + self.av) * 20.0
             + ((1.0 - self.ch) + (1.0 - self.cv) + (1.0 - self.ck)) * 20.0
@@ -2950,10 +2976,21 @@ enum SlotChoice {
     Part(String),
 }
 
+/// Tuning-free contribution of one laser part's `pro` modifiers. The
+/// evaluator applies the modifiers of a single laser part, the one with the
+/// highest `score`, so the DP keeps the candidate deltas out of the slot
+/// metrics and applies only the winner.
+#[derive(Debug, Clone)]
+struct LaserPro {
+    score: f64,
+    metric: ExactPart,
+}
+
 #[derive(Debug, Clone)]
 struct DpOption {
     cost: i64,
     metric: ExactPart,
+    laser_pro: Option<LaserPro>,
     choice: SlotChoice,
 }
 
@@ -2961,6 +2998,7 @@ struct DpOption {
 struct DpState {
     cost: i64,
     metric: ExactPart,
+    laser_pro: Option<LaserPro>,
     choices: Vec<SlotChoice>,
 }
 
@@ -3083,6 +3121,36 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
         };
     }
     out
+}
+
+/// Extends `state` with `opt`. A laser candidate replaces the current laser
+/// winner only when it scores strictly higher, matching `laser_pro_index`,
+/// which keeps the first part on a tie.
+fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
+    let mut metric = state.metric.clone();
+    metric.add(&opt.metric);
+    let mut laser_pro = state.laser_pro.clone();
+    if let Some(candidate) = &opt.laser_pro {
+        let better = laser_pro
+            .as_ref()
+            .map(|cur| candidate.score > cur.score)
+            .unwrap_or(true);
+        if better {
+            if let Some(cur) = &laser_pro {
+                metric.remove_laser_pro(&cur.metric);
+            }
+            metric.add_laser_pro(&candidate.metric);
+            laser_pro = Some(candidate.clone());
+        }
+    }
+    let mut choices = state.choices.clone();
+    choices.push(opt.choice.clone());
+    DpState {
+        cost,
+        metric,
+        laser_pro,
+        choices,
+    }
 }
 
 fn exact_part_metric(
@@ -3209,6 +3277,47 @@ fn exact_part_metric(
         }
         if max_open.is_finite() {
             m.eopen += max_open;
+        }
+    }
+    m
+}
+
+/// Additive `pro` modifiers of a laser part, with every other field neutral.
+/// `exact_part_metric` skips these modifiers for laser parts unless the caller
+/// knows the part wins the single-laser selection; this helper extracts them so
+/// the DP can apply exactly one winner's delta.
+fn exact_laser_pro(part: &Part, mode: &str, panel_attrs: &[String]) -> ExactPart {
+    let mut m = ExactPart::neutral_panel(panel_attrs.len());
+    if !panel_attrs.is_empty() {
+        if let Some(list) = part.display_mods.get(mode) {
+            for modif in list {
+                if modif.condition_id.is_some()
+                    || modif.modifier_type != "Addend"
+                    || modif.polarity.as_deref() != Some("pro")
+                {
+                    continue;
+                }
+                let attr = normalize_attr(modif.attribute_id.as_deref());
+                if let Some(pos) = panel_attrs.iter().position(|a| *a == attr) {
+                    m.panel[pos] += modif.delta.map(|v| v.0).unwrap_or(0.0);
+                }
+            }
+        }
+    }
+    if let Some(list) = part.main_mods.get(mode) {
+        for modif in list {
+            if modif.condition_id.is_some()
+                || modif.modifier_type != "Addend"
+                || modif.polarity.as_deref() != Some("pro")
+            {
+                continue;
+            }
+            if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
+                m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
+            }
+            if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
+                m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
+            }
         }
     }
     m
@@ -4609,6 +4718,7 @@ mod tests {
                 panel,
                 ..ExactPart::neutral()
             },
+            laser_pro: None,
             choices: Vec::new(),
         }
     }
@@ -4629,6 +4739,7 @@ mod tests {
                     ..ExactPart::neutral()
                 },
                 choice: SlotChoice::Unset,
+                laser_pro: None,
             }
         };
         let slots = vec![
@@ -5131,6 +5242,154 @@ mod tests {
         let deduped = out.iter().find(|s| s.metric.d == 10.0).unwrap();
         assert_eq!(deduped.cost, 5);
         assert!(matches!(&deduped.choices[0], SlotChoice::Part(id) if id == "a"));
+    }
+
+    fn laser_option(
+        id: &str,
+        cost: i64,
+        pro_display: f64,
+        pro_handling: f64,
+        con_handling: f64,
+    ) -> (DpOption, Part) {
+        let part: Part = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "modifiersByMode": {
+                "operations": [{
+                    "attributeId": "10008",
+                    "polarity": "pro",
+                    "modifierType": "Addend",
+                    "delta": pro_display,
+                    "targetPath": "DisplayAttrValues.4"
+                }]
+            },
+            "mainAttributeModifiersByMode": {
+                "operations": [{
+                    "attributeId": "10006",
+                    "polarity": "pro",
+                    "modifierType": "Addend",
+                    "delta": pro_handling,
+                    "targetPath": "WeaponMainAttribute.MainAttrValues.5"
+                }, {
+                    "attributeId": "10006",
+                    "polarity": "con",
+                    "modifierType": "Addend",
+                    "delta": con_handling,
+                    "targetPath": "WeaponMainAttribute.MainAttrValues.5"
+                }]
+            },
+            "uiEffectsByMode": {
+                "operations": [{ "conditionId": "10038" }]
+            }
+        }))
+        .unwrap();
+        let mode = "operations";
+        let is_laser = crate::metrics::has_laser(&part, mode);
+        assert!(is_laser);
+        let panel_attrs = vec!["10008".to_string()];
+        let option = DpOption {
+            cost,
+            metric: exact_part_metric(
+                &part,
+                "X",
+                mode,
+                false,
+                true,
+                false,
+                &panel_attrs,
+            ),
+            laser_pro: Some(LaserPro {
+                score: crate::metrics::laser_pro_score(&part, mode),
+                metric: exact_laser_pro(&part, mode, &panel_attrs),
+            }),
+            choice: SlotChoice::Part(id.to_string()),
+        };
+        (option, part)
+    }
+
+    #[test]
+    fn dp_applies_laser_pro_once_for_two_candidates() {
+        let mode = "operations";
+        let panel_attrs = vec!["10008".to_string()];
+        let (strong, strong_part) = laser_option("laser-a", 100, 12.0, 16.0, -4.0);
+        let (weak, weak_part) = laser_option("laser-b", 200, 8.0, 10.0, -3.0);
+        let start = DpState {
+            cost: 0,
+            metric: ExactPart::neutral_panel(1),
+            laser_pro: None,
+            choices: Vec::new(),
+        };
+
+        // The evaluator applies the modifiers of one laser, the best scoring
+        // one, so the DP metric for both parts must match that single delta.
+        let mut once = exact_part_metric(
+            &strong_part,
+            "X",
+            mode,
+            false,
+            true,
+            true,
+            &panel_attrs,
+        );
+        once.add(&exact_part_metric(
+            &weak_part,
+            "X",
+            mode,
+            false,
+            true,
+            false,
+            &panel_attrs,
+        ));
+
+        let forward = dp_advance(&dp_advance(&start, &strong, 100), &weak, 300);
+        let reverse = dp_advance(&dp_advance(&start, &weak, 200), &strong, 300);
+        assert!(metric_eq(&forward.metric, &once));
+        assert!(metric_eq(&reverse.metric, &once));
+        assert!((forward.metric.panel[0] - 12.0).abs() < 1e-9);
+        // Both lasers keep their con handling penalties; only one pro applies.
+        assert!((forward.metric.hs - 9.0).abs() < 1e-9);
+        assert_eq!(forward.cost, 300);
+        assert_eq!(forward.laser_pro.as_ref().unwrap().score, 12.0);
+
+        // A later, higher scoring laser replaces the current winner instead of
+        // stacking on top of it.
+        let (best, best_part) = laser_option("laser-c", 300, 20.0, 30.0, -1.0);
+        let replaced = dp_advance(&forward, &best, 600);
+        let mut expected = exact_part_metric(
+            &best_part,
+            "X",
+            mode,
+            false,
+            true,
+            true,
+            &panel_attrs,
+        );
+        expected.add(&exact_part_metric(
+            &weak_part,
+            "X",
+            mode,
+            false,
+            true,
+            false,
+            &panel_attrs,
+        ));
+        expected.add(&exact_part_metric(
+            &strong_part,
+            "X",
+            mode,
+            false,
+            true,
+            false,
+            &panel_attrs,
+        ));
+        assert!(metric_eq(&replaced.metric, &expected));
+        assert!((replaced.metric.panel[0] - 20.0).abs() < 1e-9);
+        assert!((replaced.metric.hs - 22.0).abs() < 1e-9);
+
+        // Ties keep the first part, matching `laser_pro_index`.
+        let (tie, _) = laser_option("laser-tie", 400, 12.0, 99.0, 0.0);
+        let tied = dp_advance(&forward, &tie, 700);
+        assert!((tied.metric.panel[0] - 12.0).abs() < 1e-9);
+        assert!((tied.metric.hs - 9.0).abs() < 1e-9);
     }
 
     #[test]

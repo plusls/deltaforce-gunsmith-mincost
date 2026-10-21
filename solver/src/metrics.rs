@@ -1042,6 +1042,22 @@ fn condition_is(id: &Option<FlexibleId>, value: &str) -> bool {
     id.as_ref().map(|v| v.is(value)).unwrap_or(false)
 }
 
+/// Selection weight of a laser part: the summed magnitude of its
+/// unconditioned `pro` display addends. The evaluator applies the laser
+/// modifiers of exactly one laser part, the one with the highest score, so
+/// every consumer of the laser rule has to rank parts the same way.
+pub fn laser_pro_score(part: &Part, mode: &str) -> f64 {
+    part.display_mods
+        .get(mode)
+        .map(|list| {
+            list.iter()
+                .filter(|m| is_addend(m) && m.polarity.as_deref() == Some("pro"))
+                .map(|m| m.delta.map(|v| v.0.abs()).unwrap_or(0.0))
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
 fn laser_pro_index(parts: &[&Part], mode: &str) -> usize {
     let mut best = usize::MAX;
     let mut best_score = f64::NEG_INFINITY;
@@ -1049,16 +1065,7 @@ fn laser_pro_index(parts: &[&Part], mode: &str) -> usize {
         if !has_laser(part, mode) {
             continue;
         }
-        let score: f64 = part
-            .display_mods
-            .get(mode)
-            .map(|list| {
-                list.iter()
-                    .filter(|m| is_addend(m) && m.polarity.as_deref() == Some("pro"))
-                    .map(|m| m.delta.map(|v| v.0.abs()).unwrap_or(0.0))
-                    .sum()
-            })
-            .unwrap_or(0.0);
+        let score = laser_pro_score(part, mode);
         if score > best_score {
             best = idx;
             best_score = score;
