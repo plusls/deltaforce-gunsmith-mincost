@@ -429,6 +429,51 @@ test("mode maps to firstSolution", () => {
   });
 });
 
+test("bipodDeployed flows through capture, options, and the solve request", () => {
+  const cache = new Map();
+  const context = captureWorkerRequest(
+    { dataKey: "v1:18010000049", data: WEAPON_DATA, bipodDeployed: true },
+    cache,
+  );
+  assert.equal(context.bipodDeployed, true);
+  assert.equal(
+    captureWorkerRequest({ dataKey: "v1:18010000049" }, cache).bipodDeployed,
+    false,
+  );
+
+  const base = {
+    priceSource: "current",
+    lockMode: "locked",
+    missingPricePolicy: "reject",
+  };
+  assert.equal(toSolveRequest(context, base).bipodDeployed, true);
+  assert.equal(
+    toSolveRequest(context, { ...base, bipodDeployed: false }).bipodDeployed,
+    false,
+  );
+
+  const options = optionsFromSiteRequest(
+    { targets: {}, bipodDeployed: true },
+    {},
+  );
+  assert.equal(options.bipodDeployed, true);
+  assert.equal(
+    toSolveRequest(makeContext({ bipodDeployed: false }), options).bipodDeployed,
+    true,
+  );
+  assert.equal(
+    optionsFromSiteRequest(
+      { targets: {}, bipodDeployed: true },
+      { bipodDeployed: false },
+    ).bipodDeployed,
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(optionsFromSiteRequest({ targets: {} }), "bipodDeployed"),
+    false,
+  );
+});
+
 test("fromSolverOutput maps optimal and feasible results", () => {
   const raw = {
     optimal: true,

@@ -126,6 +126,7 @@ export function captureWorkerRequest(message, cache) {
     weaponId: msg.weaponId ?? "",
     mode: msg.mode ?? "operations",
     laserEnabled: msg.laserEnabled === true,
+    bipodDeployed: msg.bipodDeployed === true,
     data,
     pricesByObjectId: asObject(msg.pricesByObjectId),
     currentSelections: asObject(msg.currentSelections),
@@ -241,6 +242,11 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
   } else {
     result.costCap = costCap;
   }
+  if (hasOwn(overrideValues, "bipodDeployed")) {
+    result.bipodDeployed = overrideValues.bipodDeployed === true;
+  } else if (typeof request.bipodDeployed === "boolean") {
+    result.bipodDeployed = request.bipodDeployed;
+  }
 
   return result;
 }
@@ -302,12 +308,17 @@ export function toSolveRequest(context, options) {
     if (Number.isFinite(value)) lockedTuningKeys[key] = value;
   }
 
+  const bipodDeployed =
+    typeof opts.bipodDeployed === "boolean"
+      ? opts.bipodDeployed
+      : ctx.bipodDeployed === true;
+
   return {
     prices,
     weaponId: ctx.weaponId ?? "",
     mode: ctx.mode ?? "operations",
     laserEnabled: ctx.laserEnabled === true,
-    bipodDeployed: false,
+    bipodDeployed,
     lockedPathKeys,
     lockedTuningKeys,
     excludedPartIds: [...excluded],
