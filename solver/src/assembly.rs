@@ -397,6 +397,7 @@ impl<'a> Assembler<'a> {
         };
         for original in slots {
             let slot = with_label_override(original, parent_slot_type);
+            let slot: &SlotDef = &slot;
             let path_key = format!(
                 "{}/slot:{}:{}",
                 host_path,
@@ -517,7 +518,7 @@ impl<'a> Assembler<'a> {
                         &part.id,
                         &child_host_path,
                         Some(&path_key),
-                        Some(&slot.slot_type),
+                        Some(slot.slot_type.as_str()),
                         depth + 1,
                         seen,
                         selections,
@@ -643,13 +644,18 @@ pub fn socket_key(host_path: &str, socket_id: &str) -> String {
 }
 
 fn is_descendant_path(path: &str, ancestor: &str) -> bool {
-    path.starts_with(&format!("{}/part:", ancestor))
+    path.len() >= ancestor.len() + b"/part:".len()
+        && path.as_bytes().starts_with(ancestor.as_bytes())
+        && path.as_bytes()[ancestor.len()..].starts_with(b"/part:")
 }
 
-fn with_label_override(slot: &SlotDef, parent_type: Option<&str>) -> SlotDef {
-    let mut out = slot.clone();
+fn with_label_override<'b>(
+    slot: &'b SlotDef,
+    parent_type: Option<&str>,
+) -> std::borrow::Cow<'b, SlotDef> {
+    use std::borrow::Cow;
     let Some(parent_type) = parent_type else {
-        return out;
+        return Cow::Borrowed(slot);
     };
     let options = slot
         .parent_label_options
@@ -669,12 +675,14 @@ fn with_label_override(slot: &SlotDef, parent_type: Option<&str>) -> SlotDef {
             .map(|s| s.to_string()),
         _ => None,
     };
-    if let Some(label) = label {
-        if out.label.as_deref() != Some(label.as_str()) {
+    match label {
+        Some(label) if slot.label.as_deref() != Some(label.as_str()) => {
+            let mut out = slot.clone();
             out.label = Some(label);
+            Cow::Owned(out)
         }
+        _ => Cow::Borrowed(slot),
     }
-    out
 }
 
 pub fn enc(value: &str) -> String {
@@ -720,4 +728,49 @@ pub fn preset_node_part<'a>(
 
 pub fn value_str(value: &Value) -> Option<&str> {
     value.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(value: serde_json::Value) -> SlotDef {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn descendant_paths_match_without_allocation() {
+        assert!(is_descendant_path("weapon:w/slot:1:X/part:p", "weapon:w/slot:1:X"));
+        assert!(!is_descendant_path("weapon:w/slot:1:X", "weapon:w/slot:1:X"));
+        assert!(!is_descendant_path("weapon:w/slot:1:X/other:p", "weapon:w/slot:1:X"));
+        assert!(!is_descendant_path("weapon:w/slot:1:XY/part:p", "weapon:w/slot:1:X"));
+    }
+
+    #[test]
+    fn label_override_borrows_when_nothing_changes() {
+        let base = slot(serde_json::json!({ "id": "1", "name": "Muzzle" }));
+        assert!(matches!(
+            with_label_override(&base, None),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            with_label_override(&base, Some("unknown")),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn label_override_clones_only_when_a_label_applies() {
+        let base = slot(serde_json::json!({
+            "id": "1",
+            "name": "Muzzle",
+            "label": "old",
+            "parentLabelOptions": {
+                "rifle": [{ "label": "new" }]
+            }
+        }));
+        let overridden = with_label_override(&base, Some("rifle"));
+        assert_eq!(overridden.label.as_deref(), Some("new"));
+        assert_eq!(base.label.as_deref(), Some("old"));
+    }
 }
