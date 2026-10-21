@@ -894,3 +894,107 @@ fn audit_alternatives_do_not_contain_the_best_solution() {
         .iter()
         .all(|a| a["total_price"].as_i64() != Some(best_price)));
 }
+
+fn audit_tradeoff_tune(tune_id: &str, name: &str, from: f64, to: f64) -> Value {
+    json!({
+        "tune_id": tune_id,
+        "min_value": 0.0,
+        "max_value": 10.0,
+        "step_value": 10.0,
+        "default_value": 0.0,
+        "display_effects": [{
+            "attribute_name_snapshot": name,
+            "curve_points": [
+                {"Time": 0.0, "Value": from},
+                {"Time": 10.0, "Value": to}
+            ]
+        }],
+        "runtime_targets": []
+    })
+}
+
+fn audit_fixed_tune(tune_id: &str, name: &str, value: f64) -> Value {
+    json!({
+        "tune_id": tune_id,
+        "min_value": 0.0,
+        "max_value": 0.0,
+        "step_value": 0.0,
+        "default_value": 0.0,
+        "display_effects": [{
+            "attribute_name_snapshot": name,
+            "curve_points": [
+                {"Time": 0.0, "Value": value},
+                {"Time": 10.0, "Value": value}
+            ]
+        }],
+        "runtime_targets": []
+    })
+}
+
+#[test]
+fn audit_coupled_tuning_channels_are_not_compared_independently() {
+    // The cheaper part's single slider trades recoil control against aim speed,
+    // so its per-channel maxima (20 recoil control, 20 aim speed) are not
+    // jointly reachable. The pricier part has two independent fixed tunes.
+    // Dominance must not treat the trade-off as if both maxima came at once,
+    // or it prunes the only feasible build.
+    let parts = json!({
+        "w1": {"id": "w1", "name": "gun"},
+        "x": audit_part("x", json!({
+            "tuningOptions": [{
+                "tune_id": "tx",
+                "min_value": 0.0,
+                "max_value": 10.0,
+                "step_value": 10.0,
+                "default_value": 0.0,
+                "display_effects": [
+                    {
+                        "attribute_name_snapshot": "%额外后坐力控制",
+                        "curve_points": [
+                            {"Time": 0.0, "Value": 20.0},
+                            {"Time": 10.0, "Value": 0.0}
+                        ]
+                    },
+                    {
+                        "attribute_name_snapshot": "%举镜瞄准速度",
+                        "curve_points": [
+                            {"Time": 0.0, "Value": 0.0},
+                            {"Time": 10.0, "Value": 20.0}
+                        ]
+                    }
+                ],
+                "runtime_targets": []
+            }]
+        })),
+        "y": audit_part("y", json!({
+            "tuningOptions": [
+                audit_fixed_tune("tyh", "%额外后坐力控制", 15.0),
+                audit_fixed_tune("tyo", "%举镜瞄准速度", 15.0)
+            ]
+        }))
+    });
+    let payload = audit_payload(
+        json!([{"id": "1", "name": "Muzzle_point", "candidateIds": ["x", "y"]}]),
+        parts,
+        json!({}),
+    );
+    let prices = json!({"w1": 1000, "x": 100, "y": 200});
+    let request = audit_request(
+        prices,
+        json!([
+            {"id": "recoil-continuous-horizontal", "max": 0.9},
+            {"id": "handling-aim-time", "max": 1400}
+        ]),
+    );
+    let out = run_payload(&payload, request);
+    assert_eq!(out["optimal"], true, "{}", out);
+    assert_eq!(out["best"]["total_price"], 1200, "{}", out);
+    assert_eq!(
+        out["best"]["selections"]["weapon:w1/slot:1:Muzzle_point"],
+        "y"
+    );
+    assert_eq!(out["best"]["recoil"]["continuous_h"], 0.85);
+    assert!(
+        (out["best"]["detail"]["aim_time"].as_f64().unwrap() - 1500.0 / 1.15).abs() < 1e-6
+    );
+}

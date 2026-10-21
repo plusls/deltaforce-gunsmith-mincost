@@ -1,8 +1,8 @@
 use crate::assembly::{Assembler, VisibleSlot};
 use crate::metrics::{
-    eval_curve_points, quantize, tune_channels, tuning_available, tune_offer, tune_offer_values,
-    DetailMetrics, DetailSums, Evaluator, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
-    TuningInstance, TuningState, DETAIL_METRICS,
+    eval_curve_points, quantize, tune_channels, tune_offer, tune_offer_values, tuning_available,
+    DetailMetrics, DetailSums, Evaluator, TuningInstance, TuningState, DETAIL_METRICS,
+    HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
 };
 use crate::model::{Curve, CurveKey, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -546,7 +546,17 @@ fn reach_targets(
                 cap(state[2].saturating_add(x.2), targets[2]),
                 cap(state[3].saturating_add(x.3), targets[3]),
             ];
-            if rec(i + 1, next, increments, targets, cap, visited, chosen, used, budget)? {
+            if rec(
+                i + 1,
+                next,
+                increments,
+                targets,
+                cap,
+                visited,
+                chosen,
+                used,
+                budget,
+            )? {
                 return Ok(true);
             }
         }
@@ -640,20 +650,24 @@ impl<'a> Solver<'a> {
         let (control_curve, gunkick_curve, gunkick0) = {
             let profile = payload.numeric_profiles.get(weapon_id);
             let curves = profile.map(|p| &p.linked_tables.recoil_curves);
-            let control = curves.and_then(|c| {
-                if options.mode == "warfare" {
-                    c.recoil_control_mp.as_ref().or(c.recoil_control.as_ref())
-                } else {
-                    c.recoil_control.as_ref()
-                }
-            }).cloned();
-            let gunkick = curves.and_then(|c| {
-                if options.mode == "warfare" {
-                    c.gunkick_mp.as_ref().or(c.gunkick.as_ref())
-                } else {
-                    c.gunkick.as_ref()
-                }
-            }).cloned();
+            let control = curves
+                .and_then(|c| {
+                    if options.mode == "warfare" {
+                        c.recoil_control_mp.as_ref().or(c.recoil_control.as_ref())
+                    } else {
+                        c.recoil_control.as_ref()
+                    }
+                })
+                .cloned();
+            let gunkick = curves
+                .and_then(|c| {
+                    if options.mode == "warfare" {
+                        c.gunkick_mp.as_ref().or(c.gunkick.as_ref())
+                    } else {
+                        c.gunkick.as_ref()
+                    }
+                })
+                .cloned();
             let gk0 = gunkick.as_ref().and_then(|c| c.eval(0.0)).unwrap_or(0.0);
             (control, gunkick, gk0)
         };
@@ -903,7 +917,14 @@ impl<'a> Solver<'a> {
                 }
                 self.cost_cap = cap;
             }
-            if (self.best.is_some() || (fixed_cap.is_some() && seed_found)) && !self.truncated {
+            // A truncated seed may still have left time on the clock; the
+            // optimal pass has its own budget checks and resets the flag.
+            let deadline_hit = self
+                .deadline_at
+                .is_some_and(|deadline| now_ms() >= deadline);
+            if (self.best.is_some() || (fixed_cap.is_some() && seed_found))
+                && !(self.truncated && deadline_hit)
+            {
                 reset(&mut self, &mut selections, &mut decided);
                 self.dfs(&mut selections, &mut decided, &mut deferred);
                 total_nodes += self.nodes;
@@ -1078,9 +1099,7 @@ impl<'a> Solver<'a> {
             if unset_structural {
                 forced.push(Action::Unset);
             }
-            if (remove_structural || unset_structural)
-                && remove.as_deref() != unset.as_deref()
-            {
+            if (remove_structural || unset_structural) && remove.as_deref() != unset.as_deref() {
                 forced.push(Action::Remove);
             }
             can_defer = !unset_structural;
@@ -1139,9 +1158,11 @@ impl<'a> Solver<'a> {
             .constraints
             .iter()
             .any(|c| is_panel_attr(&c.id) && c.id != "10001");
-        let has_recoil_max = self.options.constraints.iter().any(|c| {
-            c.max.is_some() && is_recoil_metric(&c.id)
-        });
+        let has_recoil_max = self
+            .options
+            .constraints
+            .iter()
+            .any(|c| c.max.is_some() && is_recoil_metric(&c.id));
         if !has_panel && !has_recoil_max {
             return false;
         }
@@ -1334,7 +1355,6 @@ impl<'a> Solver<'a> {
         self.seed_metric_score(&metric)
     }
 
-
     fn dp_level_may_satisfy(&self, st: &DpState, sb: &DpSuffixBound) -> bool {
         let mut has_recoil = false;
         let mut aim_max: Option<f64> = None;
@@ -1376,13 +1396,11 @@ impl<'a> Solver<'a> {
                             (st.metric.ck * sb.ck_min).max(0.0)
                         };
                         let f_h = cr.max(0.0)
-                            * (1.0 + st.metric.ah + sb.ah_min
-                                - 0.01 * (st.metric.eh + sb.eh_max))
+                            * (1.0 + st.metric.ah + sb.ah_min - 0.01 * (st.metric.eh + sb.eh_max))
                                 .max(0.0)
                             * c_h;
                         let f_v = cr.max(0.0)
-                            * (1.0 + st.metric.av + sb.av_min
-                                - 0.01 * (st.metric.ev + sb.ev_max))
+                            * (1.0 + st.metric.av + sb.av_min - 0.01 * (st.metric.ev + sb.ev_max))
                                 .max(0.0)
                             * c_v;
                         let s = (gk / self.gunkick0).max(0.0)
@@ -1394,11 +1412,8 @@ impl<'a> Solver<'a> {
                                 continue;
                             }
                             let value = match c.id.as_str() {
-                                "recoil-continuous-horizontal"
-                                | "recoil-single-horizontal" => f_h,
-                                "recoil-continuous-vertical" | "recoil-single-vertical" => {
-                                    f_v
-                                }
+                                "recoil-continuous-horizontal" | "recoil-single-horizontal" => f_h,
+                                "recoil-continuous-vertical" | "recoil-single-vertical" => f_v,
                                 "recoil-fire-stability" => s,
                                 _ => continue,
                             };
@@ -1451,8 +1466,7 @@ impl<'a> Solver<'a> {
             self.leaf(&collapsed);
             return;
         }
-        let leaf_paths: FxHashSet<String> =
-            leaf_slots.iter().map(|s| s.path_key.clone()).collect();
+        let leaf_paths: FxHashSet<String> = leaf_slots.iter().map(|s| s.path_key.clone()).collect();
         let is_under_leaf = |path: &str| {
             leaf_paths.iter().any(|leaf| {
                 path.len() > leaf.len()
@@ -1560,8 +1574,16 @@ impl<'a> Solver<'a> {
                 .map(|id| self.structural_parts.contains(id))
                 .unwrap_or(false);
             if remove_part.as_deref() != unset_part.as_deref() && !remove_structural {
-                if let Some(part) = remove_part.as_ref().and_then(|id| self.payload.parts.get(id)) {
-                    opts.push(self.dp_option_for_part(part, &slot.slot.name, SlotChoice::Remove, &opts));
+                if let Some(part) = remove_part
+                    .as_ref()
+                    .and_then(|id| self.payload.parts.get(id))
+                {
+                    opts.push(self.dp_option_for_part(
+                        part,
+                        &slot.slot.name,
+                        SlotChoice::Remove,
+                        &opts,
+                    ));
                 } else {
                     opts.push(DpOption {
                         cost: 0,
@@ -1589,9 +1611,12 @@ impl<'a> Solver<'a> {
                 }
             }
             opts.sort_by(|a, b| {
-                a.cost
-                    .cmp(&b.cost)
-                    .then(b.metric.score().partial_cmp(&a.metric.score()).unwrap_or(Ordering::Equal))
+                a.cost.cmp(&b.cost).then(
+                    b.metric
+                        .score()
+                        .partial_cmp(&a.metric.score())
+                        .unwrap_or(Ordering::Equal),
+                )
             });
             opts.dedup_by(|a, b| a.choice == b.choice);
             options_per_slot.push(opts);
@@ -1604,6 +1629,38 @@ impl<'a> Solver<'a> {
             suffix_min[idx] = suffix_min[idx + 1] + min_cost;
         }
         let suffix_bound = dp_suffix_bounds(&options_per_slot);
+
+        // Admissible aim-time bounds for the slots that are not placed yet.
+        // Pruning on them early only drops states that no completion can make
+        // feasible, and it keeps the frontier small when tuning couples recoil
+        // control with aim speed.
+        let aim_max = self
+            .options
+            .constraints
+            .iter()
+            .find(|c| c.id == "handling-aim-time" && c.min.is_none())
+            .and_then(|c| c.max);
+        let mut suffix_hs_max = vec![0.0; options_per_slot.len() + 1];
+        let mut suffix_adsm_min = vec![0.0; options_per_slot.len() + 1];
+        let mut suffix_open_max = vec![0.0; options_per_slot.len() + 1];
+        if aim_max.is_some() {
+            for (idx, opts) in options_per_slot.iter().enumerate().rev() {
+                let mut hs_max = f64::NEG_INFINITY;
+                let mut adsm_min = f64::INFINITY;
+                let mut open_max = f64::NEG_INFINITY;
+                for opt in opts {
+                    hs_max = hs_max.max(opt.metric.hs);
+                    adsm_min = adsm_min.min(opt.metric.adsm);
+                    open_max = open_max.max(opt.metric.eopen);
+                }
+                if !hs_max.is_finite() || !adsm_min.is_finite() || !open_max.is_finite() {
+                    continue;
+                }
+                suffix_hs_max[idx] = suffix_hs_max[idx + 1] + hs_max;
+                suffix_adsm_min[idx] = suffix_adsm_min[idx + 1] + adsm_min;
+                suffix_open_max[idx] = suffix_open_max[idx + 1] + open_max;
+            }
+        }
 
         if self.seed
             && self.options.first_solution
@@ -1630,7 +1687,8 @@ impl<'a> Solver<'a> {
         }];
         for (slot_idx, opts) in options_per_slot.iter().enumerate() {
             let rest_cost = suffix_min[slot_idx + 1];
-            let mut next: Vec<DpState> = Vec::with_capacity(states.len().saturating_mul(opts.len()).min(200_000));
+            let mut next: Vec<DpState> =
+                Vec::with_capacity(states.len().saturating_mul(opts.len()).min(200_000));
             for st in &states {
                 for opt in opts {
                     let cost = st.cost + opt.cost;
@@ -1641,25 +1699,47 @@ impl<'a> Solver<'a> {
                     if self.best_cost < i64::MAX && total >= self.best_cost {
                         continue;
                     }
-                    if total + rest_cost > self.cost_cap
-                        && self.cost_cap < i64::MAX
-                    {
+                    if total + rest_cost > self.cost_cap && self.cost_cap < i64::MAX {
                         continue;
                     }
                     if self.best_cost < i64::MAX && total + rest_cost >= self.best_cost {
                         continue;
                     }
-                    next.push(dp_advance(st, opt, cost));
+                    let (metric, laser_pro) = dp_metric_advance(st, opt);
+                    if let Some(max) = aim_max {
+                        if let Some(best) = self.evaluator.aim_time(
+                            metric.hs + suffix_hs_max[slot_idx + 1],
+                            metric.adsm + suffix_adsm_min[slot_idx + 1],
+                            (metric.eopen + suffix_open_max[slot_idx + 1]).max(0.0),
+                        ) {
+                            if best > max + 1e-9 {
+                                continue;
+                            }
+                        }
+                    }
+                    let mut choices = st.choices.clone();
+                    choices.push(opt.choice.clone());
+                    next.push(DpState {
+                        cost,
+                        metric,
+                        laser_pro,
+                        choices,
+                    });
                 }
             }
             next.retain(|st| self.dp_level_may_satisfy(st, &suffix_bound[slot_idx + 1]));
+            // The seed pass only has to find one feasible build, so it keeps a
+            // small capability-ranked frontier. The optimal pass needs its
+            // cost-ranked frontier intact.
+            let dp_limit = if self.seed { 8192 } else { 200_000 };
             let (pruned, cut) = dp_pareto_capped(
                 next,
                 &self.dp_dims,
                 &self.panel_dirs,
                 self.aim_dp,
-                200_000,
+                dp_limit,
                 self.deadline_at,
+                self.seed,
             );
             self.heuristic_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
@@ -1710,11 +1790,10 @@ impl<'a> Solver<'a> {
                 continue;
             }
             if let Some(max) = aim_max {
-                if let Some(best) = self.evaluator.aim_time(
-                    st.metric.hs,
-                    st.metric.adsm,
-                    st.metric.eopen.max(0.0),
-                ) {
+                if let Some(best) =
+                    self.evaluator
+                        .aim_time(st.metric.hs, st.metric.adsm, st.metric.eopen.max(0.0))
+                {
                     if best > max + 1e-9 {
                         continue;
                     }
@@ -1803,21 +1882,31 @@ impl<'a> Solver<'a> {
                         &self.evaluator,
                     );
                     let rank = self.seed_metric_score(&metric);
-                    scored.push((margin, rank, cost, DpState { cost, metric, laser_pro: None, choices }));
+                    scored.push((
+                        margin,
+                        rank,
+                        cost,
+                        DpState {
+                            cost,
+                            metric,
+                            laser_pro: None,
+                            choices,
+                        },
+                    ));
                 }
             }
             scored.sort_by(|a, b| match (a.0 >= 0.0, b.0 >= 0.0) {
-                (true, true) => a
-                    .2
-                    .cmp(&b.2)
-                    .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal))
-                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)),
-                (false, false) => b
-                    .0
-                    .partial_cmp(&a.0)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
-                    .then_with(|| a.2.cmp(&b.2)),
+                (true, true) => {
+                    a.2.cmp(&b.2)
+                        .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal))
+                        .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+                }
+                (false, false) => {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+                        .then_with(|| a.2.cmp(&b.2))
+                }
                 (true, false) => Ordering::Less,
                 (false, true) => Ordering::Greater,
             });
@@ -1865,11 +1954,10 @@ impl<'a> Solver<'a> {
                 continue;
             }
             if let Some(max) = aim_max {
-                if let Some(best) = self.evaluator.aim_time(
-                    st.metric.hs,
-                    st.metric.adsm,
-                    st.metric.eopen.max(0.0),
-                ) {
+                if let Some(best) =
+                    self.evaluator
+                        .aim_time(st.metric.hs, st.metric.adsm, st.metric.eopen.max(0.0))
+                {
                     if best > max + 1e-9 {
                         continue;
                     }
@@ -2003,13 +2091,14 @@ impl<'a> Solver<'a> {
             },
             None => TuneReq::unconstrained(),
         };
-        let Some((tuning_state, chosen)) =
-            self.pick_tuning(&instances, &req, &installed)
-        else {
+        let Some((tuning_state, chosen)) = self.pick_tuning(&instances, &req, &installed) else {
             return;
         };
 
-        let Some(metrics) = self.evaluator.evaluate(&self.assembler, &assembly, &tuning_state) else {
+        let Some(metrics) = self
+            .evaluator
+            .evaluate(&self.assembler, &assembly, &tuning_state)
+        else {
             return;
         };
 
@@ -2064,8 +2153,18 @@ impl<'a> Solver<'a> {
                 c_h: rec.as_ref().map(|r| r.c_h).unwrap_or(1.0),
                 c_v: rec.as_ref().map(|r| r.c_v).unwrap_or(1.0),
                 c_k: rec.as_ref().map(|r| r.c_k).unwrap_or(1.0),
-                t_h: metrics.recoil.tuning_runtime.get("GRecoil_H").copied().unwrap_or(0.0),
-                t_v: metrics.recoil.tuning_runtime.get("GRecoil_V").copied().unwrap_or(0.0),
+                t_h: metrics
+                    .recoil
+                    .tuning_runtime
+                    .get("GRecoil_H")
+                    .copied()
+                    .unwrap_or(0.0),
+                t_v: metrics
+                    .recoil
+                    .tuning_runtime
+                    .get("GRecoil_V")
+                    .copied()
+                    .unwrap_or(0.0),
                 t_k: metrics
                     .recoil
                     .tuning_runtime
@@ -2125,7 +2224,10 @@ impl<'a> Solver<'a> {
     }
 
     fn recoil_base(&self, parts: &[&Part]) -> Option<BaseRecoil> {
-        let profile = self.payload.numeric_profiles.get(self.evaluator.weapon_id)?;
+        let profile = self
+            .payload
+            .numeric_profiles
+            .get(self.evaluator.weapon_id)?;
         let mode = &self.options.mode;
         let mut d = 0.0;
         let mut a_h = 0.0;
@@ -2161,7 +2263,12 @@ impl<'a> Solver<'a> {
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = crate::metrics::has_laser(part, mode);
             let selected_laser = laser_idx == Some(idx);
-            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for m in part
+                .main_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" {
                     continue;
                 }
@@ -2196,7 +2303,9 @@ impl<'a> Solver<'a> {
                 if m.modifier_type != "Mult_C" {
                     continue;
                 }
-                let Some(p) = m.param1.map(|v| v.0) else { continue };
+                let Some(p) = m.param1.map(|v| v.0) else {
+                    continue;
+                };
                 if !p.is_finite() {
                     continue;
                 }
@@ -2220,7 +2329,11 @@ impl<'a> Solver<'a> {
                 }
             }
             if (!bipod || self.options.bipod_deployed) && !explicit_spring {
-                if let Some(k) = part.raw_recoil.get(mode).and_then(|r| r.gunkick_spring_mult_c) {
+                if let Some(k) = part
+                    .raw_recoil
+                    .get(mode)
+                    .and_then(|r| r.gunkick_spring_mult_c)
+                {
                     if k.is_finite() {
                         c_k *= 1.0 + k;
                     }
@@ -2231,7 +2344,10 @@ impl<'a> Solver<'a> {
 
         let curves = &profile.linked_tables.recoil_curves;
         let control = if mode == "warfare" {
-            curves.recoil_control_mp.as_ref().or(curves.recoil_control.as_ref())
+            curves
+                .recoil_control_mp
+                .as_ref()
+                .or(curves.recoil_control.as_ref())
         } else {
             curves.recoil_control.as_ref()
         }?;
@@ -2343,8 +2459,7 @@ impl<'a> Solver<'a> {
                 continue;
             }
             for tune in &inst.part.tuning_options {
-                let key_base =
-                    Evaluator::tuning_key(&inst.slot_path, &inst.part.id, &tune.tune_id);
+                let key_base = Evaluator::tuning_key(&inst.slot_path, &inst.part.id, &tune.tune_id);
                 let offers = if let Some(v) = self.options.locked_tuning.get(&key_base).copied() {
                     let v = quantize(v, tune.min_value, tune.max_value, tune.step_value);
                     let c = tune_channels(tune, v);
@@ -2387,9 +2502,8 @@ impl<'a> Solver<'a> {
                     .iter()
                     .map(|o| {
                         let vals = [o.e_h, o.e_v, o.e_k, o.e_open];
-                        let floor = |c: usize| {
-                            (((vals[c] - min[c]).max(0.0)) * SCALE).floor() as i64
-                        };
+                        let floor =
+                            |c: usize| (((vals[c] - min[c]).max(0.0)) * SCALE).floor() as i64;
                         (floor(0), floor(1), floor(2), floor(3))
                     })
                     .collect()
@@ -2449,12 +2563,7 @@ impl<'a> Solver<'a> {
         }
         let strict = [Some(h_strict), Some(v_strict), Some(k_strict)];
         let strict = if aim_max.is_some() {
-            [
-                strict[0],
-                strict[1],
-                strict[2],
-                Some(open_strict),
-            ]
+            [strict[0], strict[1], strict[2], Some(open_strict)]
         } else {
             [strict[0], strict[1], strict[2], None]
         };
@@ -2554,10 +2663,7 @@ impl<'a> Solver<'a> {
         Self::pick_from_frontier(&frontier, req, parts, self.options, &self.evaluator)
     }
 
-    fn build_tune_frontier(
-        &mut self,
-        instances: &[TuningInstance<'a>],
-    ) -> Option<Vec<Offer>> {
+    fn build_tune_frontier(&mut self, instances: &[TuningInstance<'a>]) -> Option<Vec<Offer>> {
         let empty = || Offer {
             e_h: 0.0,
             e_v: 0.0,
@@ -2629,8 +2735,7 @@ impl<'a> Solver<'a> {
                         break;
                     }
                 }
-                let (pruned, cut) =
-                    pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+                let (pruned, cut) = pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
                 self.heuristic_incomplete |= cut.capped;
                 self.truncated |= cut.deadline;
                 group = pruned;
@@ -2664,8 +2769,7 @@ impl<'a> Solver<'a> {
                     break;
                 }
             }
-            let (pruned, cut) =
-                pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+            let (pruned, cut) = pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
             self.heuristic_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
             frontier = pruned;
@@ -2787,7 +2891,11 @@ impl<'a> Solver<'a> {
                 .unwrap_or(Ordering::Equal)
                 .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
                 .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
-                .then(deviation(a.value).partial_cmp(&deviation(b.value)).unwrap_or(Ordering::Equal))
+                .then(
+                    deviation(a.value)
+                        .partial_cmp(&deviation(b.value))
+                        .unwrap_or(Ordering::Equal),
+                )
         });
         let dims = self.tune_dims;
         let mut pruned: Vec<LocalOffer> = Vec::new();
@@ -2804,7 +2912,11 @@ impl<'a> Solver<'a> {
                 .unwrap_or(Ordering::Equal)
                 .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
                 .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
-                .then(deviation(a.value).partial_cmp(&deviation(b.value)).unwrap_or(Ordering::Equal))
+                .then(
+                    deviation(a.value)
+                        .partial_cmp(&deviation(b.value))
+                        .unwrap_or(Ordering::Equal),
+                )
         });
         let cached: Vec<Offer> = pruned
             .iter()
@@ -2835,7 +2947,12 @@ impl<'a> Solver<'a> {
                         slot_name: slot.slot.name.clone(),
                         part_id: part.id.clone(),
                         part_name: part.name.clone(),
-                        price: self.evaluator.prices.get(part.price_id()).copied().unwrap_or(0),
+                        price: self
+                            .evaluator
+                            .prices
+                            .get(part.price_id())
+                            .copied()
+                            .unwrap_or(0),
                     });
                 }
             }
@@ -2847,7 +2964,12 @@ impl<'a> Solver<'a> {
                     slot_name: item.slot.name.clone(),
                     part_id: part.id.clone(),
                     part_name: part.name.clone(),
-                    price: self.evaluator.prices.get(part.price_id()).copied().unwrap_or(0),
+                    price: self
+                        .evaluator
+                        .prices
+                        .get(part.price_id())
+                        .copied()
+                        .unwrap_or(0),
                 });
             }
         }
@@ -2868,6 +2990,176 @@ struct LocalOffer {
     value: f64,
 }
 
+type CapPoint = [f64; 4];
+
+/// Candidate points kept on the dominator side. Dropping reachable points
+/// only makes a covering query fail, so a small cap is sound.
+const CAP_COVER_LIMIT: usize = 8;
+/// Corners used to upper/lower-bound the dominated side. Every corner is a
+/// sound bound for its chunk, so a small cap stays sound while keeping the
+/// dominance test cheap.
+const CAP_REQ_LIMIT: usize = 8;
+
+fn cap_ge(a: &CapPoint, b: &CapPoint) -> bool {
+    (0..4).all(|i| a[i] >= b[i] - 1e-9)
+}
+
+fn cap_le(a: &CapPoint, b: &CapPoint) -> bool {
+    (0..4).all(|i| a[i] <= b[i] + 1e-9)
+}
+
+/// Achievable tuning-vector set reduced to the points dominance ever needs:
+/// coordinatewise-maximal points for higher-is-better channels and
+/// coordinatewise-minimal points for lower-is-better ones. Truncation only
+/// drops reachable points, so every later dominance proof stays sound, but it
+/// must be applied to the two extremes independently.
+#[derive(Debug, Clone, Default)]
+struct CapFront {
+    /// Reachable Pareto-maximal vectors, trimmed. Used as the dominator side.
+    max: Vec<CapPoint>,
+    /// Upper-bound corners: their upward closure covers every reachable
+    /// vector. Used as the dominated side, where an unreachable corner is
+    /// still a valid requirement.
+    max_req: Vec<CapPoint>,
+    /// Reachable Pareto-minimal vectors, trimmed.
+    min: Vec<CapPoint>,
+    /// Lower-bound corners, covering every reachable vector from below.
+    min_req: Vec<CapPoint>,
+}
+
+fn cap_sort_dedup(mut pts: Vec<CapPoint>) -> Vec<CapPoint> {
+    pts.sort_by(|a, b| {
+        a.iter().zip(b.iter()).fold(Ordering::Equal, |ord, (x, y)| {
+            ord.then(x.partial_cmp(y).unwrap_or(Ordering::Equal))
+        })
+    });
+    pts.dedup_by(|a, b| (0..4).all(|i| (a[i] - b[i]).abs() <= 1e-9));
+    pts
+}
+
+fn cap_trim(mut pts: Vec<CapPoint>, want_max: bool) -> Vec<CapPoint> {
+    if pts.len() > CAP_COVER_LIMIT {
+        // `pts` is ascending, so the useful extreme is the tail for maxima and
+        // the head for minima. Dropping reachable points only weakens the
+        // dominator side, never the requirement side.
+        if want_max {
+            pts.drain(..pts.len() - CAP_COVER_LIMIT);
+        } else {
+            pts.truncate(CAP_COVER_LIMIT);
+        }
+    }
+    pts
+}
+
+/// Sorted Pareto extremes of a reachable set.
+fn cap_extremes(pts: Vec<CapPoint>, want_max: bool) -> Vec<CapPoint> {
+    if pts.len() <= 1 {
+        return pts;
+    }
+    let pts = cap_sort_dedup(pts);
+    let mut out: Vec<CapPoint> = Vec::new();
+    for i in 0..pts.len() {
+        let mut keep = true;
+        for j in 0..pts.len() {
+            if i == j {
+                continue;
+            }
+            let ge = cap_ge(&pts[j], &pts[i]);
+            let le = cap_le(&pts[j], &pts[i]);
+            if (want_max && ge && !le) || (!want_max && le && !ge) {
+                keep = false;
+                break;
+            }
+        }
+        if keep {
+            out.push(pts[i]);
+        }
+    }
+    out
+}
+
+/// Fold a sorted reachable set into at most `CAP_REQ_LIMIT` corners whose
+/// orthants cover it: each chunk is replaced by its coordinatewise maximum
+/// (upper bounds) or minimum (lower bounds). Every dropped point stays inside
+/// the orthant of its chunk corner, so the corners are a sound over-
+/// approximation.
+fn cap_corners(pts: &[CapPoint], want_max: bool) -> Vec<CapPoint> {
+    if pts.len() <= CAP_REQ_LIMIT {
+        return pts.to_vec();
+    }
+    let mut out = Vec::with_capacity(CAP_REQ_LIMIT);
+    let mut start = 0usize;
+    for chunk in 0..CAP_REQ_LIMIT {
+        let remaining_points = pts.len() - start;
+        let remaining_chunks = CAP_REQ_LIMIT - chunk;
+        let take = remaining_points.div_ceil(remaining_chunks);
+        let end = start + take;
+        let mut corner = pts[start];
+        for p in &pts[start + 1..end] {
+            for i in 0..4 {
+                if want_max {
+                    corner[i] = corner[i].max(p[i]);
+                } else {
+                    corner[i] = corner[i].min(p[i]);
+                }
+            }
+        }
+        out.push(corner);
+        start = end;
+    }
+    out
+}
+
+fn cap_front(points: Vec<CapPoint>) -> CapFront {
+    if points.is_empty() {
+        return CapFront::default();
+    }
+    let pts = cap_sort_dedup(points);
+    let max = cap_extremes(pts.clone(), true);
+    let min = cap_extremes(pts, false);
+    CapFront {
+        max_req: cap_corners(&max, true),
+        min_req: cap_corners(&min, false),
+        max: cap_trim(max, true),
+        min: cap_trim(min, false),
+    }
+}
+
+/// Sums of the operands' candidate vectors. The extreme points of a Minkowski
+/// sum are sums of the operands' extreme points, and a correlated sum never
+/// reaches a corner that neither operand reaches alone.
+fn cap_sum(x: &[CapPoint], y: &[CapPoint]) -> Vec<CapPoint> {
+    if x.len() == 1 && y.len() == 1 {
+        return vec![[
+            x[0][0] + y[0][0],
+            x[0][1] + y[0][1],
+            x[0][2] + y[0][2],
+            x[0][3] + y[0][3],
+        ]];
+    }
+    let mut out = Vec::with_capacity(x.len().saturating_mul(y.len()));
+    for p in x {
+        for q in y {
+            out.push([p[0] + q[0], p[1] + q[1], p[2] + q[2], p[3] + q[3]]);
+        }
+    }
+    out
+}
+
+fn cap_combine(a: &CapFront, b: &CapFront) -> CapFront {
+    let max = cap_sort_dedup(cap_sum(&a.max, &b.max));
+    let min = cap_sort_dedup(cap_sum(&a.min, &b.min));
+    let max_req = cap_corners(&cap_sort_dedup(cap_sum(&a.max_req, &b.max_req)), true);
+    let min_req = cap_corners(&cap_sort_dedup(cap_sum(&a.min_req, &b.min_req)), false);
+    let max = cap_trim(max, true);
+    let min = cap_trim(min, false);
+    CapFront {
+        max,
+        max_req,
+        min,
+        min_req,
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct ExactPart {
@@ -2883,6 +3175,11 @@ struct ExactPart {
     hs: f64,
     adsm: f64,
     eopen: f64,
+    eh_min: f64,
+    ev_min: f64,
+    ek_min: f64,
+    eopen_min: f64,
+    e_front: Option<Rc<CapFront>>,
     panel: Vec<f64>,
 }
 
@@ -2901,6 +3198,11 @@ impl ExactPart {
             hs: 0.0,
             adsm: 0.0,
             eopen: 0.0,
+            eh_min: 0.0,
+            ev_min: 0.0,
+            ek_min: 0.0,
+            eopen_min: 0.0,
+            e_front: None,
             panel: Vec::new(),
         }
     }
@@ -2924,6 +3226,16 @@ impl ExactPart {
         self.hs += other.hs;
         self.adsm += other.adsm;
         self.eopen += other.eopen;
+        self.eh_min += other.eh_min;
+        self.ev_min += other.ev_min;
+        self.ek_min += other.ek_min;
+        self.eopen_min += other.eopen_min;
+        self.e_front = match (&self.e_front, &other.e_front) {
+            (Some(a), Some(b)) => Some(Rc::new(cap_combine(a, b))),
+            (Some(front), None) => Some(front.clone()),
+            (None, Some(front)) => Some(front.clone()),
+            (None, None) => None,
+        };
         if self.panel.len() < other.panel.len() {
             self.panel.resize(other.panel.len(), 0.0);
         }
@@ -3123,10 +3435,10 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
     out
 }
 
-/// Extends `state` with `opt`. A laser candidate replaces the current laser
-/// winner only when it scores strictly higher, matching `laser_pro_index`,
-/// which keeps the first part on a tie.
-fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
+/// Applies `opt` to the metric and laser winner of `state`. Split out from
+/// `dp_advance` so callers can evaluate bounds on the advanced metric before
+/// paying for a choices clone.
+fn dp_metric_advance(state: &DpState, opt: &DpOption) -> (ExactPart, Option<LaserPro>) {
     let mut metric = state.metric.clone();
     metric.add(&opt.metric);
     let mut laser_pro = state.laser_pro.clone();
@@ -3143,6 +3455,15 @@ fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
             laser_pro = Some(candidate.clone());
         }
     }
+    (metric, laser_pro)
+}
+
+/// Extends `state` with `opt`. A laser candidate replaces the current laser
+/// winner only when it scores strictly higher, matching `laser_pro_index`,
+/// which keeps the first part on a tie.
+#[cfg(test)]
+fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
+    let (metric, laser_pro) = dp_metric_advance(state, opt);
     let mut choices = state.choices.clone();
     choices.push(opt.choice.clone());
     DpState {
@@ -3169,10 +3490,7 @@ fn exact_part_metric(
                 if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
                     continue;
                 }
-                if is_laser
-                    && modif.polarity.as_deref() != Some("con")
-                    && !include_laser_pro
-                {
+                if is_laser && modif.polarity.as_deref() != Some("con") && !include_laser_pro {
                     continue;
                 }
                 let attr = normalize_attr(modif.attribute_id.as_deref());
@@ -3187,10 +3505,7 @@ fn exact_part_metric(
             if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
                 continue;
             }
-            if is_laser
-                && modif.polarity.as_deref() != Some("con")
-                && !include_laser_pro
-            {
+            if is_laser && modif.polarity.as_deref() != Some("con") && !include_laser_pro {
                 continue;
             }
             if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
@@ -3226,7 +3541,9 @@ fn exact_part_metric(
             if modif.modifier_type != "Mult_C" {
                 continue;
             }
-            let Some(p) = modif.param1.map(|v| v.0) else { continue };
+            let Some(p) = modif.param1.map(|v| v.0) else {
+                continue;
+            };
             if !p.is_finite() {
                 continue;
             }
@@ -3245,7 +3562,11 @@ fn exact_part_metric(
         }
     }
     if (!bipod || bipod_deployed) && !explicit_spring {
-        if let Some(k) = part.raw_recoil.get(mode).and_then(|r| r.gunkick_spring_mult_c) {
+        if let Some(k) = part
+            .raw_recoil
+            .get(mode)
+            .and_then(|r| r.gunkick_spring_mult_c)
+        {
             if k.is_finite() {
                 m.ck *= 1.0 + k;
             }
@@ -3254,17 +3575,43 @@ fn exact_part_metric(
     if !crate::metrics::tuning_available(slot_name, part) {
         return m;
     }
+    let mut front = CapFront::default();
+    let mut has_front = false;
+    let mut tuned = false;
     for tune in &part.tuning_options {
         let mut max_h = f64::NEG_INFINITY;
         let mut max_v = f64::NEG_INFINITY;
         let mut max_k = f64::NEG_INFINITY;
         let mut max_open = f64::NEG_INFINITY;
+        let mut min_h = f64::INFINITY;
+        let mut min_v = f64::INFINITY;
+        let mut min_k = f64::INFINITY;
+        let mut min_open = f64::INFINITY;
+        let mut points: Vec<CapPoint> = Vec::new();
         for v in tune_offer_values(tune) {
             let channels = tune_channels(tune, v);
             max_h = max_h.max(channels.h);
             max_v = max_v.max(channels.v);
             max_k = max_k.max(channels.k);
             max_open = max_open.max(channels.open);
+            min_h = min_h.min(channels.h);
+            min_v = min_v.min(channels.v);
+            min_k = min_k.min(channels.k);
+            min_open = min_open.min(channels.open);
+            let point = [channels.h, channels.v, channels.k, channels.open];
+            if point.iter().all(|v| v.is_finite()) {
+                points.push(point);
+            }
+        }
+        if !points.is_empty() {
+            let option_front = cap_front(points);
+            front = if has_front {
+                cap_combine(&front, &option_front)
+            } else {
+                option_front
+            };
+            has_front = true;
+            tuned = true;
         }
         if max_h.is_finite() {
             m.eh += max_h;
@@ -3278,6 +3625,21 @@ fn exact_part_metric(
         if max_open.is_finite() {
             m.eopen += max_open;
         }
+        if min_h.is_finite() {
+            m.eh_min += min_h;
+        }
+        if min_v.is_finite() {
+            m.ev_min += min_v;
+        }
+        if min_k.is_finite() {
+            m.ek_min += min_k;
+        }
+        if min_open.is_finite() {
+            m.eopen_min += min_open;
+        }
+    }
+    if tuned {
+        m.e_front = Some(Rc::new(front));
     }
     m
 }
@@ -3323,15 +3685,6 @@ fn exact_laser_pro(part: &Part, mode: &str, panel_attrs: &[String]) -> ExactPart
     m
 }
 
-/// True when a DP state carries no tuning headroom. `eh/ev/ek/eopen` are
-/// optimistic maxima over the tuning values, not the joint tuning state, so
-/// two states with equal fixed dims but different tuning headroom may resolve
-/// to different final metrics. Only states with no tuning contribution at all
-/// are provably interchangeable for dedup.
-fn dp_metric_dedupable(m: &ExactPart) -> bool {
-    m.eh == 0.0 && m.ev == 0.0 && m.ek == 0.0 && m.eopen == 0.0
-}
-
 fn metric_hash(m: &ExactPart) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |v: f64| {
@@ -3349,13 +3702,39 @@ fn metric_hash(m: &ExactPart) -> u64 {
     for p in &m.panel {
         mix(*p);
     }
+    mix(m.eh);
+    mix(m.ev);
+    mix(m.ek);
+    mix(m.eopen);
+    mix(m.eh_min);
+    mix(m.ev_min);
+    mix(m.ek_min);
+    mix(m.eopen_min);
+    if let Some(front) = &m.e_front {
+        for points in [&front.max, &front.max_req, &front.min, &front.min_req] {
+            mix(points.len() as f64);
+            for p in points {
+                for v in p {
+                    mix(*v);
+                }
+            }
+        }
+    }
     h
 }
 
+fn cap_front_eq(a: &Option<Rc<CapFront>>, b: &Option<Rc<CapFront>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            x.max == y.max && x.max_req == y.max_req && x.min == y.min && x.min_req == y.min_req
+        }
+        _ => false,
+    }
+}
+
 fn metric_eq(a: &ExactPart, b: &ExactPart) -> bool {
-    dp_metric_dedupable(a)
-        && dp_metric_dedupable(b)
-        && a.d == b.d
+    a.d == b.d
         && a.ah == b.ah
         && a.av == b.av
         && a.ch == b.ch
@@ -3363,7 +3742,104 @@ fn metric_eq(a: &ExactPart, b: &ExactPart) -> bool {
         && a.ck == b.ck
         && a.hs == b.hs
         && a.adsm == b.adsm
+        && a.eh == b.eh
+        && a.ev == b.ev
+        && a.ek == b.ek
+        && a.eopen == b.eopen
+        && a.eh_min == b.eh_min
+        && a.ev_min == b.ev_min
+        && a.ek_min == b.ek_min
+        && a.eopen_min == b.eopen_min
         && a.panel == b.panel
+        && cap_front_eq(&a.e_front, &b.e_front)
+}
+
+fn e_max_channels(m: &ExactPart) -> CapPoint {
+    [m.eh, m.ev, m.ek, m.eopen]
+}
+
+fn e_min_channels(m: &ExactPart) -> CapPoint {
+    [m.eh_min, m.ev_min, m.ek_min, m.eopen_min]
+}
+
+const ZERO_CAP: CapPoint = [0.0; 4];
+
+fn cap_points(m: &ExactPart, want_max: bool) -> &[CapPoint] {
+    match &m.e_front {
+        Some(front) => {
+            if want_max {
+                &front.max
+            } else {
+                &front.min
+            }
+        }
+        None => std::slice::from_ref(&ZERO_CAP),
+    }
+}
+
+fn cap_requirements(m: &ExactPart, want_max: bool) -> &[CapPoint] {
+    match &m.e_front {
+        Some(front) => {
+            if want_max {
+                &front.max_req
+            } else {
+                &front.min_req
+            }
+        }
+        None => std::slice::from_ref(&ZERO_CAP),
+    }
+}
+
+/// Does every reachable tuning vector of `y` have a reachable `x` vector that
+/// is at least as good on every channel in `mask`? `y` is represented by
+/// upper-bound corners whose orthants cover its reachable set, so covering
+/// every corner covers every reachable vector. `x` uses its reachable maximal
+/// points; dropping some of those can only make the query fail, never succeed
+/// falsely.
+fn e_higher_cover(x: &ExactPart, y: &ExactPart, mask: u8) -> bool {
+    if mask == 0 {
+        return true;
+    }
+    let x_points = cap_points(x, true);
+    let y_points = cap_requirements(y, true);
+    let covers =
+        |p: &CapPoint, q: &CapPoint| (0..4).all(|i| mask & (1 << i) == 0 || p[i] >= q[i] - 1e-9);
+    y_points
+        .iter()
+        .all(|q| x_points.iter().any(|p| covers(p, q)))
+}
+
+/// Counterpart of `e_higher_cover` for lower-is-better channels.
+fn e_lower_cover(x: &ExactPart, y: &ExactPart, mask: u8) -> bool {
+    if mask == 0 {
+        return true;
+    }
+    let x_points = cap_points(x, false);
+    let y_points = cap_requirements(y, false);
+    let covers =
+        |p: &CapPoint, q: &CapPoint| (0..4).all(|i| mask & (1 << i) == 0 || p[i] <= q[i] + 1e-9);
+    y_points
+        .iter()
+        .all(|q| x_points.iter().any(|p| covers(p, q)))
+}
+
+/// Mixed directions need one tuning choice that is both high on `higher_mask`
+/// and low on `lower_mask`. The envelope cannot prove that, so use bounds that
+/// hold for every choice.
+fn e_mixed_ok(x: &ExactPart, y: &ExactPart, higher_mask: u8, lower_mask: u8) -> bool {
+    let x_max = e_max_channels(x);
+    let x_min = e_min_channels(x);
+    let y_max = e_max_channels(y);
+    let y_min = e_min_channels(y);
+    (0..4).all(|i| {
+        if higher_mask & (1 << i) != 0 && x_min[i] < y_max[i] - 1e-9 {
+            return false;
+        }
+        if lower_mask & (1 << i) != 0 && x_max[i] > y_min[i] + 1e-9 {
+            return false;
+        }
+        true
+    })
 }
 
 fn dp_dominates(
@@ -3396,36 +3872,68 @@ fn dp_dominates(
     if dims.ck && x.ck > y.ck + 1e-9 {
         return false;
     }
-    if dims.eh && x.eh < y.eh - 1e-9 {
-        return false;
+    let aim_lower = dims.hs && aim_dir == AimDir::LessHandling;
+    let aim_higher = dims.hs && aim_dir == AimDir::MoreHandling;
+    let mut higher_mask = 0u8;
+    if dims.eh {
+        higher_mask |= 1;
     }
-    if dims.ev && x.ev < y.ev - 1e-9 {
-        return false;
+    if dims.ev {
+        higher_mask |= 2;
     }
-    if dims.ek && x.ek < y.ek - 1e-9 {
-        return false;
+    if dims.ek {
+        higher_mask |= 4;
+    }
+    if aim_higher {
+        higher_mask |= 8;
+    }
+    let lower_mask = if aim_lower { 8u8 } else { 0 };
+    // Every reachable vector of `y` is bounded by `y`'s per-channel maxima,
+    // and `y` attains each maximum at some reachable vector, so matching those
+    // maxima is a necessary condition for any covering. Checking it first
+    // rejects most pairs before the envelope scan.
+    let x_max = e_max_channels(x);
+    let y_max = e_max_channels(y);
+    let x_min = e_min_channels(x);
+    let y_min = e_min_channels(y);
+    for i in 0..4 {
+        let bit = 1 << i;
+        if higher_mask & bit != 0 && x_max[i] < y_max[i] - 1e-9 {
+            return false;
+        }
+        if lower_mask & bit != 0 && x_min[i] > y_min[i] + 1e-9 {
+            return false;
+        }
+    }
+    if higher_mask != 0 && lower_mask != 0 {
+        if !e_mixed_ok(x, y, higher_mask, lower_mask) {
+            return false;
+        }
+    } else {
+        if !e_higher_cover(x, y, higher_mask) {
+            return false;
+        }
+        if !e_lower_cover(x, y, lower_mask) {
+            return false;
+        }
     }
     if dims.hs {
         match aim_dir {
             AimDir::MoreHandling => {
-                if x.hs < y.hs - 1e-9
-                    || x.adsm > y.adsm + 1e-9
-                    || x.eopen < y.eopen - 1e-9
-                {
+                if x.hs < y.hs - 1e-9 || x.adsm > y.adsm + 1e-9 {
                     return false;
                 }
             }
             AimDir::LessHandling => {
-                if x.hs > y.hs + 1e-9
-                    || x.adsm < y.adsm - 1e-9
-                    || x.eopen > y.eopen + 1e-9
-                {
+                if x.hs > y.hs + 1e-9 || x.adsm < y.adsm - 1e-9 {
                     return false;
                 }
             }
             AimDir::Equal => {
                 if (x.hs - y.hs).abs() > 1e-9
                     || (x.adsm - y.adsm).abs() > 1e-9
+                    || (x.eopen - x.eopen_min).abs() > 1e-9
+                    || (y.eopen - y.eopen_min).abs() > 1e-9
                     || (x.eopen - y.eopen).abs() > 1e-9
                 {
                     return false;
@@ -3467,7 +3975,7 @@ fn dp_pareto(
     panel_dirs: &[PanelDir],
     aim_dir: AimDir,
 ) -> Vec<DpState> {
-    dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None).0
+    dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None, false).0
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3483,25 +3991,37 @@ fn dp_pareto_capped(
     aim_dir: AimDir,
     limit: usize,
     deadline_at: Option<u64>,
+    seed: bool,
 ) -> (Vec<DpState>, Trim) {
-    states.sort_by(|a, b| {
-        a.cost
-            .cmp(&b.cost)
-            .then(b.metric.score().partial_cmp(&a.metric.score()).unwrap_or(Ordering::Equal))
-    });
+    if seed {
+        // The seed pass only has to return one feasible build, and the cap
+        // keeps the head of the list, so rank by capability instead of price.
+        states.sort_by(|a, b| {
+            b.metric
+                .score()
+                .partial_cmp(&a.metric.score())
+                .unwrap_or(Ordering::Equal)
+                .then(a.cost.cmp(&b.cost))
+        });
+    } else {
+        states.sort_by(|a, b| {
+            a.cost.cmp(&b.cost).then(
+                b.metric
+                    .score()
+                    .partial_cmp(&a.metric.score())
+                    .unwrap_or(Ordering::Equal),
+            )
+        });
+    }
     // The cartesian product repeats the same metric vector under many different
     // choice lists (slots that do not affect any constrained metric). Sorting by
     // cost first means the first occurrence is the cheapest one, so the rest can
     // be dropped without touching the optimality argument. States with tuning
-    // headroom are kept unconditionally: the key deliberately excludes the
-    // optimistic tuning maxima, and those states may resolve differently.
+    // headroom are interchangeable only when their whole reachable tuning set
+    // matches, so the envelope is part of the hash and the equality check.
     let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
     let mut deduped: Vec<DpState> = Vec::with_capacity(states.len());
     for st in states {
-        if !dp_metric_dedupable(&st.metric) {
-            deduped.push(st);
-            continue;
-        }
         let hash = metric_hash(&st.metric);
         let bucket = buckets.entry(hash).or_default();
         if bucket
@@ -3683,7 +4203,9 @@ fn part_own_bound(part: &Part, mode: &str, laser_enabled: bool) -> MetricBound {
             if m.modifier_type != "Mult_C" {
                 continue;
             }
-            let Some(p) = m.param1.map(|v| v.0) else { continue };
+            let Some(p) = m.param1.map(|v| v.0) else {
+                continue;
+            };
             if !p.is_finite() {
                 continue;
             }
@@ -3699,7 +4221,11 @@ fn part_own_bound(part: &Part, mode: &str, laser_enabled: bool) -> MetricBound {
         }
     }
     if !explicit_spring {
-        if let Some(k) = part.raw_recoil.get(mode).and_then(|r| r.gunkick_spring_mult_c) {
+        if let Some(k) = part
+            .raw_recoil
+            .get(mode)
+            .and_then(|r| r.gunkick_spring_mult_c)
+        {
             if k.is_finite() {
                 b.min_c_k *= 1.0 + k;
             }
@@ -3737,7 +4263,11 @@ fn compute_bounds(
     let mut part_cache: FxHashMap<String, MetricBound> = FxHashMap::default();
     let mut slot_cache: FxHashMap<(String, String), MetricBound> = FxHashMap::default();
     let mut visited: FxHashSet<String> = FxHashSet::default();
-    let rules = payload.virtual_rules.get(weapon_id).cloned().unwrap_or_default();
+    let rules = payload
+        .virtual_rules
+        .get(weapon_id)
+        .cloned()
+        .unwrap_or_default();
     let slot_rule_parts: FxHashMap<String, Vec<String>> = {
         let mut m: FxHashMap<String, Vec<String>> = FxHashMap::default();
         for r in &rules {
@@ -3883,10 +4413,8 @@ struct BaseRecoil {
 
 fn cubic_coeffs(a: &CurveKey, b: &CurveKey) -> (f64, f64, f64) {
     let dt = b.time - a.time;
-    let c3 =
-        2.0 * a.value + dt * a.leave_tangent - 2.0 * b.value + dt * b.arrive_tangent;
-    let c2 = -3.0 * a.value - 2.0 * dt * a.leave_tangent + 3.0 * b.value
-        - dt * b.arrive_tangent;
+    let c3 = 2.0 * a.value + dt * a.leave_tangent - 2.0 * b.value + dt * b.arrive_tangent;
+    let c2 = -3.0 * a.value - 2.0 * dt * a.leave_tangent + 3.0 * b.value - dt * b.arrive_tangent;
     let c1 = dt * a.leave_tangent;
     (c3, c2, c1)
 }
@@ -4000,21 +4528,31 @@ fn pareto_capped(
     limit: usize,
     deadline_at: Option<u64>,
 ) -> (Vec<Offer>, Trim) {
-    let channel = |dir: TuneDir, a: f64, b: f64| match dir {
-        TuneDir::Higher => b.partial_cmp(&a),
-        TuneDir::Lower | TuneDir::Equal => a.partial_cmp(&b),
-        TuneDir::Ignore => Some(Ordering::Equal),
-    }
-    .unwrap_or(Ordering::Equal);
+    let channel = |dir: TuneDir, a: f64, b: f64| {
+        match dir {
+            TuneDir::Higher => b.partial_cmp(&a),
+            TuneDir::Lower | TuneDir::Equal => a.partial_cmp(&b),
+            TuneDir::Ignore => Some(Ordering::Equal),
+        }
+        .unwrap_or(Ordering::Equal)
+    };
     offers.sort_by(|a, b| {
         channel(dims.open, a.e_open, b.e_open)
             .then(channel(dims.move_effect, a.e_move, b.e_move))
             .then(channel(dims.breath, a.e_breath, b.e_breath))
-            .then(channel(dims.move_stability, a.e_move_stability, b.e_move_stability))
+            .then(channel(
+                dims.move_stability,
+                a.e_move_stability,
+                b.e_move_stability,
+            ))
             .then(b.e_h.partial_cmp(&a.e_h).unwrap_or(Ordering::Equal))
             .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
             .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
-            .then(a.deviation.partial_cmp(&b.deviation).unwrap_or(Ordering::Equal))
+            .then(
+                a.deviation
+                    .partial_cmp(&b.deviation)
+                    .unwrap_or(Ordering::Equal),
+            )
     });
     let mut trim = Trim::default();
     let mut out: Vec<Offer> = Vec::new();
@@ -4084,7 +4622,6 @@ fn apply_linear_req(
         *upper = upper.min(bound);
     }
 }
-
 
 /// Lower bound on the aim-scale multiplier applied to raw recoil, per axis.
 /// A part with `aimRecoilProfilesByMode` can replace the base aim profile, and
@@ -4417,10 +4954,12 @@ fn is_recoil_target(target: &str) -> bool {
 
 fn is_bipod(part: &Part) -> bool {
     for list in part.ui_effects.values() {
-        if list
-            .iter()
-            .any(|e| e.condition_id.as_ref().map(|v| v.is("10047")).unwrap_or(false))
-        {
+        if list.iter().any(|e| {
+            e.condition_id
+                .as_ref()
+                .map(|v| v.is("10047"))
+                .unwrap_or(false)
+        }) {
             return true;
         }
     }
@@ -4538,15 +5077,11 @@ fn compute_relevance(
                 }
                 if want_handling
                     && ((m.target_path == "GAiming_ADSTime" && m.modifier_type == "Mult_A")
-                        || (m.target_path == "GMovement_ADSSpeed"
-                            && m.modifier_type == "Addend"))
+                        || (m.target_path == "GMovement_ADSSpeed" && m.modifier_type == "Addend"))
                 {
                     relevant = true;
                 }
-                if want_reload
-                    && m.modifier_type == "Mult_A"
-                    && m.target_path == "GReload_Time"
-                {
+                if want_reload && m.modifier_type == "Mult_A" && m.target_path == "GReload_Time" {
                     relevant = true;
                 }
             }
@@ -4661,11 +5196,11 @@ fn compute_relevance(
     let mut slots: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
     for (host, list) in &payload.slots_by_host {
         for slot in list {
-            let mut slot_relevant = slot
-                .candidate_ids
-                .iter()
-                .any(|id| parts.contains(id))
-                || slot.virtual_candidate_ids.iter().any(|id| parts.contains(id));
+            let mut slot_relevant = slot.candidate_ids.iter().any(|id| parts.contains(id))
+                || slot
+                    .virtual_candidate_ids
+                    .iter()
+                    .any(|id| parts.contains(id));
             if !slot_relevant {
                 if let Some(rules) = payload.virtual_rules.get(weapon_id) {
                     slot_relevant = rules
@@ -4674,7 +5209,10 @@ fn compute_relevance(
                 }
             }
             if slot_relevant {
-                slots.entry(host.clone()).or_default().insert(slot.id.clone());
+                slots
+                    .entry(host.clone())
+                    .or_default()
+                    .insert(slot.id.clone());
             }
         }
     }
@@ -4725,22 +5263,20 @@ mod tests {
 
     #[test]
     fn dp_suffix_bounds_accumulate_extrema_and_products() {
-        let opt = |d: f64, ah: f64, ch: f64, eh: f64, hs: f64, adsm: f64, eopen: f64| {
-            DpOption {
-                cost: 0,
-                metric: ExactPart {
-                    d,
-                    ah,
-                    ch,
-                    eh,
-                    hs,
-                    adsm,
-                    eopen,
-                    ..ExactPart::neutral()
-                },
-                choice: SlotChoice::Unset,
-                laser_pro: None,
-            }
+        let opt = |d: f64, ah: f64, ch: f64, eh: f64, hs: f64, adsm: f64, eopen: f64| DpOption {
+            cost: 0,
+            metric: ExactPart {
+                d,
+                ah,
+                ch,
+                eh,
+                hs,
+                adsm,
+                eopen,
+                ..ExactPart::neutral()
+            },
+            choice: SlotChoice::Unset,
+            laser_pro: None,
         };
         let slots = vec![
             vec![
@@ -5191,7 +5727,12 @@ mod tests {
             ck: true,
             ..DpDims::default()
         };
-        let out = dp_pareto(vec![dominated, pricey_strong, cheap_weak], &dims, &[], AimDir::Ignore);
+        let out = dp_pareto(
+            vec![dominated, pricey_strong, cheap_weak],
+            &dims,
+            &[],
+            AimDir::Ignore,
+        );
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|s| s.cost == 5));
         assert!(out.iter().any(|s| s.cost == 10));
@@ -5203,7 +5744,12 @@ mod tests {
         let higher = part(10.0, 10, vec![50.0]);
         let mut dims = DpDims::default();
         dims.d = true;
-        let out = dp_pareto(vec![higher, lower], &dims, &[PanelDir::Lower], AimDir::Ignore);
+        let out = dp_pareto(
+            vec![higher, lower],
+            &dims,
+            &[PanelDir::Lower],
+            AimDir::Ignore,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric.panel[0], 40.0);
     }
@@ -5212,7 +5758,12 @@ mod tests {
     fn pareto_respects_panel_min_direction() {
         let lower = part(10.0, 10, vec![40.0]);
         let higher = part(10.0, 10, vec![50.0]);
-        let out = dp_pareto(vec![lower, higher], &DpDims::default(), &[PanelDir::Higher], AimDir::Ignore);
+        let out = dp_pareto(
+            vec![lower, higher],
+            &DpDims::default(),
+            &[PanelDir::Higher],
+            AimDir::Ignore,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric.panel[0], 50.0);
     }
@@ -5221,7 +5772,12 @@ mod tests {
     fn pareto_ignores_unconstrained_dimensions() {
         let cheap_weak = part(5.0, 5, vec![]);
         let pricey_strong = part(20.0, 10, vec![]);
-        let out = dp_pareto(vec![pricey_strong, cheap_weak], &DpDims::default(), &[], AimDir::Ignore);
+        let out = dp_pareto(
+            vec![pricey_strong, cheap_weak],
+            &DpDims::default(),
+            &[],
+            AimDir::Ignore,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].cost, 5);
     }
@@ -5288,15 +5844,7 @@ mod tests {
         let panel_attrs = vec!["10008".to_string()];
         let option = DpOption {
             cost,
-            metric: exact_part_metric(
-                &part,
-                "X",
-                mode,
-                false,
-                true,
-                false,
-                &panel_attrs,
-            ),
+            metric: exact_part_metric(&part, "X", mode, false, true, false, &panel_attrs),
             laser_pro: Some(LaserPro {
                 score: crate::metrics::laser_pro_score(&part, mode),
                 metric: exact_laser_pro(&part, mode, &panel_attrs),
@@ -5321,15 +5869,7 @@ mod tests {
 
         // The evaluator applies the modifiers of one laser, the best scoring
         // one, so the DP metric for both parts must match that single delta.
-        let mut once = exact_part_metric(
-            &strong_part,
-            "X",
-            mode,
-            false,
-            true,
-            true,
-            &panel_attrs,
-        );
+        let mut once = exact_part_metric(&strong_part, "X", mode, false, true, true, &panel_attrs);
         once.add(&exact_part_metric(
             &weak_part,
             "X",
@@ -5354,15 +5894,8 @@ mod tests {
         // stacking on top of it.
         let (best, best_part) = laser_option("laser-c", 300, 20.0, 30.0, -1.0);
         let replaced = dp_advance(&forward, &best, 600);
-        let mut expected = exact_part_metric(
-            &best_part,
-            "X",
-            mode,
-            false,
-            true,
-            true,
-            &panel_attrs,
-        );
+        let mut expected =
+            exact_part_metric(&best_part, "X", mode, false, true, true, &panel_attrs);
         expected.add(&exact_part_metric(
             &weak_part,
             "X",
@@ -5408,9 +5941,8 @@ mod tests {
     }
 
     #[test]
-    fn dedup_is_restricted_to_states_without_tuning_headroom() {
-        let mut m = ExactPart::neutral();
-        assert!(dp_metric_dedupable(&m));
+    fn dedup_requires_identical_tuning_envelopes() {
+        let m = ExactPart::neutral();
         assert!(metric_eq(&m, &m.clone()));
         for set in [
             |v: &mut ExactPart| v.eh = 5.0,
@@ -5420,16 +5952,21 @@ mod tests {
         ] {
             let mut with_headroom = ExactPart::neutral();
             set(&mut with_headroom);
-            assert!(!dp_metric_dedupable(&with_headroom));
-            // The hash deliberately ignores tuning fields, so equality must not.
             assert!(!metric_eq(&m, &with_headroom));
         }
         let mut tuned_a = ExactPart::neutral();
         tuned_a.eh = 1.0;
+        tuned_a.e_front = Some(Rc::new(cap_front(vec![[1.0, 0.0, 0.0, 0.0]])));
         let mut tuned_b = ExactPart::neutral();
-        tuned_b.eh = 2.0;
-        assert_eq!(metric_hash(&tuned_a), metric_hash(&tuned_b));
+        tuned_b.eh = 1.0;
+        tuned_b.e_front = Some(Rc::new(cap_front(vec![[0.0, 0.0, 0.0, 1.0]])));
+        assert_ne!(metric_hash(&tuned_a), metric_hash(&tuned_b));
         assert!(!metric_eq(&tuned_a, &tuned_b));
+        let mut tuned_c = ExactPart::neutral();
+        tuned_c.eh = 1.0;
+        tuned_c.e_front = tuned_a.e_front.clone();
+        assert_eq!(metric_hash(&tuned_a), metric_hash(&tuned_c));
+        assert!(metric_eq(&tuned_a, &tuned_c));
     }
 
     #[test]
@@ -5456,7 +5993,11 @@ mod tests {
             -1.0
         );
         assert_eq!(
-            seed_aim_weight(&[Constraint::new("handling-aim-time", Some(300.0), Some(400.0))]),
+            seed_aim_weight(&[Constraint::new(
+                "handling-aim-time",
+                Some(300.0),
+                Some(400.0)
+            )]),
             0.0
         );
         assert_eq!(seed_aim_weight(&[]), 0.0);
@@ -5500,12 +6041,8 @@ mod tests {
             eopen: 0.0,
             ..ExactPart::neutral()
         };
-        assert!(
-            seed_metric_rank(&lower_ads, &[], 1.0) > seed_metric_rank(&higher_ads, &[], 1.0)
-        );
-        assert!(
-            seed_metric_rank(&higher_ads, &[], -1.0) > seed_metric_rank(&lower_ads, &[], -1.0)
-        );
+        assert!(seed_metric_rank(&lower_ads, &[], 1.0) > seed_metric_rank(&higher_ads, &[], 1.0));
+        assert!(seed_metric_rank(&higher_ads, &[], -1.0) > seed_metric_rank(&lower_ads, &[], -1.0));
     }
 
     #[test]
@@ -5519,8 +6056,7 @@ mod tests {
             ..ExactPart::neutral()
         };
         assert!(
-            seed_metric_rank(&higher_panel, &[0], 0.0)
-                > seed_metric_rank(&lower_panel, &[0], 0.0)
+            seed_metric_rank(&higher_panel, &[0], 0.0) > seed_metric_rank(&lower_panel, &[0], 0.0)
         );
     }
 
@@ -5544,8 +6080,7 @@ mod tests {
         let mut dims = DpDims::default();
         dims.d = true;
         let states = vec![part(5.0, 5, vec![]), part(20.0, 10, vec![])];
-        let (out, trim) =
-            dp_pareto_capped(states, &dims, &[], AimDir::Ignore, 1, None);
+        let (out, trim) = dp_pareto_capped(states, &dims, &[], AimDir::Ignore, 1, None, false);
         assert_eq!(out.len(), 1);
         assert!(trim.capped);
         assert!(!trim.deadline);
@@ -5556,8 +6091,15 @@ mod tests {
         let mut dims = DpDims::default();
         dims.d = true;
         let states = vec![part(5.0, 5, vec![])];
-        let (out, trim) =
-            dp_pareto_capped(states, &dims, &[], AimDir::Ignore, usize::MAX, Some(0));
+        let (out, trim) = dp_pareto_capped(
+            states,
+            &dims,
+            &[],
+            AimDir::Ignore,
+            usize::MAX,
+            Some(0),
+            false,
+        );
         assert!(out.is_empty());
         assert!(!trim.capped);
         assert!(trim.deadline);
@@ -5566,12 +6108,7 @@ mod tests {
     #[test]
     fn tune_cap_is_not_reported_as_deadline() {
         let offers = vec![offer(), offer()];
-        let (out, trim) = pareto_capped(
-            offers,
-            &TuneDims::from_constraints(&[]),
-            1,
-            None,
-        );
+        let (out, trim) = pareto_capped(offers, &TuneDims::from_constraints(&[]), 1, None);
         assert_eq!(out.len(), 1);
         assert!(trim.capped);
         assert!(!trim.deadline);
@@ -5680,12 +6217,21 @@ mod tests {
 
     #[test]
     fn incumbent_eval_order_prefers_optimistically_feasible_then_cheapest() {
-        let beam = vec![part(0.0, 10, vec![]), part(0.0, 5, vec![]), part(0.0, 20, vec![])];
-        assert_eq!(incumbent_eval_order(&beam, &[0.1, -0.2, 0.3]), vec![0, 2, 1]);
-        assert_eq!(incumbent_eval_order(&beam, &[-0.1, -0.2, -0.3]), vec![1, 0, 2]);
+        let beam = vec![
+            part(0.0, 10, vec![]),
+            part(0.0, 5, vec![]),
+            part(0.0, 20, vec![]),
+        ];
+        assert_eq!(
+            incumbent_eval_order(&beam, &[0.1, -0.2, 0.3]),
+            vec![0, 2, 1]
+        );
+        assert_eq!(
+            incumbent_eval_order(&beam, &[-0.1, -0.2, -0.3]),
+            vec![1, 0, 2]
+        );
     }
 }
-
 
 fn now_ms() -> u64 {
     #[cfg(target_arch = "wasm32")]
