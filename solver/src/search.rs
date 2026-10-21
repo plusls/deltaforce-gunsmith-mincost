@@ -8,6 +8,7 @@ use crate::model::{Curve, CurveKey, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Constraint {
@@ -162,6 +163,7 @@ pub struct Solver<'a> {
     panel_dirs: Vec<PanelDir>,
     seed_panel_attrs: Vec<usize>,
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
+    tune_frontier_cache: FxHashMap<String, Rc<Vec<Offer>>>,
     control_curve: Option<Curve>,
     gunkick_curve: Option<Curve>,
     control_min: Option<f64>,
@@ -592,6 +594,7 @@ impl<'a> Solver<'a> {
             panel_dirs,
             seed_panel_attrs,
             dp_metric_cache: FxHashMap::default(),
+            tune_frontier_cache: FxHashMap::default(),
             control_curve,
             gunkick_curve,
             control_min,
@@ -1833,6 +1836,25 @@ impl<'a> Solver<'a> {
         req: &TuneReq,
         parts: &[&Part],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        let cache_key = tune_cache_key(instances);
+        let frontier = if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
+            cached.clone()
+        } else {
+            let built = self.build_tune_frontier(instances)?;
+            let built = Rc::new(built);
+            if self.tune_frontier_cache.len() >= TUNE_FRONTIER_CACHE_LIMIT {
+                self.tune_frontier_cache.clear();
+            }
+            self.tune_frontier_cache.insert(cache_key, built.clone());
+            built
+        };
+        Self::pick_from_frontier(&frontier, req, parts, self.options, &self.evaluator)
+    }
+
+    fn build_tune_frontier(
+        &mut self,
+        instances: &[TuningInstance<'a>],
+    ) -> Option<Vec<Offer>> {
         let empty = || Offer {
             e_h: 0.0,
             e_v: 0.0,
@@ -1943,16 +1965,24 @@ impl<'a> Solver<'a> {
             self.truncated |= cut;
             frontier = pruned;
         }
+        Some(frontier)
+    }
 
-        let detail_constraints: Vec<&Constraint> = self
-            .options
+    fn pick_from_frontier(
+        frontier: &[Offer],
+        req: &TuneReq,
+        parts: &[&Part],
+        options: &SolveOptions,
+        evaluator: &Evaluator<'a>,
+    ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        let detail_constraints: Vec<&Constraint> = options
             .constraints
             .iter()
             .filter(|c| !is_panel_attr(&c.id) && !is_recoil_metric(&c.id))
             .collect();
         let mut best: Option<&Offer> = None;
         let mut best_score = f64::NEG_INFINITY;
-        for o in &frontier {
+        for o in frontier {
             if o.e_h < req.lower_h - 1e-9
                 || o.e_h > req.upper_h + 1e-9
                 || o.e_v < req.lower_v - 1e-9
@@ -1970,7 +2000,7 @@ impl<'a> Solver<'a> {
                     breath_stability: o.e_breath,
                     move_stability: o.e_move_stability,
                 };
-                let detail = self.evaluator.detail_with(parts, &sums);
+                let detail = evaluator.detail_with(parts, &sums);
                 let ok = detail_constraints.iter().all(|c| {
                     let Some(value) = detail.value(&c.id) else {
                         return false;
@@ -3003,6 +3033,29 @@ fn curve_min_value(curve: &Curve) -> Option<f64> {
 }
 
 const TUNE_NEXT_LIMIT: usize = 16_384;
+/// Upper bound on cached tuning frontiers. Entries are a few hundred KB at most;
+/// the cap keeps pathological payloads from growing the solver without bound.
+const TUNE_FRONTIER_CACHE_LIMIT: usize = 512;
+
+fn tune_cache_key(instances: &[TuningInstance<'_>]) -> String {
+    let mut key = String::new();
+    for inst in instances {
+        use std::fmt::Write;
+        let _ = write!(
+            key,
+            "{}:{}:{}:{}:",
+            inst.slot_path.len(),
+            inst.slot_path,
+            inst.part.id.len(),
+            inst.part.id
+        );
+        for tune in &inst.part.tuning_options {
+            let _ = write!(key, "{}:{};", tune.tune_id.len(), tune.tune_id);
+        }
+        key.push('\u{1}');
+    }
+    key
+}
 
 fn pareto_capped(
     mut offers: Vec<Offer>,
@@ -3429,6 +3482,52 @@ mod tests {
             },
             choices: Vec::new(),
         }
+    }
+
+    fn tuning_instance<'a>(slot_path: &str, slot_name: &str, part: &'a Part) -> TuningInstance<'a> {
+        TuningInstance {
+            slot_path: slot_path.to_string(),
+            slot_name: slot_name.to_string(),
+            part,
+        }
+    }
+
+    fn tuning_part(id: &str, tune_ids: &[&str]) -> Part {
+        Part {
+            id: id.to_string(),
+            tuning_options: tune_ids
+                .iter()
+                .map(|tune_id| crate::model::TuningOption {
+                    tune_id: (*tune_id).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..serde_json::from_value(serde_json::json!({ "id": id })).unwrap()
+        }
+    }
+
+    #[test]
+    fn tune_cache_key_tracks_instances_and_tunes() {
+        let a = tuning_part("p1", &["t1"]);
+        let b = tuning_part("p2", &["t2"]);
+        let i1 = tuning_instance("weapon:w/slot:1:X", "X", &a);
+        let i2 = tuning_instance("weapon:w/slot:1:X", "X", &b);
+        let same = tune_cache_key(std::slice::from_ref(&i1));
+        assert_eq!(same, tune_cache_key(std::slice::from_ref(&i1)));
+        assert_ne!(same, tune_cache_key(std::slice::from_ref(&i2)));
+        assert_ne!(
+            tune_cache_key(&[i1]),
+            tune_cache_key(&[tuning_instance("weapon:w/slot:2:Y", "Y", &a)])
+        );
+        let with_extra = tuning_part("p1", &["t1", "t3"]);
+        assert_ne!(
+            same,
+            tune_cache_key(std::slice::from_ref(&tuning_instance(
+                "weapon:w/slot:1:X",
+                "X",
+                &with_extra
+            )))
+        );
     }
 
     #[test]
