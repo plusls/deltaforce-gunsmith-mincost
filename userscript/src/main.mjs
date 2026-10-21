@@ -1,3 +1,18 @@
+import {
+  describeResultStatus,
+  formatDuration,
+  normalizeTimeLimitSeconds,
+  resolveDeadlineMs,
+  selectSiteSearchSeconds,
+  siteOptimizerInputsKey,
+  siteSearchSecondsFromRecord,
+  SITE_SEARCH_INPUT_SELECTOR,
+  SITE_SEARCH_SECONDS_MAX,
+  SITE_SEARCH_SECONDS_MIN,
+  SOLVE_DEADLINE_MAX_MS,
+  SOLVE_DEADLINE_MIN_MS,
+} from "../../solver/js/deadline.mjs";
+
 const MINCOST_WASM_BASE64 = "__WASM_BASE64__";
 const MINCOST_WORKER_SOURCE = "__WORKER_SOURCE__";
 const MINCOST_SETTINGS_KEY = "moligod:gunsmith-mincost:v1";
@@ -9,6 +24,7 @@ const defaultSettings = {
   mode: "full",
   priceSource: "current",
   missingPricePolicy: "reject",
+  timeLimitSeconds: null,
 };
 const settings = loadSettings();
 
@@ -16,7 +32,12 @@ function loadSettings() {
   try {
     const raw = page.localStorage?.getItem(MINCOST_SETTINGS_KEY);
     const parsed = raw ? JSON.parse(raw) : null;
-    return { ...defaultSettings, ...(parsed && typeof parsed === "object" ? parsed : {}) };
+    const merged = {
+      ...defaultSettings,
+      ...(parsed && typeof parsed === "object" ? parsed : {}),
+    };
+    merged.timeLimitSeconds = normalizeTimeLimitSeconds(merged.timeLimitSeconds);
+    return merged;
   } catch {
     return { ...defaultSettings };
   }
@@ -28,6 +49,20 @@ function saveSettings() {
   } catch {
     /* ignore */
   }
+}
+
+let statusEl = null;
+const STATUS_COLORS = {
+  info: "#a2a5ad",
+  ok: "#86efac",
+  warn: "#fbbf24",
+  error: "#f87171",
+};
+
+function reportStatus(text, tone = "info") {
+  if (!statusEl || !statusEl.isConnected) return;
+  statusEl.textContent = text;
+  statusEl.style.color = STATUS_COLORS[tone] ?? STATUS_COLORS.info;
 }
 
 function dataKeyOf(context) {
@@ -144,18 +179,47 @@ async function solveContext(context, options) {
   return backend.worker.solve({ ...context, data: undefined }, options, key, data);
 }
 
-async function runMinCost(context, mode, options) {
+function readSiteSearchSeconds(context) {
+  let domSeconds = null;
+  const inputs = document.querySelectorAll(SITE_SEARCH_INPUT_SELECTOR);
+  const input = [...inputs].find((node) => node.disabled !== true) ?? inputs[0];
+  if (input) {
+    const value = Number(input.value);
+    if (Number.isFinite(value) && value > 0) domSeconds = value;
+  }
+
+  let storedSeconds = null;
+  try {
+    const key = siteOptimizerInputsKey(context?.weaponId, context?.mode);
+    const raw = page.localStorage?.getItem(key);
+    storedSeconds = siteSearchSecondsFromRecord(raw ? JSON.parse(raw) : null);
+  } catch {
+    /* ignore */
+  }
+
+  return selectSiteSearchSeconds({ domSeconds, storedSeconds });
+}
+
+async function runMinCost(context, mode, options, requestDeadlineMs) {
+  const { deadlineMs, source } = resolveDeadlineMs({
+    mode,
+    timeLimitSeconds: settings.timeLimitSeconds,
+    siteSeconds: readSiteSearchSeconds(context),
+    requestDeadlineMs,
+  });
   const merged = {
     ...options,
     mode,
     priceSource: settings.priceSource,
     missingPricePolicy: settings.missingPricePolicy,
-    deadlineMs: mode === "fast" ? 2_000 : 5_000,
+    deadlineMs,
   };
   if (merged.constraints.length === 0 && merged.costCap == null) {
     throw new Error("请先在智能配装面板设置至少一个硬条件");
   }
-  return solveContext(context, merged);
+  reportStatus(`求解中 · 时限 ${formatDuration(deadlineMs)}`, "info");
+  const result = await solveContext(context, merged);
+  return { ...result, deadlineMs, deadlineSource: source };
 }
 
 function installWorkerHook() {
@@ -227,6 +291,7 @@ function installWorkerHook() {
           try {
             context = captureWorkerRequest(message, sitePayloadCache);
           } catch (error) {
+            reportStatus(friendlyError(error), "error");
             emit({ error: friendlyError(error) });
             return;
           }
@@ -234,11 +299,21 @@ function installWorkerHook() {
           (async () => {
             try {
               const options = optionsFromSiteRequest(message, {});
-              const result = await runMinCost(context, mode, options);
+              const result = await runMinCost(
+                context,
+                mode,
+                options,
+                message.timeBudgetMs,
+              );
               page.__moligodMinCostLast = {
                 requestId: message.requestId,
                 mode,
-                options: { ...options, mode },
+                options: {
+                  ...options,
+                  mode,
+                  deadlineMs: result.deadlineMs,
+                  deadlineSource: result.deadlineSource,
+                },
                 context: {
                   dataVersion: context.dataVersion,
                   weaponId: context.weaponId,
@@ -252,8 +327,11 @@ function installWorkerHook() {
                 },
                 result,
               };
+              const status = describeResultStatus(result, result.deadlineMs);
+              reportStatus(status.text, status.tone);
               emit({ result: toSiteResult(context, result) });
             } catch (error) {
+              reportStatus(friendlyError(error), "error");
               emit({ error: friendlyError(error) });
             }
           })();
@@ -333,6 +411,47 @@ function makeToggle(text, checked, title) {
   return { label, input, span };
 }
 
+function makeNumberField(text, value, title, onChange) {
+  const label = document.createElement("label");
+  label.style.cssText =
+    "display:inline-flex;align-items:center;gap:5px;white-space:nowrap";
+  label.title = title;
+
+  const span = document.createElement("span");
+  span.textContent = text;
+
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = String(SOLVE_DEADLINE_MIN_MS / 1000);
+  input.max = String(SOLVE_DEADLINE_MAX_MS / 1000);
+  input.step = "1";
+  input.placeholder = "自动";
+  if (value != null) input.value = String(value);
+  input.style.cssText = [
+    "width:46px",
+    "height:18px",
+    "padding:0 4px",
+    "border-radius:3px",
+    "border:1px solid rgba(255,255,255,0.18)",
+    "background:rgba(0,0,0,0.25)",
+    "color:#e5e7eb",
+    `font:500 11px/16px ${MINCOST_FONT}`,
+    "text-align:right",
+  ].join(";");
+  input.addEventListener("change", () => {
+    const seconds = normalizeTimeLimitSeconds(input.value);
+    input.value = seconds == null ? "" : String(seconds);
+    onChange(seconds);
+  });
+
+  const unit = document.createElement("small");
+  unit.textContent = "秒";
+  unit.style.opacity = "0.7";
+
+  label.append(span, input, unit);
+  return { label, input };
+}
+
 function injectButton(trigger) {
   if (!document.body) return;
   const siteButton = document.querySelector(".gunsmith-optimizer-generate");
@@ -394,6 +513,15 @@ function injectButton(trigger) {
     settings.missingPricePolicy !== "fallback-system",
     "市场价缺失时: 勾选排除该配件; 取消用系统价代替",
   );
+  const limit = makeNumberField(
+    "时限",
+    settings.timeLimitSeconds,
+    `留空: 跟随站点"搜索"时长 (${SITE_SEARCH_SECONDS_MIN}-${SITE_SEARCH_SECONDS_MAX} 秒, 取不到时用站点请求预算); 自定义 ${SOLVE_DEADLINE_MIN_MS / 1000}-${SOLVE_DEADLINE_MAX_MS / 1000} 秒. 到时限后返回当前最好方案; 求解在独立 Worker 中运行, 页面不会卡顿`,
+    (seconds) => {
+      settings.timeLimitSeconds = seconds;
+      saveSettings();
+    },
+  );
 
   function syncMissing() {
     const disabled = !price.input.checked;
@@ -404,8 +532,13 @@ function injectButton(trigger) {
   price.input.addEventListener("change", syncMissing);
   syncMissing();
 
-  options.append(mode.label, price.label, missing.label);
-  bar.append(button, options);
+  const status = document.createElement("div");
+  status.className = "gunsmith-mincost-status";
+  status.style.cssText = `font:500 11px/16px ${MINCOST_FONT};color:${STATUS_COLORS.info};min-height:16px`;
+  statusEl = status;
+
+  options.append(mode.label, price.label, missing.label, limit.label);
+  bar.append(button, options, status);
   siteButton.insertAdjacentElement("afterend", bar);
 
   button.addEventListener("click", () => {
@@ -422,6 +555,7 @@ function injectButton(trigger) {
     settings.priceSource = price.input.checked ? "current" : "system";
     settings.missingPricePolicy = missing.input.checked ? "reject" : "fallback-system";
     saveSettings();
+    reportStatus("准备中 · 等待站点请求", "info");
     trigger(settings.mode);
     target.click();
   });

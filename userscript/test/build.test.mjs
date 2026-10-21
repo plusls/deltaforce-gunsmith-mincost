@@ -143,6 +143,9 @@ test("bundle replaces placeholders and parses as a userscript", { skip }, () => 
   assert.ok(!/^\s*import\s/m.test(workerSource));
   assert.ok(!/^\s*export\s/m.test(workerSource));
   assert.match(mainSource, /installWorkerHook/);
+  assert.match(mainSource, /resolveDeadlineMs/);
+  assert.match(workerSource, /resolveDeadlineMs/);
+  assert.match(bundle, /SITE_SEARCH_INPUT_SELECTOR/);
 });
 
 test("worker source initializes, caches payloads, and solves", { skip, timeout: 30_000 }, async () => {

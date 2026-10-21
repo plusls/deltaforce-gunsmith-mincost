@@ -6,6 +6,7 @@
 
 ```text
 solver/js/site-adapter.mjs      站点请求 -> 求解请求, 求解结果 -> 站点结果
+solver/js/deadline.mjs          时限常量, 站点时长解析, 生效时限与状态文案
 solver/js/engine.mjs            WASM 引擎封装
 userscript/src/main.mjs         Worker hook, 按钮, 设置
 userscript/src/worker-main.mjs  独立 worker 内的求解循环
@@ -63,6 +64,7 @@ new Worker(new URL("/assets/optimizer.worker-5V9qh1RK.js", import.meta.url), {
 
 - `data` 只在 `dataKey` 变化时发送. 脚本必须按 `dataKey` 缓存, 后续请求可能只有价格和锁定项.
 - `pricesByObjectId` 每次都发送.
+- `timeBudgetMs` 是站点自己的搜索时长 (`smartSearchSeconds * 1000`), 同一请求还有 `maxEvaluations = smartSearchSeconds * 15000`.
 - 脚本在 `document-start` 包一层 `Worker`, 只处理 URL 包含 `optimizer.worker` 的实例.
 - 如果某次请求既没有 `data` 也没有缓存, 可以退回拦截 `crypto.subtle.decrypt` 或直接请求 API, 但这是异常路径.
 
@@ -90,6 +92,7 @@ moligod 页面
 solver/src/*                  Rust 核心, 只认 JSON 请求
 solver/js/solver.mjs          WASM 加载与 C ABI 封装
 solver/js/site-adapter.mjs    上下文转换, 约束映射, 结果转换
+solver/js/deadline.mjs        时限常量, 站点/自定义时限解析, 状态文案
 solver/js/engine.mjs          创建引擎, 统一 solve 入口
 userscript/src/main.mjs       入口, Worker hook, 按钮, 设置持久化
 userscript/src/worker-main.mjs  worker 内初始化与求解
@@ -178,7 +181,7 @@ type MinCostOptions = {
 | `lockMode` | `locked` 只固定用户锁定槽位, 与站点行为一致; `current` 固定当前整套配装, 只用于对比 |
 | `mode` | `full` 完整搜索并证明最优; `fast` 只找第一个可行解, 对应求解器 `firstSolution` |
 | `costCap` | 总价上限, 对应站点预算 |
-| `deadlineMs` | 软截止时间, 超时返回当前最好解并标记 `truncated` |
+| `deadlineMs` | 软截止时间 (毫秒), 超时返回当前最好解并标记 `truncated`. 默认跟随站点"搜索时长", 没有站点控件时 full 5000 / fast 2000 |
 | `missingPricePolicy` | 缺价时拒绝该配件, 或用系统价代替 |
 
 ### 4.3 引擎 API
@@ -280,7 +283,7 @@ function toSolveRequest(ctx, options) {
     maxLeaves: options.maxLeaves ?? 1_000_000,
     costCap: options.costCap ?? null,
     firstSolution: options.mode === "fast",
-    deadlineMs: options.deadlineMs ?? 5_000,
+    deadlineMs: options.deadlineMs ?? null,
   };
 }
 ```
@@ -470,26 +473,62 @@ WASM 产物约 773 KB, gzip 后约 225 KB.
 
 ## 9. 时间预算与失败处理
 
-建议默认值:
+### 9.1 站点自己的时限
+
+站点在"生成智能配件方案"按钮旁有一个搜索时长输入:
+
+```text
+选择器: .gunsmith-smart-search-duration input[aria-label="搜索时长（秒）"]
+单位:   秒, step 1
+默认:   15
+范围:   2-60; 勾选"精调"时下限 5 秒 (内部常量 lu = 5000 ms)
+上限:   60 秒, 没有"无限"选项
+持久化: moligod:gunsmith-optimizer-inputs:v1:<weaponId>:<mode>:<ordinary|preparedness>
+        字段 smartSearchSeconds
+```
+
+请求字段:
+
+```text
+timeBudgetMs    = smartSearchSeconds * 1000
+maxEvaluations  = smartSearchSeconds * 15000
+```
+
+站点 worker 在 `timeBudgetMs` 缺省时回退 1250 ms (`purpose=solve`) 或 2000 ms (`estimate`); 精调模式下下限 50 ms. 这些可以从站点 optimizer worker 的 bundle 中核对.
+
+### 9.2 脚本的"时限"设置
+
+| 值 | 行为 |
+|---|---|
+| 留空 (自动, 默认) | 优先级: 页面上站点输入框的当前值 > 该武器/模式的 `smartSearchSeconds` > 站点请求里的 `timeBudgetMs` > full 5000 ms / fast 2000 ms |
+| 1-300 秒 | 覆盖站点值, 四舍五入到整秒; 超出范围按边界处理 |
+
+300 秒是脚本上限 (`SOLVE_DEADLINE_MAX_MS`). 求解跑在独立 Worker 中, 页面不会卡, 但一次运行不会被自动打断, 所以不提供"无限". 需要更快反馈时用快速模式. 站点上限 60 秒只在自动模式下生效; 自定义可以超过它, 但不要在没有必要时设得过大.
+
+设置保存在原来的 `moligod:gunsmith-mincost:v1`, 新增 `timeLimitSeconds`. 旧设置没有该字段时按自动处理. `optionsFromSiteRequest` 也会用站点请求里的 `timeBudgetMs` 作为 `deadlineMs` 的默认值 (同样按 300 秒上限截断), 显式 override 优先; 脚本在页面控件和 localStorage 都取不到时会用请求里的这个值, 而不是直接落到 5/2 秒.
+
+### 9.3 求解器预算
 
 ```text
 maxNodes    2,000,000
 maxLeaves   1,000,000
-deadlineMs  5,000
+deadlineMs  见 9.2 (站点或脚本设置)
 ```
 
 Rust 侧通过 `env.dws_now_ms` 读取墙钟, 在 DFS 节点, 叶节点, DP 状态更新和精校 Pareto 循环中检查截止时间. 超时返回当前最好解并置 `truncated=true`; 若一个可行解都没有则返回 `infeasible`.
 
-脚本默认: 完整模式 5000 ms, 快速模式 2000 ms. 页面按钮可以切换.
-
-返回给用户的状态:
+脚本状态栏 (生成按钮下方) 显示实际生效的时限:
 
 | 情况 | 显示 |
 |---|---|
-| `optimal=true` | "约束下最低总价" |
-| `truncated=true` | "时间/预算内最好方案" |
-| `infeasible` | "当前约束无解", 列出失败原因 |
-| 超时 | "计算超时", 可以切到快速模式 |
+| 运行中 | `求解中 · 时限 N 秒` |
+| `optimal=true` | `最优解 · 用时 N 秒` |
+| `truncated=true` 且有解 | `时限 N 秒 用尽 · 当前最好方案, 未证明最优` |
+| 超时且无解 | `时限 N 秒 用尽 · 未找到可行方案` |
+| 未截断且无解 | `当前约束无解 · 用时 N 秒` |
+| 快速模式找到解, 未截断 | `找到可行方案 · 用时 N · 未证明最优` |
+
+`truncated=true` 时不会声称最优. 站点结果对象也带 `truncated` 标记.
 
 快速模式 `firstSolution=true` 在 RM277 上是 32 ms 原生 / 70 ms WASM. 代价是没有最优性证明.
 
@@ -514,6 +553,7 @@ Rust 侧通过 `env.dws_now_ms` 读取墙钟, 在 DFS 节点, 叶节点, DP 状�
 4. `userscript/src/*`: Worker hook, payload 缓存, 独立 worker 求解, 按钮和设置. 3 个构建/协议测试.
 5. 真实页面验证 (RM277, 数据版本 `8629d01bf694f212aad051c5`).
 6. 细分指标真实页面验证 (RM277, 2026-10-21): `handling-aim-time` 约束由脚本求解, 站点接受 "应用方案" 并用站点自身模型重算.
+7. 可配置时限 (2026-10-21): 站点搜索时长控件和 worker 字段已核对; 脚本新增"时限"输入, 自动跟随站点, 支持 1-300 秒覆盖. `solver/js/deadline.mjs` 集中放常量与解析, 新增 deadline 单元测试和 1 个 adapter 测试, Node 测试全部通过.
 
 验证结果:
 
@@ -544,20 +584,37 @@ laserEnabled: false
 
 所有数值与求解器 `detail`/`recoil` 输出一致. 这两个用例同时暴露了一个真实 bug: 精校 Pareto 的 O(n^2) 循环没有截止时间检查, 单次 `runMinCost` 曾跑到 268 秒并冻结页面. 修复后同样的请求在 5 秒内返回.
 
+时限验证 (真实页面, RM277, 2026-10-21):
+
+```text
+站点控件: input[aria-label="搜索时长（秒）"], 当时 min=5 (精调开), max=60, value=60
+站点请求: purpose=solve, timeBudgetMs=5000, maxEvaluations=75000 (输入 5 时)
+2 秒自定义, 约束 aim-time<=400 + fire-stability<=0.77 + vertical<=0.46:
+  kind=error, truncated=true, 2064 ms, 状态栏 "时限 2 秒 用尽 · 未找到可行方案"
+15 秒自定义, 同约束:
+  kind=error, truncated=true, 15039 ms, 状态栏 "时限 15 秒 用尽 · 未找到可行方案"
+自动模式 + 站点 5 秒:
+  deadlineMs=5000, source=site, 状态栏 "求解中 · 时限 5 秒"
+去掉 aim-time / fire-stability 后, 15 秒自定义:
+  kind=optimal, 256 ms, 状态栏 "最优解 · 用时 256 毫秒"
+```
+
 用同样的 context / options 在 Node 里重跑, 节点数, 叶节点数, selections 和总价与浏览器完全一致, 说明 adapter 映射没有偏差.
 
 站点自带的"生成智能配件方案"在同一组约束下返回无解, 说明 beam search 的 128 状态 / 24 轮限制确实会漏解.
 
-安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及"完整模式", "市场价", "缺价排除"三个开关. 开关样式沿用站点面板的深色风格; 取消"市场价"时"缺价排除"自动置灰.
+安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及"完整模式", "市场价", "缺价排除"三个开关和"时限"输入. 开关样式沿用站点面板的深色风格; 取消"市场价"时"缺价排除"自动置灰. "时限"留空表示跟随站点"搜索"输入框, 填 1-300 表示覆盖. 按钮下方的状态栏显示本次实际时限和结果.
 
 ## 12. 已知限制
 
 - 站点全部 15 个细分指标均已支持; 其中除 `handling-aim-time` 外的 14 个会关闭叶子 DP, 完整模式下可能接近截止时间.
 - 后坐力三项加 `handling-aim-time` 同时收紧时, 5 秒完整模式可能只返回 `truncated` 且没有方案. 这是搜索顺序问题, 不代表无解; 可以放宽预算或减少约束.
+- 多个非 DP 细分指标同时启用时, 单次叶子枚举可能长时间不返回, 状态栏会一直显示"求解中"; 此时只能关闭页面/刷新取消 (脚本没有暴露取消按钮).
+- 站点没有"无限"时限, 60 秒是站点上限; 脚本自定义上限 300 秒是人为风险边界, 不是站点能力.
 - 战备下限 (`preparednessEnabled`) 暂不支持, 会明确报错而不是静默忽略.
 - 站点更新导致 worker URL, payload 字段或 class 名变化时脚本会失效. hook 只匹配 `/optimizer\.worker/`, 不影响其他 worker.
 - 浏览器 CSP 禁止 `blob:` worker 时自动退回主线程, 大枪械会卡住页面约 1 到 2 秒.
-- 内置 wasm 使脚本约 1.03 MiB, gzip 后约 300 KB.
+- 内置 wasm 使脚本约 1.17 MiB, gzip 后约 370 KB.
 
 ## 13. 风险
 
@@ -568,4 +625,5 @@ laserEnabled: false
 - 未知的细分指标 id 被静默忽略 (必须先把失败原因返回给用户).
 - 战备下限暂不支持.
 - min 约束和无解约束当前可能很慢, 必须有超时和明确提示.
+- 自定义时限过大 (最大 300 秒) 时单次运行会占用一个 Worker 线程最多 5 分钟; 页面仍可操作, 但结果迟迟不返回.
 - 应用方案时 selections 里的 `null` 必须过滤, 站点只接受已安装件.

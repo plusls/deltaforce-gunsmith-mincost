@@ -1,3 +1,5 @@
+import { SOLVE_DEADLINE_MAX_MS } from "./deadline.mjs";
+
 export class UnsupportedConstraintError extends Error {
   constructor(constraints) {
     const ids = Array.isArray(constraints) ? constraints : [String(constraints)];
@@ -186,6 +188,8 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
     costCap = Math.round(budgetPrice);
   }
 
+  const siteTimeBudget = Number(request.timeBudgetMs);
+
   const constraints = [];
   const conditions = asObject(smartOptions.preferenceConditions);
   for (const [group, attributeId] of Object.entries(PRIMARY_ATTR_BY_GROUP)) {
@@ -219,6 +223,15 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
   const result = {};
   for (const [key, fallback] of Object.entries(OPTION_DEFAULTS)) {
     result[key] = hasOwn(overrideValues, key) ? overrideValues[key] : fallback;
+  }
+  if (!hasOwn(overrideValues, "deadlineMs")) {
+    result.deadlineMs =
+      Number.isFinite(siteTimeBudget) && siteTimeBudget > 0
+        ? Math.max(
+            1,
+            Math.min(Math.round(siteTimeBudget), SOLVE_DEADLINE_MAX_MS),
+          )
+        : OPTION_DEFAULTS.deadlineMs;
   }
   result.constraints = Array.isArray(overrideValues.constraints)
     ? [...overrideValues.constraints]

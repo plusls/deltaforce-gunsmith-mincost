@@ -248,6 +248,36 @@ test("budget maps to costCap and override wins", () => {
   );
 });
 
+test("site timeBudgetMs seeds deadlineMs and overrides win", () => {
+  const request = { targets: {}, smartOptions: {}, timeBudgetMs: 15_000 };
+
+  assert.equal(optionsFromSiteRequest(request).deadlineMs, 15_000);
+  assert.equal(
+    optionsFromSiteRequest(request, { deadlineMs: 60_000 }).deadlineMs,
+    60_000,
+  );
+  assert.equal(
+    optionsFromSiteRequest({ targets: {}, timeBudgetMs: 0 }).deadlineMs,
+    5_000,
+  );
+  assert.equal(
+    optionsFromSiteRequest({ targets: {}, timeBudgetMs: "bad" }).deadlineMs,
+    5_000,
+  );
+  assert.equal(
+    optionsFromSiteRequest({ targets: {}, timeBudgetMs: 1_000_000_000 })
+      .deadlineMs,
+    300_000,
+  );
+  assert.equal(
+    optionsFromSiteRequest({
+      targets: {},
+      timeBudgetMs: Number.POSITIVE_INFINITY,
+    }).deadlineMs,
+    5_000,
+  );
+});
+
 test("overrides replace mapped constraints and unknown overrides are dropped", () => {
   const options = optionsFromSiteRequest(
     {
