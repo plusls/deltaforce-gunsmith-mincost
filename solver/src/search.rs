@@ -798,7 +798,9 @@ impl<'a> Solver<'a> {
             if unset_structural {
                 forced.push(Action::Unset);
             }
-            if remove_structural && remove.as_deref() != unset.as_deref() {
+            if (remove_structural || unset_structural)
+                && remove.as_deref() != unset.as_deref()
+            {
                 forced.push(Action::Remove);
             }
             can_defer = !unset_structural;
@@ -1077,20 +1079,30 @@ impl<'a> Solver<'a> {
         }
         let leaf_paths: FxHashSet<String> =
             leaf_slots.iter().map(|s| s.path_key.clone()).collect();
+        let is_under_leaf = |path: &str| {
+            leaf_paths.iter().any(|leaf| {
+                path.len() > leaf.len()
+                    && path.starts_with(leaf.as_str())
+                    && path[leaf.len()..].starts_with("/part:")
+            })
+        };
+        let mut base_trial = selections.clone();
+        for slot in &assembly.visible_slots {
+            if !decided.contains(&slot.path_key) && !leaf_paths.contains(&slot.path_key) {
+                base_trial.entry(slot.path_key.clone()).or_insert(None);
+            }
+        }
 
         let mut base = ExactPart::neutral_panel(self.panel_attrs.len());
         let mut base_cost = 0i64;
         let mut base_parts: Vec<(&Part, &str)> = Vec::new();
         let mut seen_paths: FxHashSet<(&str, &str)> = FxHashSet::default();
-        for slot in &assembly.visible_slots {
-            if leaf_paths.contains(&slot.path_key) {
+        let base_assembly = self.assembler.resolve(&base_trial);
+        for slot in &base_assembly.visible_slots {
+            if leaf_paths.contains(&slot.path_key) || is_under_leaf(&slot.path_key) {
                 continue;
             }
-            let Some(id) = slot
-                .selected_part_id
-                .as_ref()
-                .or(slot.internal_part_id.as_ref())
-            else {
+            let Some(id) = slot.selected_part_id.as_ref() else {
                 continue;
             };
             if !seen_paths.insert((slot.path_key.as_str(), id.as_str())) {
@@ -1101,8 +1113,8 @@ impl<'a> Solver<'a> {
                 base_cost += self.dp_part_price(part);
             }
         }
-        for item in &assembly.internal_parts {
-            if leaf_paths.contains(&item.slot_path_key) {
+        for item in &base_assembly.internal_parts {
+            if leaf_paths.contains(&item.slot_path_key) || is_under_leaf(&item.slot_path_key) {
                 continue;
             }
             if !seen_paths.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
@@ -1280,7 +1292,7 @@ impl<'a> Solver<'a> {
             if self.best_cost < i64::MAX && total >= self.best_cost {
                 continue;
             }
-            let mut trial = selections.clone();
+            let mut trial = base_trial.clone();
             for (path, choice) in slot_paths.iter().zip(st.choices.iter()) {
                 match choice {
                     SlotChoice::Unset => {
@@ -1292,11 +1304,6 @@ impl<'a> Solver<'a> {
                     SlotChoice::Part(id) => {
                         trial.insert(path.clone(), Some(id.clone()));
                     }
-                }
-            }
-            for slot in &assembly.visible_slots {
-                if !decided.contains(&slot.path_key) {
-                    trial.entry(slot.path_key.clone()).or_insert(None);
                 }
             }
             self.leaf(&trial);
