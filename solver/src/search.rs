@@ -182,6 +182,7 @@ pub struct Solver<'a> {
     nodes: u64,
     leaves: u64,
     truncated: bool,
+    heuristic_incomplete: bool,
     stop: bool,
     best_cost: i64,
     panel_base: [f64; 5],
@@ -648,6 +649,7 @@ impl<'a> Solver<'a> {
             nodes: 0,
             leaves: 0,
             truncated: false,
+            heuristic_incomplete: false,
             stop: false,
             best_cost: i64::MAX,
             panel_base,
@@ -676,6 +678,7 @@ impl<'a> Solver<'a> {
             }
             solver.stop = false;
             solver.truncated = false;
+            solver.heuristic_incomplete = false;
             solver.nodes = 0;
             solver.leaves = 0;
             solver.run_found = false;
@@ -691,6 +694,7 @@ impl<'a> Solver<'a> {
             .filter(|ms| *ms > 0)
             .map(|ms| now_ms().saturating_add(ms));
         let mut truncated = false;
+        let mut incomplete: bool;
         let mut total_nodes = 0u64;
         let mut total_leaves = 0u64;
         if self.options.first_solution {
@@ -703,6 +707,8 @@ impl<'a> Solver<'a> {
                 "first feasible build found"
             } else if self.truncated {
                 "budget exhausted; no build found"
+            } else if self.heuristic_incomplete {
+                "search stopped early by internal limits; no build found"
             } else {
                 "no build satisfies the constraints"
             };
@@ -723,6 +729,7 @@ impl<'a> Solver<'a> {
             total_nodes += self.nodes;
             total_leaves += self.leaves;
             truncated |= self.truncated;
+            incomplete = self.heuristic_incomplete;
             let seed_found = self.run_found;
             if let Some(cap) = fixed_cap {
                 if self
@@ -743,6 +750,7 @@ impl<'a> Solver<'a> {
                 total_nodes += self.nodes;
                 total_leaves += self.leaves;
                 truncated |= self.truncated;
+                incomplete = self.heuristic_incomplete;
             }
         } else {
             self.cost_cap = fixed_cap.unwrap_or(i64::MAX);
@@ -750,10 +758,13 @@ impl<'a> Solver<'a> {
             total_nodes += self.nodes;
             total_leaves += self.leaves;
             truncated = self.truncated;
+            incomplete = self.heuristic_incomplete;
         }
-        let optimal = !truncated && self.best.is_some();
+        let optimal = !truncated && !incomplete && self.best.is_some();
         let message = if truncated {
             "budget exhausted; result is the best found so far".to_string()
+        } else if incomplete {
+            "search stopped early by internal limits; result is the best found so far".to_string()
         } else if self.best.is_some() {
             "search complete".to_string()
         } else {
@@ -1377,7 +1388,8 @@ impl<'a> Solver<'a> {
                 200_000,
                 self.deadline_at,
             );
-            self.truncated |= cut;
+            self.heuristic_incomplete |= cut.capped;
+            self.truncated |= cut.deadline;
             next = pruned;
             if self.truncated && self.deadline_at.is_some_and(|d| now_ms() >= d) {
                 self.stop = true;
@@ -1968,13 +1980,14 @@ impl<'a> Solver<'a> {
                         });
                     }
                     if next.len() >= TUNE_NEXT_LIMIT {
-                        self.truncated = true;
+                        self.heuristic_incomplete = true;
                         break;
                     }
                 }
                 let (pruned, cut) =
                     pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
-                self.truncated |= cut;
+                self.heuristic_incomplete |= cut.capped;
+                self.truncated |= cut.deadline;
                 group = pruned;
             }
             if group.len() == 1 && group[0].values.is_empty() {
@@ -2002,13 +2015,14 @@ impl<'a> Solver<'a> {
                     });
                 }
                 if next.len() >= TUNE_NEXT_LIMIT {
-                    self.truncated = true;
+                    self.heuristic_incomplete = true;
                     break;
                 }
             }
             let (pruned, cut) =
                 pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
-            self.truncated |= cut;
+            self.heuristic_incomplete |= cut.capped;
+            self.truncated |= cut.deadline;
             frontier = pruned;
         }
         Some(frontier)
@@ -2585,6 +2599,12 @@ fn dp_pareto(
     dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None).0
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Trim {
+    capped: bool,
+    deadline: bool,
+}
+
 fn dp_pareto_capped(
     mut states: Vec<DpState>,
     dims: &DpDims,
@@ -2592,7 +2612,7 @@ fn dp_pareto_capped(
     aim_dir: AimDir,
     limit: usize,
     deadline_at: Option<u64>,
-) -> (Vec<DpState>, bool) {
+) -> (Vec<DpState>, Trim) {
     states.sort_by(|a, b| {
         a.cost
             .cmp(&b.cost)
@@ -2623,15 +2643,15 @@ fn dp_pareto_capped(
         deduped.push(st);
     }
     let states = deduped;
-    let mut truncated = false;
+    let mut trim = Trim::default();
     let mut out: Vec<DpState> = Vec::new();
     for (idx, st) in states.into_iter().enumerate() {
         if out.len() >= limit {
-            truncated = true;
+            trim.capped = true;
             break;
         }
         if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
-            truncated = true;
+            trim.deadline = true;
             break;
         }
         if out
@@ -2643,7 +2663,7 @@ fn dp_pareto_capped(
         out.retain(|o| !dp_dominates(&st, o, dims, panel_dirs, aim_dir));
         out.push(st);
     }
-    (out, truncated)
+    (out, trim)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3108,7 +3128,7 @@ fn pareto_capped(
     dims: &TuneDims,
     limit: usize,
     deadline_at: Option<u64>,
-) -> (Vec<Offer>, bool) {
+) -> (Vec<Offer>, Trim) {
     let channel = |dir: TuneDir, a: f64, b: f64| match dir {
         TuneDir::Higher => b.partial_cmp(&a),
         TuneDir::Lower | TuneDir::Equal => a.partial_cmp(&b),
@@ -3125,15 +3145,15 @@ fn pareto_capped(
             .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
             .then(a.deviation.partial_cmp(&b.deviation).unwrap_or(Ordering::Equal))
     });
-    let mut truncated = false;
+    let mut trim = Trim::default();
     let mut out: Vec<Offer> = Vec::new();
     for (idx, o) in offers.into_iter().enumerate() {
         if out.len() >= limit {
-            truncated = true;
+            trim.capped = true;
             break;
         }
         if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
-            truncated = true;
+            trim.deadline = true;
             break;
         }
         if out.iter().any(|p| offer_dominates(p, &o, dims)) {
@@ -3142,7 +3162,7 @@ fn pareto_capped(
         out.retain(|p| !offer_dominates(&o, p, dims));
         out.push(o);
     }
-    (out, truncated)
+    (out, trim)
 }
 
 fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
@@ -4246,6 +4266,59 @@ mod tests {
         a.add_a(&b);
         assert!((a.max_d - 7.0).abs() < 1e-9);
         assert!((a.min_c_h - 0.72).abs() < 1e-9);
+    }
+
+    fn offer() -> Offer {
+        Offer {
+            e_h: 0.0,
+            e_v: 0.0,
+            e_k: 0.0,
+            e_open: 0.0,
+            e_move: 0.0,
+            e_move_runtime: 0.0,
+            e_breath: 0.0,
+            e_move_stability: 0.0,
+            values: Vec::new(),
+            deviation: 0.0,
+        }
+    }
+
+    #[test]
+    fn dp_cap_is_not_reported_as_deadline() {
+        let mut dims = DpDims::default();
+        dims.d = true;
+        let states = vec![part(5.0, 5, vec![]), part(20.0, 10, vec![])];
+        let (out, trim) =
+            dp_pareto_capped(states, &dims, &[], AimDir::Ignore, 1, None);
+        assert_eq!(out.len(), 1);
+        assert!(trim.capped);
+        assert!(!trim.deadline);
+    }
+
+    #[test]
+    fn dp_deadline_is_not_reported_as_cap() {
+        let mut dims = DpDims::default();
+        dims.d = true;
+        let states = vec![part(5.0, 5, vec![])];
+        let (out, trim) =
+            dp_pareto_capped(states, &dims, &[], AimDir::Ignore, usize::MAX, Some(0));
+        assert!(out.is_empty());
+        assert!(!trim.capped);
+        assert!(trim.deadline);
+    }
+
+    #[test]
+    fn tune_cap_is_not_reported_as_deadline() {
+        let offers = vec![offer(), offer()];
+        let (out, trim) = pareto_capped(
+            offers,
+            &TuneDims::from_constraints(&[]),
+            1,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(trim.capped);
+        assert!(!trim.deadline);
     }
 }
 
