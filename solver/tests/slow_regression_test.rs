@@ -10,6 +10,15 @@ fn run_case(request_file: &str, expected_total_price: u64) {
 }
 
 fn run_case_with_payload(payload_file: &str, request_file: &str, expected_total_price: u64) {
+    run_case_with_payload_and_leaves(payload_file, request_file, expected_total_price, None);
+}
+
+fn run_case_with_payload_and_leaves(
+    payload_file: &str,
+    request_file: &str,
+    expected_total_price: u64,
+    max_leaves: Option<u64>,
+) {
     let payload = std::fs::read(format!(
         "{}/tests/fixtures/{payload_file}",
         env!("CARGO_MANIFEST_DIR")
@@ -31,6 +40,13 @@ fn run_case_with_payload(payload_file: &str, request_file: &str, expected_total_
         out["best"]["total_price"], expected_total_price,
         "{request_file}: {out}"
     );
+    if let Some(max_leaves) = max_leaves {
+        assert!(
+            out["leaves"].as_u64().unwrap() < max_leaves,
+            "{request_file}: {} leaves is not below {max_leaves}",
+            out["leaves"]
+        );
+    }
 }
 
 #[test]
@@ -66,9 +82,10 @@ fn no_aim_regression() {
 #[test]
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn ak12_aim_recoil_regression() {
-    run_case_with_payload(
+    run_case_with_payload_and_leaves(
         "ak12-aim-recoil.payload.json",
         "ak12-aim-recoil.request.json",
         208037,
+        Some(5_000),
     );
 }
