@@ -802,7 +802,12 @@ impl<'a> Solver<'a> {
                 forced.push(Action::Remove);
             }
             can_defer = !unset_structural;
-        } else if unset.is_none() {
+        } else if unset.is_some() {
+            forced.push(Action::Unset);
+            if slot.internal_is_default {
+                forced.push(Action::Remove);
+            }
+        } else {
             forced.push(Action::Remove);
         }
         parts.sort_by(|a, b| {
