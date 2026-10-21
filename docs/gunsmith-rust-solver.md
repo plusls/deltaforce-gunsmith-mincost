@@ -144,6 +144,8 @@ DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncat
 
 12 维前沿 (带 `handling-aim-time` 约束) 在部分武器上会让单层远超 8,192 状态, 单次 DP 扫描耗时数分钟. 此时第一次精确 pass 会在前沿超过 8,192 且该层运行超过 1 秒后投机中止, 不产出结果; 随后用有界启发式 (10,000 work unit 或 8 秒) 抬高 incumbent, 再用未放宽的完整精确搜索重跑. 最终结果始终来自完整精确搜索, 中止只影响找上界的快慢.
 
+调校需求的反解不使用线性闭式解, 而是用与精确评估相同的 `scale_ratio` 对单通道调校总量二分, 避免 `round2` 台阶把可行调校判成不可行或把不可行判成可行. `recoil-fire-stability` 的乐观下界同样扣除 `round2` 余量, 保证边界解不会被剪掉.
+
 #### 单调曲线细分指标的归约
 
 `stability-fire-camera`, `stability-movement-camera`, `stability-hold-breath-recoil`, `stability-breath-range`, `stability-breath-duration` 都是稳定度标量 `dS` 经单调曲线得到的. 若 payload 中稳定度类 Addend 只来自无条件的 `10007`, 且指标的其他输入 (呼吸倍率, 呼吸/移动稳定性除子, 调校效果) 可证明为常数, 求解前按曲线反解出 `10007` 的 min/max, 交给现有面板 DP, 不再关闭 DP.

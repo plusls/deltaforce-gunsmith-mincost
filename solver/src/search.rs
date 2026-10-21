@@ -1,9 +1,9 @@
 use crate::assembly::{Assembler, VisibleSlot};
 use crate::constraint_reduction::reduce_stability_constraints;
 use crate::metrics::{
-    eval_curve_points, quantize, scale_factor, tune_channels, tune_offer, tune_offer_values,
-    tuning_available, DetailMetrics, DetailSums, Evaluator, TuningInstance, TuningState,
-    DETAIL_METRICS, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
+    eval_curve_points, quantize, scale_factor, scale_ratio, tune_channels, tune_offer,
+    tune_offer_values, tuning_available, DetailMetrics, DetailSums, Evaluator, TuningInstance,
+    TuningState, DETAIL_METRICS, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
 };
 use crate::model::{Curve, CurveKey, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1376,7 +1376,13 @@ impl<'a> Solver<'a> {
             f_h = f_h * self.aim_scale.h_factor - self.aim_scale.h_margin;
             f_v = f_v * self.aim_scale.v_factor - self.aim_scale.v_margin;
         }
-        let s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
+        let mut s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
+        // `fire-stability` is `round2(round2(p0 * s) / round2(p0))`; the
+        // optimistic bound has to allow the rounding to move the value up.
+        let rounded0 = ((self.gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
+        if rounded0 != 0.0 {
+            s -= 0.005 / rounded0.abs() + 0.005;
+        }
         for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
             let value = match c.id.as_str() {
@@ -1503,9 +1509,13 @@ impl<'a> Solver<'a> {
                             f_h = f_h * self.aim_scale.h_factor - self.aim_scale.h_margin;
                             f_v = f_v * self.aim_scale.v_factor - self.aim_scale.v_margin;
                         }
-                        let s = (gk / self.gunkick0).max(0.0)
+                        let mut s = (gk / self.gunkick0).max(0.0)
                             * (1.0 - 0.01 * (st.metric.ek + sb.ek_max)).max(0.0)
                             * c_k;
+                        let rounded0 = ((self.gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
+                        if rounded0 != 0.0 {
+                            s -= 0.005 / rounded0.abs() + 0.005;
+                        }
                         for c in &self.search_constraints {
                             let Some(max) = c.max else { continue };
                             if max < 0.0 {
@@ -2524,6 +2534,12 @@ impl<'a> Solver<'a> {
     }
 
     fn tune_requirements(&self, b: &BaseRecoil) -> Option<TuneReq> {
+        let base_aim = &self
+            .payload
+            .numeric_profiles
+            .get(self.evaluator.weapon_id)?
+            .linked_tables
+            .aim_recoil;
         let mut req = TuneReq {
             lower_h: f64::NEG_INFINITY,
             upper_h: f64::INFINITY,
@@ -2544,18 +2560,64 @@ impl<'a> Solver<'a> {
                 "recoil-fire-stability" => (&mut req.lower_k, &mut req.upper_k),
                 _ => continue,
             };
-            let (k, base) = match c.id.as_str() {
-                "recoil-continuous-horizontal" => (b.cr * b.c_h * b.cont_h_scale, 1.0 + b.a_h),
-                "recoil-single-horizontal" => (b.cr * b.c_h * b.single_h_scale, 1.0 + b.a_h),
-                "recoil-continuous-vertical" => (b.cr * b.c_v * b.cont_v_scale, 1.0 + b.a_v),
-                "recoil-single-vertical" => (b.cr * b.c_v * b.single_v_scale, 1.0 + b.a_v),
-                _ => (b.gk_ratio * b.c_k, 1.0),
+            let (k, base, metric): (f64, f64, &dyn Fn(f64) -> f64) = match c.id.as_str() {
+                "recoil-continuous-horizontal" => {
+                    (b.cr * b.c_h * b.cont_h_scale, 1.0 + b.a_h, &|t| {
+                        scale_ratio(
+                            base_aim.continue_shoot.horizontal_scale,
+                            b.cr * (1.0 + b.a_h - t / 100.0) * b.c_h * b.cont_h_scale,
+                        )
+                    })
+                }
+                "recoil-single-horizontal" => {
+                    (b.cr * b.c_h * b.single_h_scale, 1.0 + b.a_h, &|t| {
+                        scale_ratio(
+                            base_aim.single_or_burst.horizontal_scale,
+                            b.cr * (1.0 + b.a_h - t / 100.0) * b.c_h * b.single_h_scale,
+                        )
+                    })
+                }
+                "recoil-continuous-vertical" => {
+                    (b.cr * b.c_v * b.cont_v_scale, 1.0 + b.a_v, &|t| {
+                        scale_ratio(
+                            base_aim.continue_shoot.vertical_scale,
+                            b.cr * (1.0 + b.a_v - t / 100.0) * b.c_v * b.cont_v_scale,
+                        )
+                    })
+                }
+                "recoil-single-vertical" => (b.cr * b.c_v * b.single_v_scale, 1.0 + b.a_v, &|t| {
+                    scale_ratio(
+                        base_aim.single_or_burst.vertical_scale,
+                        b.cr * (1.0 + b.a_v - t / 100.0) * b.c_v * b.single_v_scale,
+                    )
+                }),
+                _ => (b.gk_ratio * b.c_k, 1.0, &|t| {
+                    scale_ratio(Some(self.gunkick0), b.gk_ratio * (1.0 - t / 100.0) * b.c_k)
+                }),
             };
             if let Some(thr) = c.max {
-                apply_linear_req(lower, upper, &mut req.impossible, k, base, thr, true);
+                apply_exact_req(
+                    lower,
+                    upper,
+                    &mut req.impossible,
+                    k,
+                    base,
+                    thr,
+                    true,
+                    metric,
+                );
             }
             if let Some(thr) = c.min {
-                apply_linear_req(lower, upper, &mut req.impossible, k, base, thr, false);
+                apply_exact_req(
+                    lower,
+                    upper,
+                    &mut req.impossible,
+                    k,
+                    base,
+                    thr,
+                    false,
+                    metric,
+                );
             }
         }
         if req.impossible {
@@ -4770,7 +4832,12 @@ fn local_offer_dominates(a: &LocalOffer, b: &LocalOffer, dims: &TuneDims) -> boo
         && channel_ok(a.e_move_stability, b.e_move_stability, dims.move_stability)
 }
 
-fn apply_linear_req(
+/// Inverts a monotone metric exactly: finds the tuning total (in percent)
+/// where `metric` crosses `threshold`. `scale_ratio` rounds twice, so the
+/// closed-form linear inversion can sit on the wrong side of the rounding
+/// step; bisecting the real metric yields a bound every admissible tuning
+/// total on the feasible side satisfies.
+fn apply_exact_req(
     lower: &mut f64,
     upper: &mut f64,
     impossible: &mut bool,
@@ -4778,22 +4845,62 @@ fn apply_linear_req(
     base: f64,
     threshold: f64,
     is_max: bool,
+    metric: &dyn Fn(f64) -> f64,
 ) {
-    if !k.is_finite() || !threshold.is_finite() {
+    if !k.is_finite() || !threshold.is_finite() || !base.is_finite() {
         *impossible = true;
         return;
     }
     if k == 0.0 {
-        if (is_max && 0.0 > threshold) || (!is_max && 0.0 < threshold) {
+        let value = metric(0.0);
+        if (is_max && value > threshold) || (!is_max && value < threshold) {
             *impossible = true;
         }
         return;
     }
-    let bound = 100.0 * (base - threshold / k);
-    if (k > 0.0) == is_max {
-        *lower = lower.max(bound);
+    let linear = 100.0 * (base - threshold / k);
+    let feasible_right = (k > 0.0) == is_max;
+    let ok = |t: f64| {
+        let value = metric(t);
+        if is_max {
+            value <= threshold
+        } else {
+            value >= threshold
+        }
+    };
+    let mut lo = linear;
+    let mut hi = linear;
+    let mut step = 1.0;
+    let mut separated = false;
+    for _ in 0..60 {
+        lo -= step;
+        hi += step;
+        step *= 2.0;
+        if ok(lo) != ok(hi) {
+            separated = true;
+            break;
+        }
+    }
+    if !separated {
+        if ok(linear) {
+            return;
+        }
+        *impossible = true;
+        return;
+    }
+    let (mut bad, mut good) = if ok(lo) { (hi, lo) } else { (lo, hi) };
+    for _ in 0..100 {
+        let mid = (bad + good) * 0.5;
+        if ok(mid) {
+            good = mid;
+        } else {
+            bad = mid;
+        }
+    }
+    if feasible_right {
+        *lower = lower.max(good);
     } else {
-        *upper = upper.min(bound);
+        *upper = upper.min(good);
     }
 }
 

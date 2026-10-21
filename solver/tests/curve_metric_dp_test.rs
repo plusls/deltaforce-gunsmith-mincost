@@ -253,8 +253,10 @@ fn real_fire_camera_case_uses_the_dp() {
     let best = out["best"].as_object().unwrap();
     assert_eq!(out["optimal"], true);
     assert_eq!(out["truncated"], false);
-    assert_eq!(best["total_price"], 348828);
-    assert_eq!(best["attachment_price"], 242963);
+    // 348828 was previous best; exact tuning-bound inversion finds a cheaper
+    // build sitting exactly on the 0.77 fire-stability boundary.
+    assert_eq!(best["total_price"], 345302);
+    assert_eq!(best["attachment_price"], 239437);
     assert_eq!(best["detail"]["fire_camera"], 0.21);
     for check in best["constraints"].as_array().unwrap() {
         assert_eq!(check["ok"], true, "constraint failed: {check}");

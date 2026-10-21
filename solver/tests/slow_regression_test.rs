@@ -58,7 +58,8 @@ fn live_request_aim_regression() {
 #[test]
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn live_mix2_regression() {
-    run_case("live_mix2.request.json", 171528);
+    // 171528 missed a build sitting exactly on the rounded fire-stability bound.
+    run_case("live_mix2.request.json", 168002);
 }
 
 #[test]
@@ -76,7 +77,8 @@ fn live_aim400_only_regression() {
 #[test]
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn no_aim_regression() {
-    run_case("no_aim.request.json", 252275);
+    // 252275 missed a build sitting exactly on the rounded fire-stability bound.
+    run_case("no_aim.request.json", 251420);
 }
 
 #[test]
