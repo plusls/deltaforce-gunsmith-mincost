@@ -453,6 +453,121 @@ fn seed_metric_rank(metric: &ExactPart, panel_attrs: &[usize], aim: f64) -> f64 
     score
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReachResult {
+    Found(Vec<usize>),
+    Infeasible,
+    Budget,
+}
+
+enum ExactTune {
+    Found(TuningState, Vec<(String, f64)>),
+    Infeasible,
+    Unsupported,
+}
+
+fn reach_targets(
+    increments: &[Vec<(i64, i64, i64, i64)>],
+    targets: [Option<i64>; 4],
+    budget: usize,
+) -> ReachResult {
+    let n = increments.len();
+    let get = |x: &(i64, i64, i64, i64), c: usize| match c {
+        0 => x.0,
+        1 => x.1,
+        2 => x.2,
+        _ => x.3,
+    };
+    let max_sum = |c: usize| -> i64 {
+        increments
+            .iter()
+            .map(|offers| offers.iter().map(|x| get(x, c)).max().unwrap_or(0))
+            .sum()
+    };
+    for c in 0..4 {
+        if let Some(t) = targets[c] {
+            if t > max_sum(c) {
+                return ReachResult::Infeasible;
+            }
+        }
+    }
+    let cap = |v: i64, t: Option<i64>| match t {
+        Some(t) => v.min(t),
+        None => v,
+    };
+    let mut visited: FxHashSet<(usize, i64, i64, i64, i64)> = FxHashSet::default();
+    let mut chosen = vec![0usize; n];
+    let mut used = 0usize;
+    fn rec(
+        i: usize,
+        state: [i64; 4],
+        increments: &[Vec<(i64, i64, i64, i64)>],
+        targets: [Option<i64>; 4],
+        cap: &dyn Fn(i64, Option<i64>) -> i64,
+        visited: &mut FxHashSet<(usize, i64, i64, i64, i64)>,
+        chosen: &mut [usize],
+        used: &mut usize,
+        budget: usize,
+    ) -> Result<bool, ()> {
+        *used += 1;
+        if *used > budget {
+            return Err(());
+        }
+        if i == increments.len() {
+            return Ok((0..4).all(|c| targets[c].map(|t| state[c] >= t).unwrap_or(true)));
+        }
+        let key = (i, state[0], state[1], state[2], state[3]);
+        if !visited.insert(key) {
+            return Ok(false);
+        }
+        let mut order: Vec<usize> = (0..increments[i].len()).collect();
+        let mut score: Vec<i64> = increments[i]
+            .iter()
+            .map(|x| {
+                let xs = [x.0, x.1, x.2, x.3];
+                (0..4)
+                    .map(|c| match targets[c] {
+                        Some(t) => xs[c].min((t - state[c]).max(0)),
+                        None => 0,
+                    })
+                    .sum()
+            })
+            .collect();
+        order.sort_by(|&a, &b| score[b].cmp(&score[a]));
+        score.clear();
+        for &oi in &order {
+            let x = increments[i][oi];
+            chosen[i] = oi;
+            let next = [
+                cap(state[0].saturating_add(x.0), targets[0]),
+                cap(state[1].saturating_add(x.1), targets[1]),
+                cap(state[2].saturating_add(x.2), targets[2]),
+                cap(state[3].saturating_add(x.3), targets[3]),
+            ];
+            if rec(i + 1, next, increments, targets, cap, visited, chosen, used, budget)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    let zeros = [0i64; 4];
+    match rec(
+        0,
+        zeros,
+        increments,
+        targets,
+        &cap,
+        &mut visited,
+        &mut chosen,
+        &mut used,
+        budget,
+    ) {
+        Ok(true) => ReachResult::Found(chosen),
+        Ok(false) => ReachResult::Infeasible,
+        Err(()) => ReachResult::Budget,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TuneReq {
     lower_h: f64,
@@ -1936,6 +2051,238 @@ impl<'a> Solver<'a> {
     }
 
     fn pick_tuning(
+        &mut self,
+        instances: &[TuningInstance<'a>],
+        req: &TuneReq,
+        parts: &[&Part],
+    ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        match self.pick_tuning_exact(instances, req, parts) {
+            ExactTune::Found(state, values) => Some((state, values)),
+            ExactTune::Infeasible => None,
+            ExactTune::Unsupported => self.pick_tuning_frontier(instances, req, parts),
+        }
+    }
+
+    fn pick_tuning_exact(
+        &mut self,
+        instances: &[TuningInstance<'a>],
+        req: &TuneReq,
+        parts: &[&Part],
+    ) -> ExactTune {
+        if req.upper_h.is_finite() || req.upper_v.is_finite() || req.upper_k.is_finite() {
+            return ExactTune::Unsupported;
+        }
+        let mut aim_max: Option<f64> = None;
+        for c in &self.options.constraints {
+            if c.id == "handling-aim-time" {
+                if c.min.is_some() {
+                    return ExactTune::Unsupported;
+                }
+                aim_max = c.max;
+            } else if !is_panel_attr(&c.id) && !is_recoil_metric(&c.id) {
+                return ExactTune::Unsupported;
+            }
+        }
+        if self.budget_exceeded() {
+            return ExactTune::Unsupported;
+        }
+        let mut groups: Vec<(String, Vec<LocalOffer>)> = Vec::new();
+        for inst in instances {
+            if !tuning_available(&inst.slot_name, inst.part) {
+                continue;
+            }
+            for tune in &inst.part.tuning_options {
+                let key_base =
+                    Evaluator::tuning_key(&inst.slot_path, &inst.part.id, &tune.tune_id);
+                let offers = if let Some(v) = self.options.locked_tuning.get(&key_base).copied() {
+                    let v = quantize(v, tune.min_value, tune.max_value, tune.step_value);
+                    let c = tune_channels(tune, v);
+                    vec![LocalOffer {
+                        e_h: c.h,
+                        e_v: c.v,
+                        e_k: c.k,
+                        e_open: c.open,
+                        e_move: c.move_speed,
+                        e_move_runtime: c.move_runtime,
+                        e_breath: c.breath,
+                        e_move_stability: c.move_stability,
+                        value: v,
+                    }]
+                } else {
+                    self.tune_offers(&inst.part.id, tune)
+                };
+                if !offers.is_empty() {
+                    groups.push((key_base, offers));
+                }
+            }
+        }
+        let n = groups.len();
+        const SCALE: f64 = 1_000_000.0;
+        let mut base = [0.0f64; 4];
+        let increments: Vec<Vec<(i64, i64, i64, i64)>> = groups
+            .iter()
+            .map(|(_, offers)| {
+                let mut min = [f64::INFINITY; 4];
+                for o in offers {
+                    let vals = [o.e_h, o.e_v, o.e_k, o.e_open];
+                    for c in 0..4 {
+                        min[c] = min[c].min(vals[c]);
+                    }
+                }
+                for c in 0..4 {
+                    base[c] += min[c];
+                }
+                offers
+                    .iter()
+                    .map(|o| {
+                        let vals = [o.e_h, o.e_v, o.e_k, o.e_open];
+                        let floor = |c: usize| {
+                            (((vals[c] - min[c]).max(0.0)) * SCALE).floor() as i64
+                        };
+                        (floor(0), floor(1), floor(2), floor(3))
+                    })
+                    .collect()
+            })
+            .collect();
+        let lower_target = |t: f64, n: usize| -> (i64, i64) {
+            if !t.is_finite() {
+                return (0, 0);
+            }
+            let scaled = t * SCALE;
+            let strict = ((scaled - 1e-3).ceil() as i64).max(0);
+            let loose = (((scaled - n as f64).floor()) as i64 + 1).max(0);
+            (strict, loose)
+        };
+        let (h_strict, h_loose) = lower_target(req.lower_h - base[0], n);
+        let (v_strict, v_loose) = lower_target(req.lower_v - base[1], n);
+        let (k_strict, k_loose) = lower_target(req.lower_k - base[2], n);
+        let open_max: i64 = (0..n)
+            .map(|i| increments[i].iter().map(|x| x.3).max().unwrap_or(0))
+            .sum();
+        let (handling, ads_mult) = self.evaluator.aim_inputs(parts);
+        let aim_ok = |open: f64| -> Option<bool> {
+            match aim_max {
+                None => Some(true),
+                Some(thr) => self
+                    .evaluator
+                    .aim_time(handling, ads_mult, open)
+                    .map(|v| v <= thr + 1e-9),
+            }
+        };
+        let mut open_strict = 0i64;
+        let mut open_loose = 0i64;
+        if aim_max.is_some() {
+            match aim_ok(base[3]) {
+                Some(true) => {}
+                Some(false) => {
+                    let upper = base[3] + (open_max + n as i64) as f64 / SCALE;
+                    if aim_ok(upper) != Some(true) {
+                        return ExactTune::Infeasible;
+                    }
+                    let mut lo = 1i64;
+                    let mut hi = open_max;
+                    while lo < hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let open = base[3] + mid as f64 / SCALE;
+                        if aim_ok(open) == Some(true) {
+                            hi = mid;
+                        } else {
+                            lo = mid + 1;
+                        }
+                    }
+                    open_strict = lo;
+                    open_loose = (lo - n as i64 + 1).max(0);
+                }
+                None => return ExactTune::Unsupported,
+            }
+        }
+        let strict = [Some(h_strict), Some(v_strict), Some(k_strict)];
+        let strict = if aim_max.is_some() {
+            [
+                strict[0],
+                strict[1],
+                strict[2],
+                Some(open_strict),
+            ]
+        } else {
+            [strict[0], strict[1], strict[2], None]
+        };
+        let strict = strict.map(|t| t.filter(|v| *v > 0));
+        match reach_targets(&increments, strict, 400_000) {
+            ReachResult::Found(chosen) => {
+                if let Some((state, values)) =
+                    self.reconstruct_tuning(&groups, &chosen, aim_max, parts)
+                {
+                    ExactTune::Found(state, values)
+                } else {
+                    ExactTune::Unsupported
+                }
+            }
+            ReachResult::Budget => ExactTune::Unsupported,
+            ReachResult::Infeasible => {
+                let loose = [
+                    Some(h_loose).filter(|v| *v > 0),
+                    Some(v_loose).filter(|v| *v > 0),
+                    Some(k_loose).filter(|v| *v > 0),
+                    if aim_max.is_some() {
+                        Some(open_loose).filter(|v| *v > 0)
+                    } else {
+                        None
+                    },
+                ];
+                if loose == strict {
+                    return ExactTune::Infeasible;
+                }
+                match reach_targets(&increments, loose, 400_000) {
+                    ReachResult::Found(_) | ReachResult::Budget => ExactTune::Unsupported,
+                    ReachResult::Infeasible => ExactTune::Infeasible,
+                }
+            }
+        }
+    }
+
+    fn reconstruct_tuning(
+        &self,
+        groups: &[(String, Vec<LocalOffer>)],
+        chosen: &[usize],
+        aim_max: Option<f64>,
+        parts: &[&Part],
+    ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        let mut state = TuningState::default();
+        let mut values = Vec::with_capacity(groups.len());
+        let mut open = 0.0;
+        let mut move_speed = 0.0;
+        let mut move_runtime = 0.0;
+        let mut breath = 0.0;
+        let mut move_stability = 0.0;
+        for (idx, (key, offers)) in groups.iter().enumerate() {
+            let o = offers.get(*chosen.get(idx)?)?;
+            state.insert(key.clone(), o.value);
+            values.push((key.clone(), o.value));
+            open += o.e_open;
+            move_speed += o.e_move;
+            move_runtime += o.e_move_runtime;
+            breath += o.e_breath;
+            move_stability += o.e_move_stability;
+        }
+        if let Some(thr) = aim_max {
+            let sums = DetailSums {
+                open_speed: open,
+                move_speed,
+                move_runtime,
+                breath_stability: breath,
+                move_stability,
+            };
+            let detail = self.evaluator.detail_with(parts, &sums);
+            match detail.aim_time {
+                Some(v) if v <= thr + 1e-9 => {}
+                _ => return None,
+            }
+        }
+        Some((state, values))
+    }
+
+    fn pick_tuning_frontier(
         &mut self,
         instances: &[TuningInstance<'a>],
         req: &TuneReq,
@@ -4445,6 +4792,48 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(trim.capped);
         assert!(!trim.deadline);
+    }
+
+    #[test]
+    fn reach_targets_rejects_jointly_unattainable_targets() {
+        let increments = vec![
+            vec![(10, 0, 0, 0), (0, 0, 0, 10)],
+            vec![(0, 0, 0, 10), (10, 0, 0, 0)],
+        ];
+        assert_eq!(
+            reach_targets(&increments, [Some(20), None, None, Some(20)], 1000),
+            ReachResult::Infeasible
+        );
+        assert_eq!(
+            reach_targets(&increments, [Some(20), None, None, None], 1000),
+            ReachResult::Found(vec![0, 1])
+        );
+        assert_eq!(
+            reach_targets(&increments, [None, None, None, Some(20)], 1000),
+            ReachResult::Found(vec![1, 0])
+        );
+    }
+
+    #[test]
+    fn reach_targets_is_infeasible_when_a_channel_max_is_short() {
+        let increments = vec![vec![(5, 0, 0, 0)]];
+        assert_eq!(
+            reach_targets(&increments, [Some(6), None, None, None], 1000),
+            ReachResult::Infeasible
+        );
+        assert_eq!(
+            reach_targets(&increments, [Some(5), None, None, None], 1000),
+            ReachResult::Found(vec![0])
+        );
+    }
+
+    #[test]
+    fn reach_targets_reports_budget_exhaustion_separately() {
+        let increments = vec![vec![(1, 0, 0, 0)], vec![(1, 0, 0, 0)]];
+        assert_eq!(
+            reach_targets(&increments, [Some(2), None, None, None], 1),
+            ReachResult::Budget
+        );
     }
 }
 

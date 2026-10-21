@@ -547,6 +547,49 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
+    pub fn aim_inputs(&self, parts: &[&Part]) -> (f64, f64) {
+        let mode = self.mode;
+        let laser_index = laser_pro_index(parts, mode);
+        let mut handling = 0.0;
+        let mut ads_time_mult = 0.0;
+        let mut seen_raw: FxHashSet<(String, String, String, u64, String)> = FxHashSet::default();
+        for (idx, part) in parts.iter().enumerate() {
+            let laser_part = has_laser(part, mode);
+            let include = |m: &Modifier| {
+                modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
+            };
+            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
+                    continue;
+                }
+                if HANDLING_ATTRS.contains(&normalize_attr(m.attribute_id.as_deref())) {
+                    handling += m.delta.map(|v| v.0).unwrap_or(0.0);
+                }
+            }
+            for m in part.raw_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                if !param.is_finite() {
+                    continue;
+                }
+                if !(m.target_path == "GAiming_ADSTime" && m.modifier_type == "Mult_A") {
+                    continue;
+                }
+                let key = (
+                    part.id.clone(),
+                    m.target_path.clone(),
+                    m.modifier_type.clone(),
+                    param.to_bits(),
+                    m.function_rule_key.clone().unwrap_or_default(),
+                );
+                if !seen_raw.insert(key) {
+                    continue;
+                }
+                ads_time_mult += param;
+            }
+        }
+        (handling, ads_time_mult)
+    }
+
     pub fn detail_with(&self, parts: &[&Part], sums: &DetailSums) -> DetailMetrics {
         let mut out = DetailMetrics::default();
         let Some(profile) = self.payload.numeric_profiles.get(self.weapon_id) else {
