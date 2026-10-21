@@ -4,7 +4,7 @@ use crate::metrics::{
     DetailMetrics, DetailSums, Evaluator, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
     TuningInstance, TuningState, DETAIL_METRICS,
 };
-use crate::model::{Curve, Part, WeaponPayload};
+use crate::model::{Curve, CurveKey, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -164,6 +164,8 @@ pub struct Solver<'a> {
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
     control_curve: Option<Curve>,
     gunkick_curve: Option<Curve>,
+    control_min: Option<f64>,
+    gunkick_min: Option<f64>,
     gunkick0: f64,
     weapon_price: i64,
     seed: bool,
@@ -461,6 +463,16 @@ impl<'a> Solver<'a> {
             let gk0 = gunkick.as_ref().and_then(|c| c.eval(0.0)).unwrap_or(0.0);
             (control, gunkick, gk0)
         };
+        let control_min = control_curve.as_ref().and_then(curve_min_value);
+        let gunkick_min = gunkick_curve.as_ref().and_then(curve_min_value);
+        let curves_nonincreasing = control_curve
+            .as_ref()
+            .map(curve_is_nonincreasing)
+            .unwrap_or(true)
+            && gunkick_curve
+                .as_ref()
+                .map(curve_is_nonincreasing)
+                .unwrap_or(true);
         let mut structural_parts: FxHashSet<String> = FxHashSet::default();
         let rule_part_ids: FxHashSet<String> = payload
             .virtual_rules
@@ -524,7 +536,7 @@ impl<'a> Solver<'a> {
             })
             .map(|(idx, _)| idx)
             .collect();
-        let dp_ok = options.constraints.iter().all(|c| {
+        let mut dp_ok = options.constraints.iter().all(|c| {
             if c.id == "10001" {
                 false
             } else if is_panel_attr(&c.id) {
@@ -538,6 +550,9 @@ impl<'a> Solver<'a> {
             }
         });
         let dp_dims = DpDims::from_constraints(&options.constraints);
+        if dp_dims.d && !curves_nonincreasing {
+            dp_ok = false;
+        }
         let mut panel_base = [0.0f64; 5];
         if let Some(stats) = payload
             .weapon_stats
@@ -578,6 +593,8 @@ impl<'a> Solver<'a> {
             dp_metric_cache: FxHashMap::default(),
             control_curve,
             gunkick_curve,
+            control_min,
+            gunkick_min,
             gunkick0,
             weapon_price,
             seed: false,
@@ -919,6 +936,8 @@ impl<'a> Solver<'a> {
             return false;
         }
         let mut decided_bound = MetricBound::neutral();
+        let mut assumed_bound = MetricBound::neutral();
+        let mut optional_paths: FxHashSet<&str> = FxHashSet::default();
         let mut seen: FxHashSet<(&str, &str)> = FxHashSet::default();
         for slot in &assembly.visible_slots {
             if !decided.contains(&slot.path_key) {
@@ -939,17 +958,29 @@ impl<'a> Solver<'a> {
             }
         }
         for item in &assembly.internal_parts {
-            if !decided.contains(&item.slot_path_key) {
-                continue;
-            }
             if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
                 continue;
             }
-            if let Some(part) = self.payload.parts.get(&item.part_id) {
+            let Some(part) = self.payload.parts.get(&item.part_id) else {
+                continue;
+            };
+            if decided.contains(&item.slot_path_key) {
                 decided_bound.add_a(&part_own_bound(part, &self.options.mode));
+                continue;
+            }
+            let parent_active = match &item.parent_slot_path_key {
+                Some(parent) => {
+                    decided.contains(parent) || optional_paths.contains(parent.as_str())
+                }
+                None => true,
+            };
+            if parent_active {
+                assumed_bound.add_optional(&part_own_bound(part, &self.options.mode));
+                optional_paths.insert(item.slot_path_key.as_str());
             }
         }
         let mut bound = decided_bound;
+        bound.add_a(&assumed_bound);
         for slot in &assembly.visible_slots {
             if decided.contains(&slot.path_key) {
                 continue;
@@ -993,22 +1024,28 @@ impl<'a> Solver<'a> {
         }
         let d_lo = decided_bound.max_d;
         let d_hi = bound.max_d;
-        let cr_lo = self.control_curve.as_ref().and_then(|c| c.eval(d_lo));
-        let cr_hi = self.control_curve.as_ref().and_then(|c| c.eval(d_hi));
-        let cr = match (cr_lo, cr_hi) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => return false,
-        };
-        let gk_lo = self.gunkick_curve.as_ref().and_then(|c| c.eval(d_lo));
-        let gk_hi = self.gunkick_curve.as_ref().and_then(|c| c.eval(d_hi));
-        let gk = match (gk_lo, gk_hi) {
-            (Some(a), Some(b)) => a.min(b),
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => return false,
-        };
+        let cr = self
+            .control_curve
+            .as_ref()
+            .and_then(|c| c.eval(d_lo))
+            .into_iter()
+            .chain(self.control_curve.as_ref().and_then(|c| c.eval(d_hi)))
+            .chain(self.control_min)
+            .fold(f64::INFINITY, f64::min);
+        if !cr.is_finite() {
+            return false;
+        }
+        let gk = self
+            .gunkick_curve
+            .as_ref()
+            .and_then(|c| c.eval(d_lo))
+            .into_iter()
+            .chain(self.gunkick_curve.as_ref().and_then(|c| c.eval(d_hi)))
+            .chain(self.gunkick_min)
+            .fold(f64::INFINITY, f64::min);
+        if !gk.is_finite() {
+            return false;
+        }
         let f_h = cr * (1.0 + bound.min_a_h + bound.min_t_h) * bound.min_c_h;
         let f_v = cr * (1.0 + bound.min_a_v + bound.min_t_v) * bound.min_c_v;
         let s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
@@ -2512,6 +2549,22 @@ impl MetricBound {
         }
     }
 
+    fn add_optional(&mut self, other: &MetricBound) {
+        self.max_d += other.max_d.max(0.0);
+        self.min_a_h += other.min_a_h.min(0.0);
+        self.min_a_v += other.min_a_v.min(0.0);
+        self.min_c_h *= other.min_c_h.min(1.0);
+        self.min_c_v *= other.min_c_v.min(1.0);
+        self.min_c_k *= other.min_c_k.min(1.0);
+        self.min_t_h += other.min_t_h.min(0.0);
+        self.min_t_v += other.min_t_v.min(0.0);
+        self.min_t_k += other.min_t_k.min(0.0);
+        for idx in 0..5 {
+            self.panel_max[idx] += other.panel_max[idx].max(0.0);
+            self.panel_min[idx] += other.panel_min[idx].min(0.0);
+        }
+    }
+
     fn best_of(&mut self, other: &MetricBound) {
         self.max_d = self.max_d.max(other.max_d);
         self.min_a_h = self.min_a_h.min(other.min_a_h);
@@ -2762,6 +2815,94 @@ struct BaseRecoil {
     c_k: f64,
     cr: f64,
     gk_ratio: f64,
+}
+
+fn cubic_coeffs(a: &CurveKey, b: &CurveKey) -> (f64, f64, f64) {
+    let dt = b.time - a.time;
+    let c3 =
+        2.0 * a.value + dt * a.leave_tangent - 2.0 * b.value + dt * b.arrive_tangent;
+    let c2 = -3.0 * a.value - 2.0 * dt * a.leave_tangent + 3.0 * b.value
+        - dt * b.arrive_tangent;
+    let c1 = dt * a.leave_tangent;
+    (c3, c2, c1)
+}
+
+fn quadratic_roots(a: f64, b: f64, c: f64) -> Vec<f64> {
+    if a.abs() < 1e-12 {
+        if b.abs() < 1e-12 {
+            return Vec::new();
+        }
+        return vec![-c / b];
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let root = disc.sqrt();
+    vec![(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)]
+}
+
+fn curve_is_nonincreasing(curve: &Curve) -> bool {
+    for pair in curve.keys.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if b.value > a.value + 1e-9 {
+            return false;
+        }
+        if a.interp_mode != "RCIM_Cubic" || b.time <= a.time {
+            continue;
+        }
+        let (c3, c2, c1) = cubic_coeffs(a, b);
+        let deriv = |t: f64| 3.0 * c3 * t * t + 2.0 * c2 * t + c1;
+        let mut max_deriv = deriv(0.0).max(deriv(1.0));
+        let vertex = if c3.abs() > 1e-12 {
+            Some(-c2 / (3.0 * c3))
+        } else if c2.abs() > 1e-12 {
+            Some(-c1 / (2.0 * c2))
+        } else {
+            None
+        };
+        if let Some(t) = vertex {
+            if t > 0.0 && t < 1.0 {
+                max_deriv = max_deriv.max(deriv(t));
+            }
+        }
+        if max_deriv > 1e-9 {
+            return false;
+        }
+    }
+    true
+}
+
+fn curve_min_value(curve: &Curve) -> Option<f64> {
+    let mut min_value = f64::INFINITY;
+    for key in &curve.keys {
+        if key.value.is_finite() {
+            min_value = min_value.min(key.value);
+        }
+    }
+    for pair in curve.keys.windows(2) {
+        let a = &pair[0];
+        let b = &pair[1];
+        if a.interp_mode != "RCIM_Cubic" || b.time <= a.time {
+            continue;
+        }
+        let (c3, c2, c1) = cubic_coeffs(a, b);
+        let eval = |t: f64| ((c3 * t + c2) * t + c1) * t + a.value;
+        for t in quadratic_roots(3.0 * c3, 2.0 * c2, c1) {
+            if t > 0.0 && t < 1.0 {
+                let value = eval(t);
+                if value.is_finite() {
+                    min_value = min_value.min(value);
+                }
+            }
+        }
+    }
+    if min_value.is_finite() {
+        Some(min_value)
+    } else {
+        None
+    }
 }
 
 const TUNE_NEXT_LIMIT: usize = 16_384;
