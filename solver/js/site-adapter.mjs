@@ -21,12 +21,55 @@ export const SUPPORTED_CONSTRAINT_IDS = new Set([
   "recoil-single-horizontal",
   "recoil-single-vertical",
   "recoil-fire-stability",
+  "handling-aim-time",
+  "handling-sprint-fire-delay",
+  "handling-aim-move-speed",
+  "handling-reload-time",
+  "handling-empty-reload-time",
+  "handling-holster-time",
+  "handling-switch-time",
+  "stability-breath-range",
+  "stability-breath-duration",
+  "stability-movement-camera",
+  "stability-fire-camera",
+  "stability-hit-sway",
+  "stability-hold-breath-recoil",
+  "hipfire-standing-spread",
+  "hipfire-maximum-spread",
   "10001",
   "10005",
   "10006",
   "10007",
   "10008",
 ]);
+
+const DETAIL_METRIC_FIELDS = {
+  "handling-aim-time": "aim_time",
+  "handling-sprint-fire-delay": "sprint_fire_delay",
+  "handling-aim-move-speed": "aim_move_speed",
+  "handling-reload-time": "reload_time",
+  "handling-empty-reload-time": "empty_reload_time",
+  "handling-holster-time": "holster_time",
+  "handling-switch-time": "switch_time",
+  "stability-breath-range": "breath_range",
+  "stability-breath-duration": "breath_duration",
+  "stability-movement-camera": "movement_camera",
+  "stability-fire-camera": "fire_camera",
+  "stability-hit-sway": "hit_sway",
+  "stability-hold-breath-recoil": "hold_breath_recoil",
+  "hipfire-standing-spread": "hipfire_standing",
+  "hipfire-maximum-spread": "hipfire_maximum",
+};
+
+function detailMetricMap(raw) {
+  const detail = asObject(raw);
+  const out = {};
+  for (const [id, field] of Object.entries(DETAIL_METRIC_FIELDS)) {
+    const value = detail[field];
+    if (Number.isFinite(value)) out[id] = value;
+  }
+  return out;
+}
 
 export const PRIMARY_ATTR_BY_GROUP = {
   recoil: "10005",
@@ -291,6 +334,7 @@ function mapBuild(raw) {
     tuning: asObject(solution.tuning),
     installedPartKeys: [...installedPartKeys],
     attributes: asObject(solution.panel),
+    detail: asObject(solution.detail),
     recoil: asObject(solution.recoil),
     totalPrice: solution.total_price,
     attachmentPrice: solution.attachment_price,
@@ -386,7 +430,7 @@ export function toSiteResult(context, result) {
     installedPartKeys: asArray(build.installedPartKeys),
     metrics: {
       attributes: asObject(build.attributes),
-      detailMetrics: {},
+      detailMetrics: detailMetricMap(build.detail),
     },
   };
 

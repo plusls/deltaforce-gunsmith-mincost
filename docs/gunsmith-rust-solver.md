@@ -38,6 +38,12 @@
 - `recoil-single-vertical`
 - `recoil-fire-stability`
 - 面板属性 id: `10001`, `10005`, `10006`, `10007`, `10008`
+- 细分指标:
+  - handling: `handling-aim-time`, `handling-sprint-fire-delay`, `handling-aim-move-speed`, `handling-reload-time`, `handling-empty-reload-time`, `handling-holster-time`, `handling-switch-time`
+  - stability: `stability-breath-range`, `stability-breath-duration`, `stability-movement-camera`, `stability-fire-camera`, `stability-hit-sway`, `stability-hold-breath-recoil`
+  - hipfire: `hipfire-standing-spread`, `hipfire-maximum-spread`
+
+细分指标的计算口径 (handling 分数, ADS 曲线, 运行时修正倍率, 稳定/腰射/受击摆动等) 见 `docs/gunsmith-numerical-model.md`, 与站点 worker 逐值对齐.
 
 价格按"每个已安装槽位实例"计费. 同一配件装两片护木片就付两次钱. 虚拟配件价格为 0.
 
@@ -95,6 +101,7 @@
      A_H, A_V,
      C_H, C_V, C_K,
      E_H, E_V, E_K,
+     hs, adsm, eopen,
      受约束面板属性值...)
 
 其中:
@@ -103,6 +110,9 @@
 - `A_H/A_V`: 原始 `rawRecoil.horizontal/vertical` 之和
 - `C_H/C_V/C_K`: 原始 `Mult_C` 倍率之积
 - `E_H/E_V/E_K`: 该配件精校能提供的最大通道收益
+- `hs`: handling 分数 (主要来自 `10006` Addend), 决定 `adsTime` 曲线输入
+- `adsm`: `GAiming_ADSTime` 的 `Mult_A` 倍率之和
+- `eopen`: 精校在 `handling-aim-time` 方向上的最大收益
 - 面板属性: `displayMods` 中对应 `attributeId` 的 Addend 之和
 
 支配关系 (A 支配 B):
@@ -113,6 +123,12 @@
     A.C    <= B.C
     A.E    >= B.E
     A.panel <= B.panel   (仅对 max 约束)
+    A.hs   >= B.hs       (仅当 aim 约束是 max, 即需要更大 handling)
+    A.hs   <= B.hs       (仅当 aim 约束是 min)
+    A.adsm <= B.adsm
+    A.eopen >= B.eopen   (max 约束) / <= (min 约束)
+
+`handling-aim-time` 的 `min` 和 `max` 都参与 DP, 方向由 `AimDir` 决定; 同时出现 min 和 max 时方向退化为 `Ignore`, 该维度不做支配剪枝. 其余 14 个细分指标在 `dp_ok` 中被判为不可 DP, 直接退回逐组合枚举.
 
 每个槽位的选项包括 unset, remove 和所有非结构候选. 逐槽做笛卡尔积后立即做 Pareto 剪枝.
 
@@ -122,7 +138,7 @@
 - 精校每个 tune 只影响一个后坐力通道 (`%额外后坐力控制` 同时作用于 H/V, 值是同一个). 因此各通道取最大收益是可同时达到的, 不会出现"取了 H 最大值就达不到 V 最大值"的问题.
 - 激光/两脚架/瞄准镜这些带条件或 profile 的配件都在结构层, 不会进入 DP 的乐观估计.
 - 精校可用性用 `tuningSocketAvailability` 和槽位名判断, 不可用时不记收益.
-- 面板 DP 只支持 max 约束. min 约束会把 `dp_ok` 置为 false, 退回完整枚举.
+- 面板 DP 支持单独的 max 或 min 约束; 同一属性同时有 min 和 max 时关闭 DP. `10001` 始终关闭 DP.
 
 DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncated`, 此时结果不再声明 optimal.
 
@@ -229,6 +245,7 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
     "total_price": 175891,
     "recoil": { "...": 0.55 },
     "panel": { "10005": 72.0 },
+    "detail": { "aim_time": 355.0, "handling_score": 61.0, "...": null },
     "tuning": { "...": 50.0 },
     "constraints": [{ "id": "...", "value": 0.55, "max": 0.6, "ok": true }],
     "installed_parts": [{ "slot_path": "...", "part_id": "...", "price": 3541 }],
@@ -404,8 +421,12 @@ GET https://moligod.com/api/gunsmith/share-codes/6LM1E480BO0F121KNDPVA
 - 会被 DFS 分支的结构槽数量. 结构件会改变装配树或虚拟规则, 必须在 DFS 里显式决定.
 - 每个结构槽的结构候选数. `Defer`/`Unset`/`Remove` 各算一个动作.
 - 叶子槽的候选组合数. 由 Pareto DP 处理, 前沿上限 200,000.
-- 是否存在 min 约束. 当前 `dp_ok = constraints 全部无 min`, 一旦出现 min 约束, 叶子 DP 关闭, 退化为逐组合枚举.
+- 是否存在 min 约束. 后坐力指标的 min 约束会关闭叶子 DP; 面板和 `handling-aim-time` 的 min 约束仍可 DP, 但同一指标同时有 min/max 会关闭 DP; 其余细分指标一律关闭 DP, 退化为逐组合枚举.
 - 是否能尽快找到可行解. 找到上界后分支定界才能剪枝; 无解时没有上界.
+
+搜索顺序是便宜优先, 因此"便宜但全部违反约束"的分支会被先枚举. 约束很紧时 (例如同时要求后坐力三项和 `handling-aim-time`), 首个可行解可能出现在很深的叶节点, 5 秒预算内找不到是可能的, 即使可行解实际存在.
+
+截止时间的检查点: 每个 DFS 节点, 每个叶节点, 每次 DP 状态更新, 以及精校 Pareto 的每 1024 个候选. 精校前沿单次最多构建 16,384 个候选, 保留 4,096 个非支配解, 超出即置 `truncated`. 带 `handling-aim-time` max 约束时, DP 状态会先用"最大开镜速度精校潜力"算一次乐观瞄准时间, 连乐观值都超限的状态直接丢弃.
 
 ### 10.2 静态复杂度
 

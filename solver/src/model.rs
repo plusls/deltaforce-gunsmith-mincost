@@ -51,6 +51,8 @@ pub struct Part {
     pub raw_recoil: Map<String, RawRecoil>,
     #[serde(rename = "rawGunSwayBeHitScaleMultAByMode", default)]
     pub raw_gun_sway: Map<String, Option<f64>>,
+    #[serde(rename = "runtimeModifiersByMode", default)]
+    pub runtime_mods: Map<String, Vec<RuntimeModifier>>,
     #[serde(rename = "tuningOptions", default)]
     pub tuning_options: Vec<TuningOption>,
     #[serde(rename = "tuningSocketAvailability", default)]
@@ -95,6 +97,16 @@ pub struct RawRecoil {
     pub vertical: Option<f64>,
     #[serde(rename = "gunkickSpringMultC", default)]
     pub gunkick_spring_mult_c: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RuntimeModifier {
+    #[serde(default)]
+    pub target: String,
+    #[serde(rename = "modifierType", default)]
+    pub modifier_type: String,
+    #[serde(default)]
+    pub param1: Option<Num>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -285,6 +297,68 @@ pub struct LinkedTables {
     pub aim_recoil: AimRecoil,
     #[serde(rename = "recoilCurves", default)]
     pub recoil_curves: RecoilCurves,
+    #[serde(rename = "handlingCurves", default)]
+    pub handling_curves: HandlingCurves,
+    #[serde(rename = "stabilityCurves", default)]
+    pub stability_curves: StabilityCurves,
+    #[serde(rename = "waistSpread", default)]
+    pub waist_spread: Option<WaistSpread>,
+    #[serde(default)]
+    pub aiming: Value,
+    #[serde(rename = "movementByMode", default)]
+    pub movement_by_mode: Map<String, Value>,
+    #[serde(rename = "holdBreath", default)]
+    pub hold_breath: Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HandlingCurves {
+    #[serde(rename = "adsTime", default)]
+    pub ads_time: Option<Curve>,
+    #[serde(rename = "sprintToFire", default)]
+    pub sprint_to_fire: Option<Curve>,
+    #[serde(rename = "sprintToFireMP", default)]
+    pub sprint_to_fire_mp: Option<Curve>,
+    #[serde(rename = "adsStrafeSpeed", default)]
+    pub ads_strafe_speed: Option<Curve>,
+    #[serde(rename = "adsStrafeSpeedMP", default)]
+    pub ads_strafe_speed_mp: Option<Curve>,
+    #[serde(rename = "hipSpread", default)]
+    pub hip_spread: Option<Curve>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StabilityCurves {
+    #[serde(rename = "breathScale", default)]
+    pub breath_scale: Option<Curve>,
+    #[serde(rename = "breathTime", default)]
+    pub breath_time: Option<Curve>,
+    #[serde(rename = "fireCameraStability", default)]
+    pub fire_camera_stability: Option<Curve>,
+    #[serde(rename = "movementCameraStability", default)]
+    pub movement_camera_stability: Option<Curve>,
+    #[serde(rename = "holdBreathRecoil", default)]
+    pub hold_breath_recoil: Option<Curve>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct WaistSpread {
+    #[serde(rename = "AreaSize", default)]
+    pub area_size: Vec<Num>,
+    #[serde(rename = "SpreadMax", default)]
+    pub spread_max: SpreadMax,
+    #[serde(rename = "LuaDisplaySpreadFactor", default)]
+    pub lua_display_spread_factor: Option<Num>,
+    #[serde(rename = "LuaDisplaySpreadUIFactor", default)]
+    pub lua_display_spread_ui_factor: Option<Num>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SpreadMax {
+    #[serde(rename = "X", default)]
+    pub x: Option<Num>,
+    #[serde(rename = "Y", default)]
+    pub y: Option<Num>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -293,6 +367,10 @@ pub struct AimRecoil {
     pub continue_shoot: RecoilScale,
     #[serde(rename = "SingleOrBurstShootRecoil", default)]
     pub single_or_burst: RecoilScale,
+    #[serde(rename = "RecoilShakePitchWithCurve", default)]
+    pub shake_pitch: Value,
+    #[serde(rename = "RecoilShakeYawWithCurve", default)]
+    pub shake_yaw: Value,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

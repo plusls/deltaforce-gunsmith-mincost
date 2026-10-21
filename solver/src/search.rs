@@ -1,7 +1,8 @@
 use crate::assembly::{Assembler, VisibleSlot};
 use crate::metrics::{
-    eval_curve_points, quantize, tuning_available, tune_offer, tune_offer_values, Evaluator,
-    TuningInstance, TuningState,
+    eval_curve_points, quantize, tune_channels, tuning_available, tune_offer, tune_offer_values,
+    DetailMetrics, DetailSums, Evaluator, HANDLING_ATTRS, HIPFIRE_ATTRS, STABILITY_ATTRS,
+    TuningInstance, TuningState, DETAIL_METRICS,
 };
 use crate::model::{Curve, Part, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -63,6 +64,31 @@ pub struct ConstraintResult {
     pub ok: bool,
 }
 
+pub const PANEL_ATTRS: [&str; 5] = ["10001", "10005", "10006", "10007", "10008"];
+pub const RECOIL_METRICS: [&str; 5] = [
+    "recoil-continuous-horizontal",
+    "recoil-continuous-vertical",
+    "recoil-single-horizontal",
+    "recoil-single-vertical",
+    "recoil-fire-stability",
+];
+
+pub fn is_supported_constraint(id: &str) -> bool {
+    RECOIL_METRICS.contains(&id) || PANEL_ATTRS.contains(&id) || DETAIL_METRICS.contains(&id)
+}
+
+fn is_recoil_metric(id: &str) -> bool {
+    RECOIL_METRICS.contains(&id)
+}
+
+fn is_panel_attr(id: &str) -> bool {
+    PANEL_ATTRS.contains(&id)
+}
+
+fn panel_attr_index(id: &str) -> Option<usize> {
+    PANEL_ATTRS.iter().position(|attr| *attr == id)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InstalledPart {
     pub slot_path: String,
@@ -78,6 +104,7 @@ pub struct Solution {
     pub total_price: i64,
     pub recoil: RecoilSummary,
     pub panel: FxHashMap<String, f64>,
+    pub detail: DetailMetrics,
     pub tuning: FxHashMap<String, f64>,
     pub constraints: Vec<ConstraintResult>,
     pub installed_parts: Vec<InstalledPart>,
@@ -127,9 +154,13 @@ pub struct Solver<'a> {
     offer_cache: FxHashMap<(String, String), Vec<Offer>>,
     slot_bounds: FxHashMap<(String, String), MetricBound>,
     structural_parts: FxHashSet<String>,
-    dp_truncated: bool,
     dp_ok: bool,
+    dp_dims: DpDims,
+    tune_dims: TuneDims,
+    aim_dp: AimDir,
     panel_attrs: Vec<String>,
+    panel_dirs: Vec<bool>,
+    seed_panel_attrs: Vec<usize>,
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
     control_curve: Option<Curve>,
     gunkick_curve: Option<Curve>,
@@ -139,7 +170,6 @@ pub struct Solver<'a> {
     cost_cap: i64,
     run_found: bool,
     deadline_at: Option<u64>,
-    clock_ticks: u32,
     best: Option<Solution>,
     alternatives: Vec<Solution>,
     nodes: u64,
@@ -147,6 +177,7 @@ pub struct Solver<'a> {
     truncated: bool,
     stop: bool,
     best_cost: i64,
+    panel_base: [f64; 5],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,13 +185,171 @@ struct Relevance {
     slots: FxHashSet<(String, String)>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DpDims {
+    d: bool,
+    ah: bool,
+    av: bool,
+    ch: bool,
+    cv: bool,
+    ck: bool,
+    eh: bool,
+    ev: bool,
+    ek: bool,
+    hs: bool,
+    adsm: bool,
+    eopen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AimDir {
+    MoreHandling,
+    LessHandling,
+    Ignore,
+}
+
+impl DpDims {
+    fn from_constraints(constraints: &[Constraint]) -> Self {
+        let mut dims = Self::default();
+        for c in constraints {
+            match c.id.as_str() {
+                "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
+                    dims.d = true;
+                    dims.ah = true;
+                    dims.ch = true;
+                    dims.eh = true;
+                }
+                "recoil-continuous-vertical" | "recoil-single-vertical" => {
+                    dims.d = true;
+                    dims.av = true;
+                    dims.cv = true;
+                    dims.ev = true;
+                }
+                "recoil-fire-stability" => {
+                    dims.d = true;
+                    dims.ck = true;
+                    dims.ek = true;
+                }
+                "handling-aim-time" => {
+                    dims.hs = true;
+                    dims.adsm = true;
+                    dims.eopen = true;
+                }
+                _ => {}
+            }
+        }
+        dims
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Offer {
     e_h: f64,
     e_v: f64,
     e_k: f64,
+    e_open: f64,
+    e_move: f64,
+    e_move_runtime: f64,
+    e_breath: f64,
+    e_move_stability: f64,
     values: Vec<(String, f64)>,
     deviation: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuneDir {
+    Higher,
+    Lower,
+    Equal,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TuneDims {
+    open: TuneDir,
+    move_effect: TuneDir,
+    breath: TuneDir,
+    move_stability: TuneDir,
+}
+
+impl TuneDims {
+    fn from_constraints(constraints: &[Constraint]) -> Self {
+        let mut open_high = false;
+        let mut open_low = false;
+        let mut move_high = false;
+        let mut move_low = false;
+        let mut breath_high = false;
+        let mut breath_low = false;
+        let mut stability_high = false;
+        let mut stability_low = false;
+        for c in constraints {
+            let max = c.max.is_some();
+            let min = c.min.is_some();
+            match c.id.as_str() {
+                "handling-aim-time" => {
+                    open_high |= max && !min;
+                    open_low |= min && !max;
+                }
+                "handling-aim-move-speed" => {
+                    move_low |= max && !min;
+                    move_high |= min && !max;
+                }
+                "stability-breath-range" => {
+                    breath_high |= min && !max;
+                    breath_low |= max && !min;
+                }
+                "stability-breath-duration" => {
+                    breath_low |= min && !max;
+                    breath_high |= max && !min;
+                }
+                "stability-movement-camera" => {
+                    stability_high |= min && !max;
+                    stability_low |= max && !min;
+                }
+                _ => {}
+            }
+        }
+        let dir = |high: bool, low: bool| {
+            if high && !low {
+                TuneDir::Higher
+            } else if low && !high {
+                TuneDir::Lower
+            } else if high && low {
+                TuneDir::Equal
+            } else {
+                TuneDir::Ignore
+            }
+        };
+        Self {
+            open: dir(open_high, open_low),
+            move_effect: dir(move_high, move_low),
+            breath: dir(breath_high, breath_low),
+            move_stability: dir(stability_high, stability_low),
+        }
+    }
+}
+
+fn channel_ok(a: f64, b: f64, dir: TuneDir) -> bool {
+    match dir {
+        TuneDir::Higher => a >= b - 1e-9,
+        TuneDir::Lower => a <= b + 1e-9,
+        TuneDir::Equal => (a - b).abs() <= 1e-9,
+        TuneDir::Ignore => true,
+    }
+}
+
+fn aim_direction(constraints: &[Constraint]) -> AimDir {
+    for c in constraints {
+        if c.id != "handling-aim-time" {
+            continue;
+        }
+        return match (c.min.is_some(), c.max.is_some()) {
+            (false, true) => AimDir::MoreHandling,
+            (true, false) => AimDir::LessHandling,
+            _ => AimDir::Ignore,
+        };
+    }
+    AimDir::Ignore
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,6 +361,20 @@ struct TuneReq {
     lower_k: f64,
     upper_k: f64,
     impossible: bool,
+}
+
+impl TuneReq {
+    fn unconstrained() -> Self {
+        Self {
+            lower_h: f64::NEG_INFINITY,
+            upper_h: f64::INFINITY,
+            lower_v: f64::NEG_INFINITY,
+            upper_v: f64::INFINITY,
+            lower_k: f64::NEG_INFINITY,
+            upper_k: f64::INFINITY,
+            impossible: false,
+        }
+    }
 }
 
 impl<'a> Solver<'a> {
@@ -240,11 +443,62 @@ impl<'a> Solver<'a> {
         let mut panel_attrs: Vec<String> = options
             .constraints
             .iter()
-            .filter(|c| c.id.chars().all(|ch| ch.is_ascii_digit()))
+            .filter(|c| is_panel_attr(&c.id))
             .map(|c| c.id.clone())
             .collect();
         panel_attrs.sort();
         panel_attrs.dedup();
+        let panel_dirs: Vec<bool> = panel_attrs
+            .iter()
+            .map(|attr| {
+                options
+                    .constraints
+                    .iter()
+                    .find(|c| &c.id == attr)
+                    .map(|c| c.min.is_some() && c.max.is_none())
+                    .unwrap_or(false)
+            })
+            .collect();
+        let seed_panel_attrs: Vec<usize> = panel_attrs
+            .iter()
+            .enumerate()
+            .filter(|(_, attr)| {
+                options
+                    .constraints
+                    .iter()
+                    .any(|c| &c.id == *attr && c.min.is_some())
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        let dp_ok = options.constraints.iter().all(|c| {
+            if c.id == "10001" {
+                false
+            } else if is_panel_attr(&c.id) {
+                !(c.min.is_some() && c.max.is_some())
+            } else if is_recoil_metric(&c.id) {
+                c.min.is_none()
+            } else if c.id == "handling-aim-time" {
+                !(c.min.is_some() && c.max.is_some())
+            } else {
+                false
+            }
+        });
+        let dp_dims = DpDims::from_constraints(&options.constraints);
+        let mut panel_base = [0.0f64; 5];
+        if let Some(stats) = payload
+            .weapon_stats
+            .get(weapon_id)
+            .and_then(|s| s.by_mode.get(&options.mode))
+        {
+            for (idx, attr) in PANEL_ATTRS.iter().enumerate() {
+                panel_base[idx] = stats
+                    .display
+                    .get(*attr)
+                    .copied()
+                    .or_else(|| stats.base.get(*attr).copied())
+                    .unwrap_or(0.0);
+            }
+        }
         let weapon_price = payload
             .parts
             .get(weapon_id)
@@ -260,9 +514,13 @@ impl<'a> Solver<'a> {
             offer_cache: FxHashMap::default(),
             slot_bounds,
             structural_parts,
-            dp_truncated: false,
-            dp_ok: options.constraints.iter().all(|c| c.min.is_none()),
+            dp_ok,
+            dp_dims,
+            tune_dims: TuneDims::from_constraints(&options.constraints),
+            aim_dp: aim_direction(&options.constraints),
             panel_attrs,
+            panel_dirs,
+            seed_panel_attrs,
             dp_metric_cache: FxHashMap::default(),
             control_curve,
             gunkick_curve,
@@ -272,7 +530,6 @@ impl<'a> Solver<'a> {
             cost_cap: i64::MAX,
             run_found: false,
             deadline_at: None,
-            clock_ticks: 0,
             best: None,
             alternatives: Vec::new(),
             nodes: 0,
@@ -280,6 +537,7 @@ impl<'a> Solver<'a> {
             truncated: false,
             stop: false,
             best_cost: i64::MAX,
+            panel_base,
         }
     }
 
@@ -405,8 +663,7 @@ impl<'a> Solver<'a> {
             return true;
         }
         if let Some(deadline) = self.deadline_at {
-            self.clock_ticks = self.clock_ticks.wrapping_add(1);
-            if self.clock_ticks & 63 == 0 && now_ms() >= deadline {
+            if now_ms() >= deadline {
                 self.truncated = true;
                 self.stop = true;
                 return true;
@@ -440,10 +697,8 @@ impl<'a> Solver<'a> {
             {
                 continue;
             }
-            if !self.slot_actions(slot, selections).is_empty() {
-                next = Some(idx);
-                break;
-            }
+            next = Some(idx);
+            break;
         }
 
         let Some(idx) = next else {
@@ -451,27 +706,22 @@ impl<'a> Solver<'a> {
             return;
         };
 
+        if self.cannot_satisfy(selections, &assembly, decided) {
+            return;
+        }
         if !self.seed {
-            if self.cannot_satisfy(selections, &assembly, decided) {
+            let lower = self.cost_lower_bound(selections, &assembly, decided) + self.weapon_price;
+            if self.cost_cap < i64::MAX && lower > self.cost_cap {
                 return;
             }
-            if self.cost_cap < i64::MAX
-                && self.cost_lower_bound(selections, &assembly, decided) + self.weapon_price
-                    > self.cost_cap
-            {
-                return;
-            }
-            if self.best_cost < i64::MAX
-                && self.cost_lower_bound(selections, &assembly, decided) + self.weapon_price
-                    > self.best_cost
-            {
+            if self.best_cost < i64::MAX && lower >= self.best_cost {
                 return;
             }
         }
 
-        let slot = assembly.visible_slots[idx].clone();
-        let path = slot.path_key.clone();
-        for action in self.slot_actions(&slot, selections) {
+        let actions = self.slot_actions(&assembly.visible_slots[idx], selections);
+        let path = assembly.visible_slots[idx].path_key.clone();
+        for action in actions {
             if self.stop {
                 return;
             }
@@ -556,9 +806,18 @@ impl<'a> Solver<'a> {
             forced.push(Action::Remove);
         }
         parts.sort_by(|a, b| {
-            let pa = self.part_price(a);
-            let pb = self.part_price(b);
-            pa.cmp(&pb).then(a.cmp(b))
+            if self.seed && !self.seed_panel_attrs.is_empty() {
+                let sa = self.seed_panel_score(a);
+                let sb = self.seed_panel_score(b);
+                sb.partial_cmp(&sa)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| self.part_price(a).cmp(&self.part_price(b)))
+                    .then_with(|| a.cmp(b))
+            } else {
+                let pa = self.part_price(a);
+                let pb = self.part_price(b);
+                pa.cmp(&pb).then(a.cmp(b))
+            }
         });
         let mut part_actions: Vec<Action> = Vec::new();
         for id in parts {
@@ -587,11 +846,15 @@ impl<'a> Solver<'a> {
         assembly: &crate::assembly::Assembly,
         decided: &FxHashSet<String>,
     ) -> bool {
-        let has_max = self.options.constraints.iter().any(|c| c.max.is_some());
-        if !has_max {
-            return false;
-        }
-        if self.control_curve.is_none() || self.gunkick_curve.is_none() || self.gunkick0 == 0.0 {
+        let has_panel = self
+            .options
+            .constraints
+            .iter()
+            .any(|c| is_panel_attr(&c.id) && c.id != "10001");
+        let has_recoil_max = self.options.constraints.iter().any(|c| {
+            c.max.is_some() && is_recoil_metric(&c.id)
+        });
+        if !has_panel && !has_recoil_max {
             return false;
         }
         let mut decided_bound = MetricBound::neutral();
@@ -643,6 +906,29 @@ impl<'a> Solver<'a> {
             {
                 bound.add_a(b);
             }
+        }
+        for c in &self.options.constraints {
+            if let Some(idx) = panel_attr_index(&c.id) {
+                if idx == 0 {
+                    continue;
+                }
+                if let Some(min) = c.min {
+                    if self.panel_base[idx] + bound.panel_max[idx] < min - 1e-9 {
+                        return true;
+                    }
+                }
+                if let Some(max) = c.max {
+                    if self.panel_base[idx] + bound.panel_min[idx] > max + 1e-9 {
+                        return true;
+                    }
+                }
+            }
+        }
+        if !has_recoil_max {
+            return false;
+        }
+        if self.control_curve.is_none() || self.gunkick_curve.is_none() || self.gunkick0 == 0.0 {
+            return false;
         }
         let d_lo = decided_bound.max_d;
         let d_hi = bound.max_d;
@@ -728,6 +1014,31 @@ impl<'a> Solver<'a> {
             .unwrap_or(0)
     }
 
+    fn seed_panel_score(&self, id: &str) -> f64 {
+        let Some(part) = self.payload.parts.get(id) else {
+            return 0.0;
+        };
+        let Some(list) = part.display_mods.get(&self.options.mode) else {
+            return 0.0;
+        };
+        let mut score = 0.0;
+        for m in list {
+            if m.condition_id.is_some() || m.modifier_type != "Addend" {
+                continue;
+            }
+            let Some(idx) = panel_attr_index(normalize_attr(m.attribute_id.as_deref())) else {
+                continue;
+            };
+            if !self.seed_panel_attrs.contains(&idx) {
+                continue;
+            }
+            if let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) {
+                score += delta;
+            }
+        }
+        score
+    }
+
 
     fn dp_leaf(
         &mut self,
@@ -802,7 +1113,15 @@ impl<'a> Solver<'a> {
         for (idx, (part, slot_name)) in base_parts.iter().enumerate() {
             let is_laser = crate::metrics::has_laser(part, &self.options.mode);
             let include_pro = is_laser && self.options.laser_enabled && Some(idx) == laser_index;
-            let m = exact_part_metric(part, slot_name, &self.options.mode, self.options.bipod_deployed, is_laser, include_pro, &self.panel_attrs);
+            let m = exact_part_metric(
+                part,
+                slot_name,
+                &self.options.mode,
+                self.options.bipod_deployed,
+                is_laser,
+                include_pro,
+                &self.panel_attrs,
+            );
             base.add(&m);
         }
 
@@ -871,12 +1190,19 @@ impl<'a> Solver<'a> {
             slot_paths.push(path);
         }
 
+        let mut suffix_min = vec![0i64; options_per_slot.len() + 1];
+        for (idx, opts) in options_per_slot.iter().enumerate().rev() {
+            let min_cost = opts.iter().map(|o| o.cost).min().unwrap_or(0);
+            suffix_min[idx] = suffix_min[idx + 1] + min_cost;
+        }
+
         let mut states: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base,
             choices: Vec::new(),
         }];
-        for opts in &options_per_slot {
+        for (slot_idx, opts) in options_per_slot.iter().enumerate() {
+            let rest_cost = suffix_min[slot_idx + 1];
             let mut next: Vec<DpState> = Vec::with_capacity(states.len().saturating_mul(opts.len()).min(200_000));
             for st in &states {
                 for opt in opts {
@@ -888,6 +1214,14 @@ impl<'a> Solver<'a> {
                     if self.best_cost < i64::MAX && total >= self.best_cost {
                         continue;
                     }
+                    if total + rest_cost > self.cost_cap
+                        && self.cost_cap < i64::MAX
+                    {
+                        continue;
+                    }
+                    if self.best_cost < i64::MAX && total + rest_cost >= self.best_cost {
+                        continue;
+                    }
                     let mut metric = st.metric.clone();
                     metric.add(&opt.metric);
                     let mut choices = st.choices.clone();
@@ -895,12 +1229,19 @@ impl<'a> Solver<'a> {
                     next.push(DpState { cost, metric, choices });
                 }
             }
-            next = dp_pareto(next);
-            if next.len() > 200_000 {
-                next.sort_by_key(|s| s.cost);
-                next.truncate(200_000);
-                self.dp_truncated = true;
-                self.truncated = true;
+            let (pruned, cut) = dp_pareto_capped(
+                next,
+                &self.dp_dims,
+                &self.panel_dirs,
+                self.aim_dp,
+                200_000,
+                self.deadline_at,
+            );
+            self.truncated |= cut;
+            next = pruned;
+            if self.truncated && self.deadline_at.is_some_and(|d| now_ms() >= d) {
+                self.stop = true;
+                return;
             }
             states = next;
             if states.is_empty() {
@@ -909,7 +1250,27 @@ impl<'a> Solver<'a> {
         }
 
         states.sort_by_key(|s| s.cost);
+        let aim_max = self
+            .options
+            .constraints
+            .iter()
+            .find(|c| c.id == "handling-aim-time" && c.min.is_none())
+            .and_then(|c| c.max);
         for st in states {
+            if self.budget_exceeded() {
+                return;
+            }
+            if let Some(max) = aim_max {
+                if let Some(best) = self.evaluator.aim_time(
+                    st.metric.hs,
+                    st.metric.adsm,
+                    st.metric.eopen.max(0.0),
+                ) {
+                    if best > max + 1e-9 {
+                        continue;
+                    }
+                }
+            }
             let total = st.cost + self.weapon_price;
             if self.best_cost < i64::MAX && total >= self.best_cost {
                 continue;
@@ -1029,7 +1390,7 @@ impl<'a> Solver<'a> {
             return;
         }
         self.leaves += 1;
-        if self.leaves.is_multiple_of(256) && self.budget_exceeded() {
+        if self.budget_exceeded() {
             return;
         }
         let assembly = self.assembler.resolve(selections);
@@ -1039,20 +1400,33 @@ impl<'a> Solver<'a> {
             .into_iter()
             .cloned()
             .collect();
-        let Some(rec) = self.recoil_base(&installed) else {
+        let rec = self.recoil_base(&installed);
+        if rec.is_none()
+            && self
+                .options
+                .constraints
+                .iter()
+                .any(|c| is_recoil_metric(&c.id))
+        {
             return;
-        };
+        }
         let (attachment_price, total_price, _) = self.evaluator.price(&assembly);
         if total_price >= self.best_cost || total_price > self.cost_cap {
             return;
         }
 
         let instances = self.evaluator.tunable_instances(&assembly);
-        let req = match self.tune_requirements(&rec) {
-            Some(r) => r,
-            None => return,
+        let req = match &rec {
+            Some(rec) => match self.tune_requirements(rec) {
+                Some(r) => r,
+                None => return,
+            },
+            None => TuneReq::unconstrained(),
         };
-        let Some((tuning_state, chosen)) = self.pick_tuning(&instances, &req) else {
+        let installed_refs: Vec<&Part> = installed.iter().collect();
+        let Some((tuning_state, chosen)) =
+            self.pick_tuning(&instances, &req, &installed_refs)
+        else {
             return;
         };
 
@@ -1063,9 +1437,8 @@ impl<'a> Solver<'a> {
         let mut constraint_results = Vec::new();
         let mut ok = true;
         for c in &self.options.constraints {
-            let value = match metric_value(c.id.as_str(), &metrics) {
-                Some(v) => v,
-                None => continue,
+            let Some(value) = metric_value(c.id.as_str(), &metrics) else {
+                return;
             };
             let min_ok = c.min.map(|m| value >= m - 1e-9).unwrap_or(true);
             let max_ok = c.max.map(|m| value <= m + 1e-9).unwrap_or(true);
@@ -1107,11 +1480,11 @@ impl<'a> Solver<'a> {
                 f_h: metrics.recoil.f_h,
                 f_v: metrics.recoil.f_v,
                 s: metrics.recoil.s,
-                a_h: rec.a_h,
-                a_v: rec.a_v,
-                c_h: rec.c_h,
-                c_v: rec.c_v,
-                c_k: rec.c_k,
+                a_h: rec.as_ref().map(|r| r.a_h).unwrap_or(0.0),
+                a_v: rec.as_ref().map(|r| r.a_v).unwrap_or(0.0),
+                c_h: rec.as_ref().map(|r| r.c_h).unwrap_or(1.0),
+                c_v: rec.as_ref().map(|r| r.c_v).unwrap_or(1.0),
+                c_k: rec.as_ref().map(|r| r.c_k).unwrap_or(1.0),
                 t_h: metrics.recoil.tuning_runtime.get("GRecoil_H").copied().unwrap_or(0.0),
                 t_v: metrics.recoil.tuning_runtime.get("GRecoil_V").copied().unwrap_or(0.0),
                 t_k: metrics
@@ -1122,6 +1495,7 @@ impl<'a> Solver<'a> {
                     .unwrap_or(0.0),
             },
             panel: metrics.panel,
+            detail: metrics.detail,
             tuning,
             constraints: constraint_results,
             installed_parts,
@@ -1347,22 +1721,26 @@ impl<'a> Solver<'a> {
         &mut self,
         instances: &[TuningInstance<'a>],
         req: &TuneReq,
+        parts: &[&Part],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
-        let mut frontier: Vec<Offer> = vec![Offer {
+        let empty = || Offer {
             e_h: 0.0,
             e_v: 0.0,
             e_k: 0.0,
+            e_open: 0.0,
+            e_move: 0.0,
+            e_move_runtime: 0.0,
+            e_breath: 0.0,
+            e_move_stability: 0.0,
             values: Vec::new(),
             deviation: 0.0,
-        }];
+        };
+        let mut frontier: Vec<Offer> = vec![empty()];
         for inst in instances {
-            let mut group: Vec<Offer> = vec![Offer {
-                e_h: 0.0,
-                e_v: 0.0,
-                e_k: 0.0,
-                values: Vec::new(),
-                deviation: 0.0,
-            }];
+            if self.budget_exceeded() {
+                return None;
+            }
+            let mut group: Vec<Offer> = vec![empty()];
             for tune in &inst.part.tuning_options {
                 if !tuning_available(&inst.slot_name, inst.part) {
                     continue;
@@ -1372,8 +1750,18 @@ impl<'a> Solver<'a> {
                         Evaluator::tuning_key(&inst.slot_path, &inst.part.id, &tune.tune_id);
                     if let Some(v) = self.options.locked_tuning.get(&key_base).copied() {
                         let v = quantize(v, tune.min_value, tune.max_value, tune.step_value);
-                        let (e_h, e_v, e_k) = tune_offer(tune, v);
-                        vec![LocalOffer { e_h, e_v, e_k, value: v }]
+                        let c = tune_channels(tune, v);
+                        vec![LocalOffer {
+                            e_h: c.h,
+                            e_v: c.v,
+                            e_k: c.k,
+                            e_open: c.open,
+                            e_move: c.move_speed,
+                            e_move_runtime: c.move_runtime,
+                            e_breath: c.breath,
+                            e_move_stability: c.move_stability,
+                            value: v,
+                        }]
                     } else {
                         self.tune_offers(&inst.part.id, tune)
                     }
@@ -1383,47 +1771,75 @@ impl<'a> Solver<'a> {
                 let mut next = Vec::new();
                 for a in &group {
                     for b in &offers {
+                        if next.len() >= TUNE_NEXT_LIMIT {
+                            break;
+                        }
                         let mut values = a.values.clone();
                         values.push((key_base.clone(), b.value));
                         next.push(Offer {
                             e_h: a.e_h + b.e_h,
                             e_v: a.e_v + b.e_v,
                             e_k: a.e_k + b.e_k,
+                            e_open: a.e_open + b.e_open,
+                            e_move: a.e_move + b.e_move,
+                            e_move_runtime: a.e_move_runtime + b.e_move_runtime,
+                            e_breath: a.e_breath + b.e_breath,
+                            e_move_stability: a.e_move_stability + b.e_move_stability,
                             values,
                             deviation: a.deviation + (b.value - default).abs(),
                         });
                     }
+                    if next.len() >= TUNE_NEXT_LIMIT {
+                        self.truncated = true;
+                        break;
+                    }
                 }
-                group = pareto(next);
+                let (pruned, cut) =
+                    pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+                self.truncated |= cut;
+                group = pruned;
             }
-            if group.len() == 1
-                && group[0].e_h == 0.0
-                && group[0].e_v == 0.0
-                && group[0].e_k == 0.0
-                && group[0].values.is_empty()
-            {
+            if group.len() == 1 && group[0].values.is_empty() {
                 continue;
             }
             let mut next = Vec::new();
             for a in &frontier {
                 for b in &group {
+                    if next.len() >= TUNE_NEXT_LIMIT {
+                        break;
+                    }
                     let mut values = a.values.clone();
                     values.extend(b.values.iter().cloned());
                     next.push(Offer {
                         e_h: a.e_h + b.e_h,
                         e_v: a.e_v + b.e_v,
                         e_k: a.e_k + b.e_k,
+                        e_open: a.e_open + b.e_open,
+                        e_move: a.e_move + b.e_move,
+                        e_move_runtime: a.e_move_runtime + b.e_move_runtime,
+                        e_breath: a.e_breath + b.e_breath,
+                        e_move_stability: a.e_move_stability + b.e_move_stability,
                         values,
                         deviation: a.deviation + b.deviation,
                     });
                 }
+                if next.len() >= TUNE_NEXT_LIMIT {
+                    self.truncated = true;
+                    break;
+                }
             }
-            frontier = pareto(next);
-            if frontier.len() > 4096 {
-                frontier.truncate(4096);
-            }
+            let (pruned, cut) =
+                pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+            self.truncated |= cut;
+            frontier = pruned;
         }
 
+        let detail_constraints: Vec<&Constraint> = self
+            .options
+            .constraints
+            .iter()
+            .filter(|c| !is_panel_attr(&c.id) && !is_recoil_metric(&c.id))
+            .collect();
         let mut best: Option<&Offer> = None;
         let mut best_score = f64::NEG_INFINITY;
         for o in &frontier {
@@ -1435,6 +1851,26 @@ impl<'a> Solver<'a> {
                 || o.e_k > req.upper_k + 1e-9
             {
                 continue;
+            }
+            if !detail_constraints.is_empty() {
+                let sums = DetailSums {
+                    open_speed: o.e_open,
+                    move_speed: o.e_move,
+                    move_runtime: o.e_move_runtime,
+                    breath_stability: o.e_breath,
+                    move_stability: o.e_move_stability,
+                };
+                let detail = self.evaluator.detail_with(parts, &sums);
+                let ok = detail_constraints.iter().all(|c| {
+                    let Some(value) = detail.value(&c.id) else {
+                        return false;
+                    };
+                    c.min.map(|m| value >= m - 1e-9).unwrap_or(true)
+                        && c.max.map(|m| value <= m + 1e-9).unwrap_or(true)
+                });
+                if !ok {
+                    continue;
+                }
             }
             let mut slack = f64::INFINITY;
             for (value, lower) in [
@@ -1472,16 +1908,32 @@ impl<'a> Solver<'a> {
                     e_h: o.e_h,
                     e_v: o.e_v,
                     e_k: o.e_k,
+                    e_open: o.e_open,
+                    e_move: o.e_move,
+                    e_move_runtime: o.e_move_runtime,
+                    e_breath: o.e_breath,
+                    e_move_stability: o.e_move_stability,
                     value: o.values.first().map(|v| v.1).unwrap_or(tune.default_value),
                 })
                 .collect();
         }
         let values = tune_offer_values(tune);
+        let deviation = |v: f64| (v - tune.default_value).abs();
         let mut offers: Vec<LocalOffer> = values
             .into_iter()
             .map(|v| {
-                let (e_h, e_v, e_k) = tune_offer(tune, v);
-                LocalOffer { e_h, e_v, e_k, value: v }
+                let c = tune_channels(tune, v);
+                LocalOffer {
+                    e_h: c.h,
+                    e_v: c.v,
+                    e_k: c.k,
+                    e_open: c.open,
+                    e_move: c.move_speed,
+                    e_move_runtime: c.move_runtime,
+                    e_breath: c.breath,
+                    e_move_stability: c.move_stability,
+                    value: v,
+                }
             })
             .collect();
         offers.sort_by(|a, b| {
@@ -1490,21 +1942,15 @@ impl<'a> Solver<'a> {
                 .unwrap_or(Ordering::Equal)
                 .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
                 .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
-                .then(
-                    (a.value - tune.default_value)
-                        .abs()
-                        .partial_cmp(&(b.value - tune.default_value).abs())
-                        .unwrap_or(Ordering::Equal),
-                )
+                .then(deviation(a.value).partial_cmp(&deviation(b.value)).unwrap_or(Ordering::Equal))
         });
+        let dims = self.tune_dims;
         let mut pruned: Vec<LocalOffer> = Vec::new();
         for o in offers {
-            if pruned.iter().any(|p| {
-                p.e_h >= o.e_h - 1e-9 && p.e_v >= o.e_v - 1e-9 && p.e_k >= o.e_k - 1e-9
-            }) {
+            if pruned.iter().any(|p| local_offer_dominates(p, &o, &dims)) {
                 continue;
             }
-            pruned.retain(|p| !(o.e_h >= p.e_h - 1e-9 && o.e_v >= p.e_v - 1e-9 && o.e_k >= p.e_k - 1e-9));
+            pruned.retain(|p| !local_offer_dominates(&o, p, &dims));
             pruned.push(o);
         }
         pruned.sort_by(|a, b| {
@@ -1513,23 +1959,21 @@ impl<'a> Solver<'a> {
                 .unwrap_or(Ordering::Equal)
                 .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
                 .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
-                .then(
-                    (a.value - tune.default_value)
-                        .abs()
-                        .partial_cmp(&(b.value - tune.default_value).abs())
-                        .unwrap_or(Ordering::Equal),
-                )
+                .then(deviation(a.value).partial_cmp(&deviation(b.value)).unwrap_or(Ordering::Equal))
         });
-        let key_base = String::new();
-        let _ = key_base;
         let cached: Vec<Offer> = pruned
             .iter()
             .map(|o| Offer {
                 e_h: o.e_h,
                 e_v: o.e_v,
                 e_k: o.e_k,
+                e_open: o.e_open,
+                e_move: o.e_move,
+                e_move_runtime: o.e_move_runtime,
+                e_breath: o.e_breath,
+                e_move_stability: o.e_move_stability,
                 values: vec![(String::new(), o.value)],
-                deviation: (o.value - tune.default_value).abs(),
+                deviation: deviation(o.value),
             })
             .collect();
         self.offer_cache.insert(key, cached);
@@ -1571,6 +2015,11 @@ struct LocalOffer {
     e_h: f64,
     e_v: f64,
     e_k: f64,
+    e_open: f64,
+    e_move: f64,
+    e_move_runtime: f64,
+    e_breath: f64,
+    e_move_stability: f64,
     value: f64,
 }
 
@@ -1586,6 +2035,9 @@ struct ExactPart {
     eh: f64,
     ev: f64,
     ek: f64,
+    hs: f64,
+    adsm: f64,
+    eopen: f64,
     panel: Vec<f64>,
 }
 
@@ -1601,6 +2053,9 @@ impl ExactPart {
             eh: 0.0,
             ev: 0.0,
             ek: 0.0,
+            hs: 0.0,
+            adsm: 0.0,
+            eopen: 0.0,
             panel: Vec::new(),
         }
     }
@@ -1621,6 +2076,9 @@ impl ExactPart {
         self.eh += other.eh;
         self.ev += other.ev;
         self.ek += other.ek;
+        self.hs += other.hs;
+        self.adsm += other.adsm;
+        self.eopen += other.eopen;
         if self.panel.len() < other.panel.len() {
             self.panel.resize(other.panel.len(), 0.0);
         }
@@ -1708,6 +2166,9 @@ fn exact_part_metric(
             if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
                 m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
             }
+            if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
+                m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
+            }
         }
     }
     if let Some(rr) = part.raw_recoil.get(mode) {
@@ -1726,6 +2187,12 @@ fn exact_part_metric(
     let mut explicit_spring = false;
     if let Some(list) = part.raw_mods.get(mode) {
         for modif in list {
+            if modif.target_path == "GAiming_ADSTime"
+                && modif.modifier_type == "Mult_A"
+                && modif.param1.map(|v| v.0.is_finite()).unwrap_or(false)
+            {
+                m.adsm += modif.param1.map(|v| v.0).unwrap_or(0.0);
+            }
             if modif.modifier_type != "Mult_C" {
                 continue;
             }
@@ -1757,18 +2224,17 @@ fn exact_part_metric(
     if !crate::metrics::tuning_available(slot_name, part) {
         return m;
     }
-    if !crate::metrics::tuning_available(slot_name, part) {
-        return m;
-    }
     for tune in &part.tuning_options {
         let mut max_h = f64::NEG_INFINITY;
         let mut max_v = f64::NEG_INFINITY;
         let mut max_k = f64::NEG_INFINITY;
+        let mut max_open = f64::NEG_INFINITY;
         for v in tune_offer_values(tune) {
             let (h, vv, k) = tune_offer(tune, v);
             max_h = max_h.max(h);
             max_v = max_v.max(vv);
             max_k = max_k.max(k);
+            max_open = max_open.max(tune_channels(tune, v).open);
         }
         if max_h.is_finite() {
             m.eh += max_h;
@@ -1779,45 +2245,134 @@ fn exact_part_metric(
         if max_k.is_finite() {
             m.ek += max_k;
         }
+        if max_open.is_finite() {
+            m.eopen += max_open;
+        }
     }
     m
 }
 
-fn dp_dominates(a: &DpState, b: &DpState) -> bool {
+fn dp_dominates(
+    a: &DpState,
+    b: &DpState,
+    dims: &DpDims,
+    panel_dirs: &[bool],
+    aim_dir: AimDir,
+) -> bool {
     let x = &a.metric;
     let y = &b.metric;
-    a.cost <= b.cost
-        && x.d >= y.d - 1e-9
-        && x.ah <= y.ah + 1e-9
-        && x.av <= y.av + 1e-9
-        && x.ch <= y.ch + 1e-9
-        && x.cv <= y.cv + 1e-9
-        && x.ck <= y.ck + 1e-9
-        && x.eh >= y.eh - 1e-9
-        && x.ev >= y.ev - 1e-9
-        && x.ek >= y.ek - 1e-9
-        && x.panel.len() == y.panel.len()
-        && x.panel
-            .iter()
-            .zip(y.panel.iter())
-            .all(|(a, b)| *a <= *b + 1e-9)
+    if a.cost > b.cost {
+        return false;
+    }
+    if dims.d && x.d < y.d - 1e-9 {
+        return false;
+    }
+    if dims.ah && x.ah > y.ah + 1e-9 {
+        return false;
+    }
+    if dims.av && x.av > y.av + 1e-9 {
+        return false;
+    }
+    if dims.ch && x.ch > y.ch + 1e-9 {
+        return false;
+    }
+    if dims.cv && x.cv > y.cv + 1e-9 {
+        return false;
+    }
+    if dims.ck && x.ck > y.ck + 1e-9 {
+        return false;
+    }
+    if dims.eh && x.eh < y.eh - 1e-9 {
+        return false;
+    }
+    if dims.ev && x.ev < y.ev - 1e-9 {
+        return false;
+    }
+    if dims.ek && x.ek < y.ek - 1e-9 {
+        return false;
+    }
+    if dims.hs {
+        match aim_dir {
+            AimDir::MoreHandling => {
+                if x.hs < y.hs - 1e-9
+                    || x.adsm > y.adsm + 1e-9
+                    || x.eopen < y.eopen - 1e-9
+                {
+                    return false;
+                }
+            }
+            AimDir::LessHandling => {
+                if x.hs > y.hs + 1e-9
+                    || x.adsm < y.adsm - 1e-9
+                    || x.eopen > y.eopen + 1e-9
+                {
+                    return false;
+                }
+            }
+            AimDir::Ignore => {}
+        }
+    }
+    if x.panel.len() != y.panel.len() {
+        return false;
+    }
+    for (idx, (a, b)) in x.panel.iter().zip(y.panel.iter()).enumerate() {
+        let higher_is_better = panel_dirs.get(idx).copied().unwrap_or(false);
+        let a_better = if higher_is_better {
+            *a >= *b - 1e-9
+        } else {
+            *a <= *b + 1e-9
+        };
+        if !a_better {
+            return false;
+        }
+    }
+    true
 }
 
-fn dp_pareto(mut states: Vec<DpState>) -> Vec<DpState> {
+#[cfg(test)]
+fn dp_pareto(
+    states: Vec<DpState>,
+    dims: &DpDims,
+    panel_dirs: &[bool],
+    aim_dir: AimDir,
+) -> Vec<DpState> {
+    dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None).0
+}
+
+fn dp_pareto_capped(
+    mut states: Vec<DpState>,
+    dims: &DpDims,
+    panel_dirs: &[bool],
+    aim_dir: AimDir,
+    limit: usize,
+    deadline_at: Option<u64>,
+) -> (Vec<DpState>, bool) {
     states.sort_by(|a, b| {
         a.cost
             .cmp(&b.cost)
             .then(b.metric.score().partial_cmp(&a.metric.score()).unwrap_or(Ordering::Equal))
     });
+    let mut truncated = false;
     let mut out: Vec<DpState> = Vec::new();
-    for st in states {
-        if out.iter().any(|o| dp_dominates(o, &st)) {
+    for (idx, st) in states.into_iter().enumerate() {
+        if out.len() >= limit {
+            truncated = true;
+            break;
+        }
+        if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
+            truncated = true;
+            break;
+        }
+        if out
+            .iter()
+            .any(|o| dp_dominates(o, &st, dims, panel_dirs, aim_dir))
+        {
             continue;
         }
-        out.retain(|o| !dp_dominates(&st, o));
+        out.retain(|o| !dp_dominates(&st, o, dims, panel_dirs, aim_dir));
         out.push(st);
     }
-    out
+    (out, truncated)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1831,6 +2386,8 @@ struct MetricBound {
     min_t_h: f64,
     min_t_v: f64,
     min_t_k: f64,
+    panel_max: [f64; 5],
+    panel_min: [f64; 5],
 }
 
 impl MetricBound {
@@ -1845,6 +2402,8 @@ impl MetricBound {
             min_t_h: 0.0,
             min_t_v: 0.0,
             min_t_k: 0.0,
+            panel_max: [0.0; 5],
+            panel_min: [0.0; 5],
         }
     }
 
@@ -1858,6 +2417,10 @@ impl MetricBound {
         self.min_t_h += other.min_t_h;
         self.min_t_v += other.min_t_v;
         self.min_t_k += other.min_t_k;
+        for idx in 0..5 {
+            self.panel_max[idx] += other.panel_max[idx];
+            self.panel_min[idx] += other.panel_min[idx];
+        }
     }
 
     fn best_of(&mut self, other: &MetricBound) {
@@ -1870,11 +2433,30 @@ impl MetricBound {
         self.min_t_h = self.min_t_h.min(other.min_t_h);
         self.min_t_v = self.min_t_v.min(other.min_t_v);
         self.min_t_k = self.min_t_k.min(other.min_t_k);
+        for idx in 0..5 {
+            self.panel_max[idx] = self.panel_max[idx].max(other.panel_max[idx]);
+            self.panel_min[idx] = self.panel_min[idx].min(other.panel_min[idx]);
+        }
     }
 }
 
 fn part_own_bound(part: &Part, mode: &str) -> MetricBound {
     let mut b = MetricBound::neutral();
+    if let Some(list) = part.display_mods.get(mode) {
+        for m in list {
+            if m.condition_id.is_some() || m.modifier_type != "Addend" {
+                continue;
+            }
+            let Some(idx) = panel_attr_index(normalize_attr(m.attribute_id.as_deref())) else {
+                continue;
+            };
+            let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) else {
+                continue;
+            };
+            b.panel_max[idx] += delta;
+            b.panel_min[idx] += delta;
+        }
+    }
     if let Some(list) = part.main_mods.get(mode) {
         for m in list {
             if m.condition_id.is_none()
@@ -2093,28 +2675,70 @@ struct BaseRecoil {
     gk_ratio: f64,
 }
 
-fn pareto(mut offers: Vec<Offer>) -> Vec<Offer> {
+const TUNE_NEXT_LIMIT: usize = 16_384;
+
+fn pareto_capped(
+    mut offers: Vec<Offer>,
+    dims: &TuneDims,
+    limit: usize,
+    deadline_at: Option<u64>,
+) -> (Vec<Offer>, bool) {
+    let channel = |dir: TuneDir, a: f64, b: f64| match dir {
+        TuneDir::Higher => b.partial_cmp(&a),
+        TuneDir::Lower | TuneDir::Equal => a.partial_cmp(&b),
+        TuneDir::Ignore => Some(Ordering::Equal),
+    }
+    .unwrap_or(Ordering::Equal);
     offers.sort_by(|a, b| {
-        b.e_h
-            .partial_cmp(&a.e_h)
-            .unwrap_or(Ordering::Equal)
+        channel(dims.open, a.e_open, b.e_open)
+            .then(channel(dims.move_effect, a.e_move, b.e_move))
+            .then(channel(dims.breath, a.e_breath, b.e_breath))
+            .then(channel(dims.move_stability, a.e_move_stability, b.e_move_stability))
+            .then(b.e_h.partial_cmp(&a.e_h).unwrap_or(Ordering::Equal))
             .then(b.e_v.partial_cmp(&a.e_v).unwrap_or(Ordering::Equal))
             .then(b.e_k.partial_cmp(&a.e_k).unwrap_or(Ordering::Equal))
             .then(a.deviation.partial_cmp(&b.deviation).unwrap_or(Ordering::Equal))
     });
+    let mut truncated = false;
     let mut out: Vec<Offer> = Vec::new();
-    for o in offers {
-        if out.iter().any(|p| {
-            p.e_h >= o.e_h - 1e-9 && p.e_v >= o.e_v - 1e-9 && p.e_k >= o.e_k - 1e-9
-        }) {
+    for (idx, o) in offers.into_iter().enumerate() {
+        if out.len() >= limit {
+            truncated = true;
+            break;
+        }
+        if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
+            truncated = true;
+            break;
+        }
+        if out.iter().any(|p| offer_dominates(p, &o, dims)) {
             continue;
         }
-        out.retain(|p| {
-            !(o.e_h >= p.e_h - 1e-9 && o.e_v >= p.e_v - 1e-9 && o.e_k >= p.e_k - 1e-9)
-        });
+        out.retain(|p| !offer_dominates(&o, p, dims));
         out.push(o);
     }
-    out
+    (out, truncated)
+}
+
+fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
+    a.e_h >= b.e_h - 1e-9
+        && a.e_v >= b.e_v - 1e-9
+        && a.e_k >= b.e_k - 1e-9
+        && channel_ok(a.e_open, b.e_open, dims.open)
+        && channel_ok(a.e_move, b.e_move, dims.move_effect)
+        && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
+        && channel_ok(a.e_breath, b.e_breath, dims.breath)
+        && channel_ok(a.e_move_stability, b.e_move_stability, dims.move_stability)
+}
+
+fn local_offer_dominates(a: &LocalOffer, b: &LocalOffer, dims: &TuneDims) -> bool {
+    a.e_h >= b.e_h - 1e-9
+        && a.e_v >= b.e_v - 1e-9
+        && a.e_k >= b.e_k - 1e-9
+        && channel_ok(a.e_open, b.e_open, dims.open)
+        && channel_ok(a.e_move, b.e_move, dims.move_effect)
+        && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
+        && channel_ok(a.e_breath, b.e_breath, dims.breath)
+        && channel_ok(a.e_move_stability, b.e_move_stability, dims.move_stability)
 }
 
 fn apply_linear_req(
@@ -2151,7 +2775,10 @@ fn metric_value(id: &str, metrics: &crate::metrics::BuildMetrics) -> Option<f64>
         "recoil-single-horizontal" => Some(metrics.recoil.single_h),
         "recoil-single-vertical" => Some(metrics.recoil.single_v),
         "recoil-fire-stability" => Some(metrics.recoil.fire_stability),
-        other => metrics.panel.get(other).copied(),
+        other => metrics
+            .detail
+            .value(other)
+            .or_else(|| metrics.panel.get(other).copied()),
     }
 }
 
@@ -2208,6 +2835,37 @@ fn compute_relevance(
             attribute_constraints.insert(c.id.clone());
         }
     }
+    let detail_ids: FxHashSet<&str> = options
+        .constraints
+        .iter()
+        .map(|c| c.id.as_str())
+        .filter(|id| DETAIL_METRICS.contains(id))
+        .collect();
+    let want_handling = [
+        "handling-aim-time",
+        "handling-sprint-fire-delay",
+        "handling-aim-move-speed",
+    ]
+    .iter()
+    .any(|id| detail_ids.contains(id));
+    let want_reload = ["handling-reload-time", "handling-empty-reload-time"]
+        .iter()
+        .any(|id| detail_ids.contains(id));
+    let want_stability = [
+        "stability-breath-range",
+        "stability-breath-duration",
+        "stability-movement-camera",
+        "stability-fire-camera",
+        "stability-hit-sway",
+        "stability-hold-breath-recoil",
+    ]
+    .iter()
+    .any(|id| detail_ids.contains(id));
+    let want_hipfire = ["hipfire-standing-spread", "hipfire-maximum-spread"]
+        .iter()
+        .any(|id| detail_ids.contains(id));
+    let want_handling_tune = want_handling || detail_ids.contains("handling-aim-move-speed");
+    let want_stability_tune = want_stability;
 
     for (id, part) in &payload.parts {
         let mut relevant = !part.extra_occupy_socket_ids.is_empty();
@@ -2218,6 +2876,28 @@ fn compute_relevance(
                     && normalize_attr(m.attribute_id.as_deref()) == "10005"
                 {
                     relevant = true;
+                }
+                if want_handling
+                    && m.condition_id.is_none()
+                    && m.modifier_type == "Addend"
+                    && HANDLING_ATTRS.contains(&normalize_attr(m.attribute_id.as_deref()))
+                {
+                    relevant = true;
+                }
+            }
+        }
+        if want_handling || want_stability || want_hipfire {
+            for list in part.display_mods.values() {
+                for m in list {
+                    if m.condition_id.is_some() || m.modifier_type != "Addend" {
+                        continue;
+                    }
+                    let attr = normalize_attr(m.attribute_id.as_deref());
+                    if (want_stability && STABILITY_ATTRS.contains(&attr))
+                        || (want_hipfire && HIPFIRE_ATTRS.contains(&attr))
+                    {
+                        relevant = true;
+                    }
                 }
             }
         }
@@ -2237,12 +2917,57 @@ fn compute_relevance(
                 if m.modifier_type == "Mult_C" && is_recoil_target(&m.target_path) {
                     relevant = true;
                 }
+                if want_handling
+                    && ((m.target_path == "GAiming_ADSTime" && m.modifier_type == "Mult_A")
+                        || (m.target_path == "GMovement_ADSSpeed"
+                            && m.modifier_type == "Addend"))
+                {
+                    relevant = true;
+                }
+                if want_reload
+                    && m.modifier_type == "Mult_A"
+                    && m.target_path == "GReload_Time"
+                {
+                    relevant = true;
+                }
             }
+        }
+        if want_reload {
+            for list in part.runtime_mods.values() {
+                if list.iter().any(|m| {
+                    m.target == "GReload_Time"
+                        || m.target == "ChangeClipTime"
+                        || m.target == "ChangeClipTimeWhenEmpty"
+                        || m.target == "ChangeClipTimewhenEmpty"
+                }) {
+                    relevant = true;
+                }
+            }
+        }
+        if want_stability
+            && part
+                .raw_gun_sway
+                .values()
+                .any(|v| v.map(|x| x != 0.0 && x.is_finite()).unwrap_or(false))
+        {
+            relevant = true;
         }
         for tune in &part.tuning_options {
             for effect in &tune.display_effects {
-                if effect.attribute_name_snapshot == "%额外后坐力控制"
-                    || effect.attribute_name_snapshot == "%开火时武器稳定性"
+                let name = effect.attribute_name_snapshot.as_str();
+                if name == "%额外后坐力控制" || name == "%开火时武器稳定性" {
+                    relevant = true;
+                }
+                if want_handling_tune
+                    && (name.contains("开镜速度")
+                        || name.contains("举镜瞄准速度")
+                        || name.contains("举枪瞄准速度")
+                        || name.contains("移动速度"))
+                {
+                    relevant = true;
+                }
+                if want_stability_tune
+                    && (name.contains("瞄准时呼吸稳定性") || name.contains("移动时据枪稳定性"))
                 {
                     relevant = true;
                 }
@@ -2383,7 +3108,16 @@ mod tests {
         let cheap_weak = part(5.0, 5, vec![]);
         let pricey_strong = part(20.0, 10, vec![]);
         let dominated = part(10.0, 12, vec![]);
-        let out = dp_pareto(vec![dominated, pricey_strong, cheap_weak]);
+        let dims = DpDims {
+            d: true,
+            ah: true,
+            av: true,
+            ch: true,
+            cv: true,
+            ck: true,
+            ..DpDims::default()
+        };
+        let out = dp_pareto(vec![dominated, pricey_strong, cheap_weak], &dims, &[], AimDir::Ignore);
         assert_eq!(out.len(), 2);
         assert!(out.iter().any(|s| s.cost == 5));
         assert!(out.iter().any(|s| s.cost == 10));
@@ -2393,9 +3127,29 @@ mod tests {
     fn pareto_uses_panel_values() {
         let lower = part(10.0, 10, vec![40.0]);
         let higher = part(10.0, 10, vec![50.0]);
-        let out = dp_pareto(vec![higher, lower]);
+        let mut dims = DpDims::default();
+        dims.d = true;
+        let out = dp_pareto(vec![higher, lower], &dims, &[false], AimDir::Ignore);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric.panel[0], 40.0);
+    }
+
+    #[test]
+    fn pareto_respects_panel_min_direction() {
+        let lower = part(10.0, 10, vec![40.0]);
+        let higher = part(10.0, 10, vec![50.0]);
+        let out = dp_pareto(vec![lower, higher], &DpDims::default(), &[true], AimDir::Ignore);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].metric.panel[0], 50.0);
+    }
+
+    #[test]
+    fn pareto_ignores_unconstrained_dimensions() {
+        let cheap_weak = part(5.0, 5, vec![]);
+        let pricey_strong = part(20.0, 10, vec![]);
+        let out = dp_pareto(vec![pricey_strong, cheap_weak], &DpDims::default(), &[], AimDir::Ignore);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].cost, 5);
     }
 
     #[test]

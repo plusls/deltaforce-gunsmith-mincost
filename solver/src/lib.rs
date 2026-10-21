@@ -59,6 +59,25 @@ fn default_max_results() -> usize {
 }
 
 pub fn solve_request(req: SolveRequest) -> Result<SolveResult, String> {
+    for c in &req.constraints {
+        if !search::is_supported_constraint(&c.id) {
+            return Err(format!(
+                "unsupported constraint {}; supported: {}, {}, {}",
+                c.id,
+                search::RECOIL_METRICS.join(", "),
+                search::PANEL_ATTRS.join(", "),
+                crate::metrics::DETAIL_METRICS.join(", ")
+            ));
+        }
+        if c.min.is_none() && c.max.is_none() {
+            return Err(format!("constraint {} needs min or max", c.id));
+        }
+        if let (Some(min), Some(max)) = (c.min, c.max) {
+            if min > max + 1e-9 {
+                return Err(format!("constraint {} has min > max", c.id));
+            }
+        }
+    }
     let weapon_id = req
         .weapon_id
         .clone()

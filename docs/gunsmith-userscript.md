@@ -133,6 +133,21 @@ type SolverConstraint = {
     | "recoil-single-horizontal"
     | "recoil-single-vertical"
     | "recoil-fire-stability"
+    | "handling-aim-time"
+    | "handling-sprint-fire-delay"
+    | "handling-aim-move-speed"
+    | "handling-reload-time"
+    | "handling-empty-reload-time"
+    | "handling-holster-time"
+    | "handling-switch-time"
+    | "stability-breath-range"
+    | "stability-breath-duration"
+    | "stability-movement-camera"
+    | "stability-fire-camera"
+    | "stability-hit-sway"
+    | "stability-hold-breath-recoil"
+    | "hipfire-standing-spread"
+    | "hipfire-maximum-spread"
     | "10001" | "10005" | "10006" | "10007" | "10008";
   min?: number;
   max?: number;
@@ -176,6 +191,7 @@ type MinCostResult = {
     tuning: Record<string, number>;
     installedPartKeys: string[];
     attributes: Record<string, number>;
+    detail: Record<string, number | null>;
     recoil: Record<string, number>;
     totalPrice: number;
     attachmentPrice: number;
@@ -321,7 +337,7 @@ function toSiteResult(ctx, r) {
     installedPartKeys: r.build.installedPartKeys,
     metrics: {
       attributes: r.build.attributes,
-      detailMetrics: {},
+      detailMetrics: detailMetricMap(r.build.detail),
     },
   };
 
@@ -366,12 +382,23 @@ function toSiteResult(ctx, r) {
 | `advancedPreferenceTargets["recoil-single-vertical"]` | 同名指标 |
 | `advancedPreferenceTargets["recoil-single-horizontal"]` | 同名指标 |
 | `advancedPreferenceTargets["recoil-fire-stability"]` | 同名指标 |
+| `advancedPreferenceTargets["handling-*"]` | 同名指标 (7 个 handling 细分指标) |
+| `advancedPreferenceTargets["stability-*"]` | 同名指标 (6 个 stability 细分指标) |
+| `advancedPreferenceTargets["hipfire-*"]` | 同名指标 (2 个 hipfire 细分指标) |
+| `advancedPreferences` / `advancedPreferenceValues` / `advancedPreferenceOperators` | 旧版三元组, 与 `advancedPreferenceTargets` 等价 |
 | `targets.budgetEnabled` | `costCap = budgetPrice` |
 | `targets.preparednessEnabled` | 暂不支持, 需要双价格维度 |
 | `preferences` 等级 | 忽略. 这是软偏好, 最小开销不参与 |
-| 其余 15 个细分指标 | 暂不支持, 明确报错, 不要静默忽略 |
 
 `operator: gte` -> `min`, `lte` -> `max`.
+
+细分指标的计算口径见 `docs/gunsmith-numerical-model.md`, 与站点 worker 逐值对齐. 结果通过 `detailMetrics` 回传, 键名与约束 id 相同, 值为 `null` 的字段被省略.
+
+支持的指标在求解器里有不同代价:
+
+- 面板属性和后坐力指标走叶子 DP, 最快.
+- `handling-aim-time` 的 `min`/`max` 都参与 DP (状态维度 `hs`, `adsm`, `eopen`), 可以和后坐力约束混合.
+- 其余 14 个细分指标会关闭叶子 DP, 退化为逐组合枚举. 约束越松越慢; 建议同时设 `deadlineMs`.
 
 对不支持的指标, 必须把失败原因返回给用户. 静默忽略会生成一个违反用户硬阈值的"最优解".
 
@@ -451,7 +478,7 @@ maxLeaves   1,000,000
 deadlineMs  5,000
 ```
 
-Rust 已经支持 `deadlineMs`: WASM 侧通过 `env.dws_now_ms` 读取墙钟, 每 64 次预算检查和每 256 个叶节点检查一次. 超时返回当前最好解并置 `truncated=true`; 若一个可行解都没有则返回 `infeasible`.
+Rust 侧通过 `env.dws_now_ms` 读取墙钟, 在 DFS 节点, 叶节点, DP 状态更新和精校 Pareto 循环中检查截止时间. 超时返回当前最好解并置 `truncated=true`; 若一个可行解都没有则返回 `infeasible`.
 
 脚本默认: 完整模式 5000 ms, 快速模式 2000 ms. 页面按钮可以切换.
 
@@ -486,6 +513,7 @@ Rust 已经支持 `deadlineMs`: WASM 侧通过 `env.dws_now_ms` 读取墙钟, �
 3. `solver/js/engine.mjs`: WASM 加载, 统一 `solve` / `solveSiteRequest`. 6 个 Node 测试.
 4. `userscript/src/*`: Worker hook, payload 缓存, 独立 worker 求解, 按钮和设置. 3 个构建/协议测试.
 5. 真实页面验证 (RM277, 数据版本 `8629d01bf694f212aad051c5`).
+6. 细分指标真实页面验证 (RM277, 2026-10-21): `handling-aim-time` 约束由脚本求解, 站点接受 "应用方案" 并用站点自身模型重算.
 
 验证结果:
 
@@ -499,6 +527,23 @@ laserEnabled: false
 应用方案: 站点精校生效, 属性变为 vertical 0.34, horizontal 0.57, stability 0.77
 ```
 
+细分指标验证 (真实页面, 锁定瞄具/枪管, laser 关闭):
+
+```text
+约束: handling-aim-time <= 500
+结果: optimal, 总价 199458, aim_time 396.11650485436894, 73 ms
+应用方案后站点显示: 市场价 199458, 举镜时间 396ms, 跑射延迟 220.4ms,
+                    换弹 2.2s, 空仓换弹 2.5s, 收枪/切枪 0.4s
+```
+
+```text
+约束: handling-aim-time <= 400, recoil-continuous-vertical <= 0.46
+结果: feasible (truncated), 总价 264656, aim_time 399.737876802097, 1922 ms
+应用方案后站点显示: 市场价 264656, 举镜时间 400ms, vertical 0.45x
+```
+
+所有数值与求解器 `detail`/`recoil` 输出一致. 这两个用例同时暴露了一个真实 bug: 精校 Pareto 的 O(n^2) 循环没有截止时间检查, 单次 `runMinCost` 曾跑到 268 秒并冻结页面. 修复后同样的请求在 5 秒内返回.
+
 用同样的 context / options 在 Node 里重跑, 节点数, 叶节点数, selections 和总价与浏览器完全一致, 说明 adapter 映射没有偏差.
 
 站点自带的"生成智能配件方案"在同一组约束下返回无解, 说明 beam search 的 128 状态 / 24 轮限制确实会漏解.
@@ -507,8 +552,9 @@ laserEnabled: false
 
 ## 12. 已知限制
 
-- 站点 15 个细分指标和战备下限 (`preparednessEnabled`) 暂不支持, 会明确报错而不是静默忽略.
-- `min` 约束和无解约束可能接近截止时间. 完整模式会截断并提示, 快速模式只能给出可行解.
+- 站点全部 15 个细分指标均已支持; 其中除 `handling-aim-time` 外的 14 个会关闭叶子 DP, 完整模式下可能接近截止时间.
+- 后坐力三项加 `handling-aim-time` 同时收紧时, 5 秒完整模式可能只返回 `truncated` 且没有方案. 这是搜索顺序问题, 不代表无解; 可以放宽预算或减少约束.
+- 战备下限 (`preparednessEnabled`) 暂不支持, 会明确报错而不是静默忽略.
 - 站点更新导致 worker URL, payload 字段或 class 名变化时脚本会失效. hook 只匹配 `/optimizer\.worker/`, 不影响其他 worker.
 - 浏览器 CSP 禁止 `blob:` worker 时自动退回主线程, 大枪械会卡住页面约 1 到 2 秒.
 - 内置 wasm 使脚本约 1.03 MiB, gzip 后约 300 KB.
@@ -519,7 +565,7 @@ laserEnabled: false
 - `data` 缓存语义: 拦截请求后原 worker 缺数据.
 - CSP 禁止 blob worker.
 - 缺价件被当成 0, 产生虚假最低价.
-- 不支持的细分指标被静默忽略.
+- 未知的细分指标 id 被静默忽略 (必须先把失败原因返回给用户).
 - 战备下限暂不支持.
 - min 约束和无解约束当前可能很慢, 必须有超时和明确提示.
 - 应用方案时 selections 里的 `null` 必须过滤, 站点只接受已安装件.

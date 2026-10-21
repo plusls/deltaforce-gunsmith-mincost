@@ -50,7 +50,9 @@ test("exports supported ids and primary attribute mapping", () => {
   assert.ok(SUPPORTED_CONSTRAINT_IDS.has("recoil-continuous-horizontal"));
   assert.ok(SUPPORTED_CONSTRAINT_IDS.has("10001"));
   assert.ok(SUPPORTED_CONSTRAINT_IDS.has("10008"));
-  assert.ok(!SUPPORTED_CONSTRAINT_IDS.has("handling-aim-time"));
+  assert.ok(SUPPORTED_CONSTRAINT_IDS.has("handling-aim-time"));
+  assert.ok(SUPPORTED_CONSTRAINT_IDS.has("hipfire-maximum-spread"));
+  assert.ok(!SUPPORTED_CONSTRAINT_IDS.has("handling-unknown"));
   assert.deepEqual(PRIMARY_ATTR_BY_GROUP, {
     recoil: "10005",
     handling: "10006",
@@ -151,9 +153,9 @@ test("unsupported advanced metric throws UnsupportedConstraintError", () => {
     targets: {},
     smartOptions: {
       advancedPreferenceTargets: {
-        "handling-aim-time": { operator: "lte", value: 300 },
+        "handling-unknown": { operator: "lte", value: 300 },
         "recoil-continuous-vertical": { operator: "lte", value: 0.46 },
-        "stability-breath-duration": { operator: "gte", value: 4 },
+        "stability-unknown": { operator: "gte", value: 4 },
       },
     },
   };
@@ -162,10 +164,7 @@ test("unsupported advanced metric throws UnsupportedConstraintError", () => {
     () => optionsFromSiteRequest(request),
     (error) => {
       assert.ok(error instanceof UnsupportedConstraintError);
-      assert.deepEqual(error.constraints, [
-        "handling-aim-time",
-        "stability-breath-duration",
-      ]);
+      assert.deepEqual(error.constraints, ["handling-unknown", "stability-unknown"]);
       return true;
     },
   );
@@ -175,6 +174,24 @@ test("unsupported advanced metric throws UnsupportedConstraintError", () => {
     { id: "recoil-continuous-vertical", max: 0.46 },
   ]);
   assert.equal(Object.hasOwn(ignored, "ignoreUnsupported"), false);
+});
+
+test("all site advanced metrics map to constraints", () => {
+  const options = optionsFromSiteRequest({
+    targets: {},
+    smartOptions: {
+      advancedPreferenceTargets: {
+        "handling-aim-time": { operator: "lte", value: 300 },
+        "stability-breath-duration": { operator: "gte", value: 4 },
+        "hipfire-standing-spread": { operator: "lte", value: 2 },
+      },
+    },
+  });
+  assert.deepEqual(options.constraints, [
+    { id: "handling-aim-time", max: 300 },
+    { id: "stability-breath-duration", min: 4 },
+    { id: "hipfire-standing-spread", max: 2 },
+  ]);
 });
 
 test("legacy advancedPreferences shape is honored", () => {
@@ -200,6 +217,7 @@ test("legacy advancedPreferences shape is honored", () => {
 
   assert.deepEqual(options.constraints, [
     { id: "recoil-single-horizontal", max: 0.5 },
+    { id: "handling-aim-time", max: 250 },
   ]);
 });
 
@@ -396,6 +414,7 @@ test("fromSolverOutput maps optimal and feasible results", () => {
         { slot_path: "s1", part_id: "p1" },
       ],
       panel: { 10005: 71 },
+      detail: { aim_time: 320.5, hipfire_standing: 2.25, unknown: 1 },
       recoil: { score: 0.5 },
       total_price: 1234,
       attachment_price: 1000,
@@ -425,6 +444,11 @@ test("fromSolverOutput maps optimal and feasible results", () => {
   assert.deepEqual(mapped.build.tuning, { "s1\0p1\0t": 50 });
   assert.deepEqual(mapped.build.installedPartKeys, ["s1\0p1", "s2\0p2"]);
   assert.deepEqual(mapped.build.attributes, { 10005: 71 });
+  assert.deepEqual(mapped.build.detail, {
+    aim_time: 320.5,
+    hipfire_standing: 2.25,
+    unknown: 1,
+  });
   assert.deepEqual(mapped.build.recoil, { score: 0.5 });
   assert.equal(mapped.build.totalPrice, 1234);
   assert.equal(mapped.build.attachmentPrice, 1000);
@@ -482,6 +506,11 @@ test("toSiteResult produces a recommendation with a candidate", () => {
       tuning: { "s1\0p1\0t": 30 },
       installedPartKeys: ["s1\0p1", "s3\0p3"],
       attributes: { 10005: 71, 10006: 35 },
+      detail: {
+        aim_time: 320.5,
+        sprint_fire_delay: null,
+        stability_score: 42,
+      },
       recoil: {},
       totalPrice: 1000,
       attachmentPrice: 900,
@@ -502,7 +531,9 @@ test("toSiteResult produces a recommendation with a candidate", () => {
   assert.deepEqual(candidate.tuningState, { "s1\0p1\0t": 30 });
   assert.deepEqual(candidate.installedPartKeys, ["s1\0p1", "s3\0p3"]);
   assert.deepEqual(candidate.metrics.attributes, { 10005: 71, 10006: 35 });
-  assert.deepEqual(candidate.metrics.detailMetrics, {});
+  assert.deepEqual(candidate.metrics.detailMetrics, {
+    "handling-aim-time": 320.5,
+  });
   assert.deepEqual(site.candidates, [candidate]);
   assert.deepEqual(site.smartRecommendation.failures, []);
 });

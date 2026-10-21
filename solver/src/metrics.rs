@@ -26,10 +26,94 @@ pub struct RecoilResult {
 pub struct BuildMetrics {
     pub recoil: RecoilResult,
     pub panel: FxHashMap<String, f64>,
+    pub detail: DetailMetrics,
     pub attachment_price: i64,
     pub total_price: i64,
     pub missing_price_count: usize,
 }
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DetailMetrics {
+    pub handling_score: f64,
+    pub stability_score: f64,
+    pub hipfire_score: f64,
+    pub aim_time: Option<f64>,
+    pub sprint_fire_delay: Option<f64>,
+    pub aim_move_speed: Option<f64>,
+    pub reload_time: Option<f64>,
+    pub empty_reload_time: Option<f64>,
+    pub holster_time: Option<f64>,
+    pub switch_time: Option<f64>,
+    pub breath_range: Option<f64>,
+    pub breath_duration: Option<f64>,
+    pub movement_camera: Option<f64>,
+    pub fire_camera: Option<f64>,
+    pub hit_sway: Option<f64>,
+    pub hold_breath_recoil: Option<f64>,
+    pub hipfire_standing: Option<f64>,
+    pub hipfire_maximum: Option<f64>,
+}
+
+pub const DETAIL_METRICS: [&str; 15] = [
+    "handling-aim-time",
+    "handling-sprint-fire-delay",
+    "handling-aim-move-speed",
+    "handling-reload-time",
+    "handling-empty-reload-time",
+    "handling-holster-time",
+    "handling-switch-time",
+    "stability-breath-range",
+    "stability-breath-duration",
+    "stability-movement-camera",
+    "stability-fire-camera",
+    "stability-hit-sway",
+    "stability-hold-breath-recoil",
+    "hipfire-standing-spread",
+    "hipfire-maximum-spread",
+];
+
+impl DetailMetrics {
+    pub fn value(&self, id: &str) -> Option<f64> {
+        match id {
+            "handling-aim-time" => self.aim_time,
+            "handling-sprint-fire-delay" => self.sprint_fire_delay,
+            "handling-aim-move-speed" => self.aim_move_speed,
+            "handling-reload-time" => self.reload_time,
+            "handling-empty-reload-time" => self.empty_reload_time,
+            "handling-holster-time" => self.holster_time,
+            "handling-switch-time" => self.switch_time,
+            "stability-breath-range" => self.breath_range,
+            "stability-breath-duration" => self.breath_duration,
+            "stability-movement-camera" => self.movement_camera,
+            "stability-fire-camera" => self.fire_camera,
+            "stability-hit-sway" => self.hit_sway,
+            "stability-hold-breath-recoil" => self.hold_breath_recoil,
+            "hipfire-standing-spread" => self.hipfire_standing,
+            "hipfire-maximum-spread" => self.hipfire_maximum,
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DetailSums {
+    pub open_speed: f64,
+    pub move_speed: f64,
+    pub move_runtime: f64,
+    pub breath_stability: f64,
+    pub move_stability: f64,
+}
+
+pub const HANDLING_ATTRS: [&str; 8] = [
+    "10006", "10016", "10040", "10081", "10090", "100109", "100125", "100138",
+];
+pub const STABILITY_ATTRS: [&str; 12] = [
+    "10007", "10044", "10056", "10083", "10086", "10087", "10088", "10089", "100101",
+    "100105", "100123", "100124",
+];
+pub const HIPFIRE_ATTRS: [&str; 7] = [
+    "10008", "10011", "100104", "100111", "100112", "100116", "100128",
+];
 
 pub struct Evaluator<'a> {
     pub payload: &'a WeaponPayload,
@@ -52,12 +136,22 @@ impl<'a> Evaluator<'a> {
         tuning_state: &TuningState,
     ) -> Option<BuildMetrics> {
         let parts = self.installed_parts(assembly);
-        let recoil = self.recoil(assembler, &parts, assembly, tuning_state)?;
+        let recoil = self.recoil(assembler, &parts, assembly, tuning_state);
+        let (effects, runtime) = match &recoil {
+            Some(r) => (r.tuning_effects.clone(), r.tuning_runtime.clone()),
+            None => {
+                let instances = self.tunable_instances(assembly);
+                let resolved = self.resolve_tuning(assembler, &instances, tuning_state);
+                self.tuning_effects(&instances, &resolved)
+            }
+        };
+        let detail = self.detail(&parts, &effects, &runtime);
         let panel = self.panel(&parts);
         let (attachment_price, total_price, missing) = self.price(assembly);
         Some(BuildMetrics {
-            recoil,
+            recoil: recoil.unwrap_or_default(),
             panel,
+            detail,
             attachment_price,
             total_price,
             missing_price_count: missing,
@@ -157,7 +251,6 @@ impl<'a> Evaluator<'a> {
         let mut horizontal_c = 1.0;
         let mut vertical_c = 1.0;
         let mut spring_c = 1.0;
-        let mut gun_sway_a = 0.0;
 
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = has_laser(part, mode);
@@ -216,13 +309,7 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            if let Some(v) = part.raw_gun_sway.get(mode).copied().flatten() {
-                if v.is_finite() {
-                    gun_sway_a += v;
-                }
-            }
         }
-        let _ = gun_sway_a;
 
         let instances = self.tunable_instances(assembly);
         let resolved = self.resolve_tuning(assembler, &instances, tuning_state);
@@ -406,6 +493,377 @@ impl<'a> Evaluator<'a> {
             }
             let v = ((initial.unwrap_or(base)) + addend) * (1.0 + mult_a);
             out.insert("10001".to_string(), v.round());
+        }
+        out
+    }
+
+    pub fn detail(
+        &self,
+        parts: &[&Part],
+        effects: &FxHashMap<String, f64>,
+        runtime: &FxHashMap<String, f64>,
+    ) -> DetailMetrics {
+        let sums = DetailSums {
+            open_speed: effect_sum(effects, &["开镜速度", "举镜瞄准速度", "举枪瞄准速度"]),
+            move_speed: effect_sum(effects, &["移动速度"]),
+            move_runtime: runtime.get("GMovement_ADSSpeed").copied().unwrap_or(0.0),
+            breath_stability: effect_sum(effects, &["瞄准时呼吸稳定性"]),
+            move_stability: effect_sum(effects, &["移动时据枪稳定性"]),
+        };
+        self.detail_with(parts, &sums)
+    }
+
+    pub fn aim_time(
+        &self,
+        handling_add: f64,
+        ads_time_mult: f64,
+        open_speed: f64,
+    ) -> Option<f64> {
+        let profile = self.payload.numeric_profiles.get(self.weapon_id)?;
+        let stats = self.payload.weapon_stats.get(self.weapon_id)?;
+        let mode_stats = stats.by_mode.get(self.mode)?;
+        let base_handling = mode_stats
+            .base
+            .get("10006")
+            .copied()
+            .or_else(|| mode_stats.display.get("10006").copied())?;
+        let handling_score = base_handling + handling_add;
+        let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
+        let curves = &profile.linked_tables.handling_curves;
+        if let Some(curve) = curves.ads_time.as_ref() {
+            if let Some(v) = curve.eval(handling_score) {
+                return Some(ms_floor(v * (1.0 + ads_time_mult)) * tuning_scale);
+            }
+        }
+        let base = jnum(&profile.linked_tables.aiming, "AimingOnAnimTime").or_else(|| {
+            profile
+                .detail
+                .raw_supporting_values
+                .get("handling")
+                .and_then(|h| jnum(h, "AimingOnAnimTime"))
+        })?;
+        Some(ms_floor(
+            base * clamp_factor((1.0 - handling_add * 0.015) / (1.0 + open_speed / 100.0)),
+        ))
+    }
+
+    pub fn detail_with(&self, parts: &[&Part], sums: &DetailSums) -> DetailMetrics {
+        let mut out = DetailMetrics::default();
+        let Some(profile) = self.payload.numeric_profiles.get(self.weapon_id) else {
+            return out;
+        };
+        let mode = self.mode;
+        let laser_index = laser_pro_index(parts, mode);
+
+        let mut handling = 0.0;
+        let mut stability = 0.0;
+        let mut hipfire = 0.0;
+        let mut gun_sway_a = 0.0;
+        let mut breath_c = 1.0;
+        let mut ads_time_mult = 0.0;
+        let mut move_addend = 0.0;
+        let mut seen_raw: FxHashSet<(String, String, String, u64, String)> =
+            FxHashSet::default();
+        let mut reload = jnum(&profile.detail.raw_weapon_attribute, "ChangeClipTime");
+        let mut empty_reload =
+            jnum(&profile.detail.raw_weapon_attribute, "ChangeClipTimeWhenEmpty");
+
+        for (idx, part) in parts.iter().enumerate() {
+            let laser_part = has_laser(part, mode);
+            let include = |m: &Modifier| {
+                modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
+            };
+            for m in part.main_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
+                    continue;
+                }
+                if HANDLING_ATTRS.contains(&normalize_attr(m.attribute_id.as_deref())) {
+                    handling += m.delta.map(|v| v.0).unwrap_or(0.0);
+                }
+            }
+            for m in part
+                .display_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
+                if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
+                    continue;
+                }
+                let attr = normalize_attr(m.attribute_id.as_deref());
+                let delta = m.delta.map(|v| v.0).unwrap_or(0.0);
+                if STABILITY_ATTRS.contains(&attr) {
+                    stability += delta;
+                }
+                if HIPFIRE_ATTRS.contains(&attr) {
+                    hipfire += delta;
+                }
+            }
+            if let Some(v) = part.raw_gun_sway.get(mode).copied().flatten() {
+                if v.is_finite() {
+                    gun_sway_a += v;
+                }
+            }
+            let bipod_like = is_bipod_like(part);
+            for m in part.raw_mods.get(mode).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                if !param.is_finite() {
+                    continue;
+                }
+                if m.modifier_type == "Mult_C"
+                    && m.target_path.ends_with(".StandBreathFactor")
+                    && !(bipod_like && !self.bipod_deployed)
+                {
+                    breath_c *= param;
+                }
+                let counted = m.target_path == "GAiming_ADSTime"
+                    && m.modifier_type == "Mult_A"
+                    || m.target_path == "GMovement_ADSSpeed" && m.modifier_type == "Addend";
+                if !counted {
+                    continue;
+                }
+                let key = (
+                    part.id.clone(),
+                    m.target_path.clone(),
+                    m.modifier_type.clone(),
+                    param.to_bits(),
+                    m.function_rule_key.clone().unwrap_or_default(),
+                );
+                if !seen_raw.insert(key) {
+                    continue;
+                }
+                if m.target_path == "GAiming_ADSTime" {
+                    ads_time_mult += param;
+                } else {
+                    move_addend += param;
+                }
+            }
+            for m in part
+                .runtime_mods
+                .get(mode)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
+                let Some(param) = m.param1.map(|v| v.0) else { continue };
+                if !param.is_finite() {
+                    continue;
+                }
+                let target = if m.target == "ChangeClipTimewhenEmpty" {
+                    "ChangeClipTimeWhenEmpty"
+                } else {
+                    m.target.as_str()
+                };
+                match target {
+                    "GReload_Time" => {
+                        if m.modifier_type == "Mult_A" {
+                            reload = reload.map(|v| v * (1.0 + param));
+                            empty_reload = empty_reload.map(|v| v * (1.0 + param));
+                        }
+                    }
+                    "ChangeClipTime" => {
+                        if m.modifier_type == "Initial" {
+                            reload = Some(param);
+                        } else if m.modifier_type == "Mult_A" {
+                            reload = reload.map(|v| v * (1.0 + param));
+                        }
+                    }
+                    "ChangeClipTimeWhenEmpty" => {
+                        if m.modifier_type == "Initial" {
+                            empty_reload = Some(param);
+                        } else if m.modifier_type == "Mult_A" {
+                            empty_reload = empty_reload.map(|v| v * (1.0 + param));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.handling_score = handling;
+        out.stability_score = stability;
+        out.hipfire_score = hipfire;
+
+        let Some(stats) = self.payload.weapon_stats.get(self.weapon_id) else {
+            return out;
+        };
+        let Some(mode_stats) = stats.by_mode.get(mode) else {
+            return out;
+        };
+        let base_stat = |id: &str| {
+            mode_stats
+                .base
+                .get(id)
+                .copied()
+                .or_else(|| mode_stats.display.get(id).copied())
+        };
+        let ops_base_10006 = stats
+            .by_mode
+            .get("operations")
+            .and_then(|m| m.base.get("10006").copied());
+
+        let open_speed = sums.open_speed;
+        let move_speed = sums.move_speed;
+        let breath_stability = sums.breath_stability;
+        let move_stability = sums.move_stability;
+        let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
+        let handling_score = base_stat("10006").unwrap_or(0.0) + handling;
+        let baseline = ops_base_10006
+            .or_else(|| base_stat("10006"))
+            .unwrap_or(0.0);
+        let handling_delta = handling_score - baseline;
+
+        let curves = &profile.linked_tables.handling_curves;
+        out.aim_time = self.aim_time(handling, ads_time_mult, open_speed);
+
+        let sprint_speed = jnum(&profile.detail.raw_weapon_attribute, "SprintToFireSpeed");
+        let sprint_curve = if mode == "warfare" {
+            curves.sprint_to_fire_mp.as_ref().or(curves.sprint_to_fire.as_ref())
+        } else {
+            curves.sprint_to_fire.as_ref()
+        };
+        let sprint_ms = sprint_speed.and_then(|base| {
+            if base < 0.0 {
+                return None;
+            }
+            let scale = if handling_delta == 0.0 {
+                Some(1.0)
+            } else {
+                sprint_curve.and_then(|c| c.eval(handling_delta))
+            }?;
+            Some(ms_floor(base * scale) * tuning_scale)
+        });
+        out.sprint_fire_delay = sprint_ms.or_else(|| {
+            sprint_speed.map(|base| {
+                ms_floor(
+                    base * clamp_factor((1.0 - handling * 0.015) / (1.0 + open_speed / 100.0)),
+                )
+            })
+        });
+
+        let movement = profile.linked_tables.movement_by_mode.get(mode);
+        let stand_run = movement.and_then(|m| jnum(m, "StandRunSpeed"));
+        let stand_aim = movement.and_then(|m| jnum(m, "StandAimSpeedFactor"));
+        let base_aim_speed = match (stand_run, stand_aim) {
+            (Some(run), Some(factor)) => Some(run * (1.0 + factor) / 100.0),
+            _ => None,
+        };
+        let strafe_curve = if mode == "warfare" {
+            curves
+                .ads_strafe_speed_mp
+                .as_ref()
+                .or(curves.ads_strafe_speed.as_ref())
+        } else {
+            curves.ads_strafe_speed.as_ref()
+        };
+        let tune_move = sums.move_runtime;
+        out.aim_move_speed = match (base_aim_speed, stand_run, strafe_curve) {
+            (Some(base), Some(run), Some(curve)) => curve.eval(handling_delta).map(|scale| {
+                base + run * scale / 100.0 + run * (move_addend + tune_move) / 100.0
+            }),
+            _ => None,
+        };
+        if out.aim_move_speed.is_none() {
+            out.aim_move_speed = base_aim_speed.map(|base| {
+                base * clamp_factor(1.0 + handling * 0.015 + move_speed / 100.0)
+            });
+        }
+
+        out.reload_time = reload;
+        out.empty_reload_time = empty_reload;
+        out.holster_time = jnum(&profile.detail.raw_weapon_attribute, "EquipTime");
+        out.switch_time = jnum(&profile.detail.raw_weapon_attribute, "UnEquipTime");
+        out.hit_sway = jnum(&profile.detail.raw_weapon_attribute, "GunSwayBeHitScale")
+            .map(|base| round2(base * (1.0 + gun_sway_a)));
+
+        let hold = profile
+            .linked_tables
+            .hold_breath
+            .as_array()
+            .and_then(|list| list.first());
+        let hold = hold.unwrap_or(&serde_json::Value::Null);
+        let breath_config = hold.get("WeaponBreathConfig").unwrap_or(&serde_json::Value::Null);
+        let breath_factor = jnum(hold, "StandBreathFactor");
+        let atten_speed = jnum(breath_config, "AttenSpeed");
+        let movement_camera_scale = profile
+            .detail
+            .raw_supporting_values
+            .get("stability")
+            .and_then(|s| jnum(s, "GSMovement_CameraScale"));
+        let pitch_amp = jnum(&profile.linked_tables.aim_recoil.shake_pitch, "WholeAmplitude");
+        let yaw_amp = jnum(&profile.linked_tables.aim_recoil.shake_yaw, "WholeAmplitude");
+        let recoil_scale_x = hold.get("RecoilScale").and_then(|v| jnum(v, "X"));
+        let recoil_scale_y = hold.get("RecoilScale").and_then(|v| jnum(v, "Y"));
+        let stability_curves = &profile.linked_tables.stability_curves;
+        let stability_ready = [
+            breath_factor,
+            atten_speed.filter(|v| *v > 0.0),
+            movement_camera_scale,
+            pitch_amp,
+            yaw_amp,
+            recoil_scale_x,
+            recoil_scale_y,
+        ]
+        .iter()
+        .all(|v| v.is_some());
+        if stability_ready {
+            let breath_scale = stability_curves
+                .breath_scale
+                .as_ref()
+                .and_then(|c| c.eval(stability));
+            let breath_time = stability_curves
+                .breath_time
+                .as_ref()
+                .and_then(|c| c.eval(stability))
+                .filter(|v| *v != 0.0);
+            let fire_camera = stability_curves
+                .fire_camera_stability
+                .as_ref()
+                .and_then(|c| c.eval(stability));
+            let movement_camera = stability_curves
+                .movement_camera_stability
+                .as_ref()
+                .and_then(|c| c.eval(stability));
+            let hold_recoil = stability_curves
+                .hold_breath_recoil
+                .as_ref()
+                .and_then(|c| c.eval(stability));
+            if let (Some(breath_scale), Some(breath_time), Some(fire_camera), Some(movement_camera), Some(hold_recoil)) = (
+                breath_scale,
+                breath_time,
+                fire_camera,
+                movement_camera,
+                hold_recoil,
+            ) {
+                let breath_inv = 1.0 / (1.0 + breath_stability / 100.0).max(0.1);
+                let move_inv = 1.0 / (1.0 + move_stability / 100.0).max(0.1);
+                let raw_range =
+                    breath_factor.unwrap() * breath_c * 0.4 * breath_scale * breath_inv;
+                let raw_duration =
+                    100.0 / (atten_speed.unwrap() * breath_time) * (1.0 / breath_inv);
+                let movement_ratio = movement_camera * move_inv;
+                out.breath_range = Some(raw_range);
+                out.breath_duration = Some(raw_duration);
+                out.movement_camera = Some(round2(movement_ratio));
+                out.fire_camera = Some(round2(fire_camera));
+                out.hold_breath_recoil = Some(hold_recoil);
+            }
+        }
+
+        let waist = &profile.linked_tables.waist_spread;
+        let hip_curve = curves.hip_spread.as_ref();
+        let hip_multiplier = hip_curve
+            .and_then(|c| c.eval(hipfire))
+            .or(if hipfire == 0.0 { Some(1.0) } else { None });
+        if let (Some(waist), Some(multiplier)) = (waist.as_ref(), hip_multiplier) {
+            let area = waist.area_size.first().map(|v| v.0);
+            let spread_max = waist.spread_max.x.map(|v| v.0);
+            let factor = waist.lua_display_spread_factor.map(|v| v.0);
+            let ui_factor = waist.lua_display_spread_ui_factor.map(|v| v.0);
+            if let (Some(area), Some(spread_max), Some(_), Some(_)) =
+                (area, spread_max, factor, ui_factor)
+            {
+                out.hipfire_standing = Some(round2(area) * multiplier);
+                out.hipfire_maximum = Some(round2(spread_max) * multiplier);
+            }
         }
         out
     }
@@ -612,6 +1070,35 @@ fn round2(value: f64) -> f64 {
     ((value + f64::EPSILON) * 100.0).round() / 100.0
 }
 
+fn fround(value: f64) -> f64 {
+    value as f32 as f64
+}
+
+fn ms_floor(value: f64) -> f64 {
+    (fround(value) * 1000.0).floor()
+}
+
+fn clamp_factor(value: f64) -> f64 {
+    value.clamp(0.25, 2.5)
+}
+
+fn jnum(value: &serde_json::Value, key: &str) -> Option<f64> {
+    let v = value.get(key)?;
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn effect_sum(effects: &FxHashMap<String, f64>, needles: &[&str]) -> f64 {
+    effects
+        .iter()
+        .filter(|(name, _)| needles.iter().any(|needle| name.contains(needle)))
+        .map(|(_, value)| *value)
+        .sum()
+}
+
 fn scale_ratio(base: Option<f64>, multiplier: f64) -> f64 {
     let Some(base) = base else { return multiplier };
     let b = round2(base);
@@ -703,10 +1190,20 @@ fn apply_runtime_targets(
     }
 }
 
-pub fn tune_offer(tune: &TuningOption, value: f64) -> (f64, f64, f64) {
-    let mut e_h = 0.0;
-    let mut e_v = 0.0;
-    let mut e_k = 0.0;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TuneChannels {
+    pub h: f64,
+    pub v: f64,
+    pub k: f64,
+    pub open: f64,
+    pub move_speed: f64,
+    pub move_runtime: f64,
+    pub breath: f64,
+    pub move_stability: f64,
+}
+
+pub fn tune_channels(tune: &TuningOption, value: f64) -> TuneChannels {
+    let mut out = TuneChannels::default();
     for effect in &tune.display_effects {
         let Some(v) = eval_curve_points(&effect.curve_points, value) else {
             continue;
@@ -714,21 +1211,40 @@ pub fn tune_offer(tune: &TuningOption, value: f64) -> (f64, f64, f64) {
         match effect.attribute_name_snapshot.as_str() {
             "%额外后坐力控制" => {
                 if runtime_target_allowed(tune, "GRecoil_H") {
-                    e_h += v;
+                    out.h += v;
                 }
                 if runtime_target_allowed(tune, "GRecoil_V") {
-                    e_v += v;
+                    out.v += v;
                 }
             }
             "%开火时武器稳定性" => {
                 if runtime_target_allowed(tune, "GGunkickSpring") {
-                    e_k += v;
+                    out.k += v;
                 }
             }
+            "%瞄准时移动速度" => {
+                out.move_speed += v;
+                if runtime_target_allowed(tune, "GMovement_ADSSpeed") {
+                    out.move_runtime += v / 100.0;
+                }
+            }
+            name if name.contains("开镜速度")
+                || name.contains("举镜瞄准速度")
+                || name.contains("举枪瞄准速度") =>
+            {
+                out.open += v;
+            }
+            name if name.contains("瞄准时呼吸稳定性") => out.breath += v,
+            name if name.contains("移动时据枪稳定性") => out.move_stability += v,
             _ => {}
         }
     }
-    (e_h, e_v, e_k)
+    out
+}
+
+pub fn tune_offer(tune: &TuningOption, value: f64) -> (f64, f64, f64) {
+    let channels = tune_channels(tune, value);
+    (channels.h, channels.v, channels.k)
 }
 
 pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
