@@ -173,6 +173,7 @@ pub struct Solver<'a> {
     slot_bounds: FxHashMap<String, FxHashMap<String, MetricBound>>,
     structural_parts: FxHashSet<String>,
     dp_ok: bool,
+    negative_recoil_max: bool,
     dp_dims: DpDims,
     tune_dims: TuneDims,
     aim_dp: AimDir,
@@ -782,6 +783,16 @@ impl<'a> Solver<'a> {
         if dp_dims.d && !curves_nonincreasing {
             dp_ok = false;
         }
+        // A negative recoil maximum inverts the usual "smaller is better"
+        // order: with a negative control value a larger multiplier yields the
+        // smaller metric. The Pareto frontier cannot express that, so use the
+        // exhaustive DFS and keep every tuning offer.
+        let negative_recoil_max = search_constraints
+            .iter()
+            .any(|c| is_recoil_metric(&c.id) && c.max.map(|max| max < 0.0).unwrap_or(false));
+        if negative_recoil_max {
+            dp_ok = false;
+        }
         let mut panel_base = [0.0f64; 5];
         if let Some(stats) = payload
             .weapon_stats
@@ -815,6 +826,7 @@ impl<'a> Solver<'a> {
             slot_bounds,
             structural_parts,
             dp_ok,
+            negative_recoil_max,
             dp_dims,
             tune_dims: TuneDims::from_constraints(&search_constraints),
             aim_dp: aim_direction(&search_constraints),
@@ -1168,9 +1180,6 @@ impl<'a> Solver<'a> {
             .collect();
         parts.sort();
         parts.dedup();
-        if self.dp_ok {
-            parts.retain(|id| self.structural_parts.contains(id));
-        }
         let unset = slot.internal_part_id.clone();
         let mut forced: Vec<Action> = Vec::new();
         let mut can_defer = false;
@@ -1179,6 +1188,12 @@ impl<'a> Solver<'a> {
                 .as_ref()
                 .map(|id| self.structural_parts.contains(id))
                 .unwrap_or(false);
+            // A structural default suppresses Defer, so the DP can never pick a
+            // non-structural alternative for this slot. Keep those alternatives
+            // in the explicit action list; otherwise they are unreachable.
+            if !unset_structural {
+                parts.retain(|id| self.structural_parts.contains(id));
+            }
             let remove = if slot.internal_is_default {
                 self.effective_none_part(selections, path)
             } else {
@@ -1368,20 +1383,39 @@ impl<'a> Solver<'a> {
         if !gk.is_finite() {
             return false;
         }
-        let mut f_h = cr * (1.0 + bound.min_a_h + bound.min_t_h) * bound.min_c_h;
-        let mut f_v = cr * (1.0 + bound.min_a_v + bound.min_t_v) * bound.min_c_v;
+        // The product bound is only optimistic when every factor is
+        // non-negative: with a negative control value a larger addend or
+        // multiplier can make the result smaller, so multiplying the smallest
+        // ones would overestimate it.
+        let positive = |x: f64, c: f64| x > 0.0 && c > 0.0;
+        let xh = 1.0 + bound.min_a_h + bound.min_t_h;
+        let xv = 1.0 + bound.min_a_v + bound.min_t_v;
+        let xk = 1.0 + bound.min_t_k;
+        let mut f_h = (cr >= 0.0 && positive(xh, bound.min_c_h)).then(|| cr * xh * bound.min_c_h);
+        let mut f_v = (cr >= 0.0 && positive(xv, bound.min_c_v)).then(|| cr * xv * bound.min_c_v);
         // The bound covers every installable part, so the optimistic recoil is
         // the raw value times the smallest aim scale any part can apply.
         if self.aim_scale.enabled {
-            f_h = f_h * self.aim_scale.h_factor - self.aim_scale.h_margin;
-            f_v = f_v * self.aim_scale.v_factor - self.aim_scale.v_margin;
+            if let Some(v) = f_h {
+                if self.aim_scale.h_factor >= 0.0 {
+                    f_h = Some(v * self.aim_scale.h_factor - self.aim_scale.h_margin);
+                }
+            }
+            if let Some(v) = f_v {
+                if self.aim_scale.v_factor >= 0.0 {
+                    f_v = Some(v * self.aim_scale.v_factor - self.aim_scale.v_margin);
+                }
+            }
         }
-        let mut s = gk / self.gunkick0 * (1.0 + bound.min_t_k) * bound.min_c_k;
+        let mut s = (gk >= 0.0 && positive(xk, bound.min_c_k))
+            .then(|| gk / self.gunkick0 * xk * bound.min_c_k);
         // `fire-stability` is `round2(round2(p0 * s) / round2(p0))`; the
         // optimistic bound has to allow the rounding to move the value up.
-        let rounded0 = ((self.gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
-        if rounded0 != 0.0 {
-            s -= 0.005 / rounded0.abs() + 0.005;
+        if let Some(v) = s {
+            let rounded0 = ((self.gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
+            if rounded0 != 0.0 {
+                s = Some(v - 0.005 / rounded0.abs() - 0.005);
+            }
         }
         for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
@@ -1391,8 +1425,10 @@ impl<'a> Solver<'a> {
                 "recoil-fire-stability" => s,
                 _ => continue,
             };
-            if value > max + 1e-9 {
-                return true;
+            if let Some(value) = value {
+                if value > max + 1e-9 {
+                    return true;
+                }
             }
         }
         false
@@ -2945,7 +2981,11 @@ impl<'a> Solver<'a> {
                         break;
                     }
                 }
-                let (pruned, cut) = pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+                let (pruned, cut) = if self.negative_recoil_max {
+                    (next, Trim::default())
+                } else {
+                    pareto_capped(next, &self.tune_dims, 4096, self.deadline_at)
+                };
                 self.heuristic_incomplete |= cut.capped;
                 self.truncated |= cut.deadline;
                 group = pruned;
@@ -2979,7 +3019,11 @@ impl<'a> Solver<'a> {
                     break;
                 }
             }
-            let (pruned, cut) = pareto_capped(next, &self.tune_dims, 4096, self.deadline_at);
+            let (pruned, cut) = if self.negative_recoil_max {
+                (next, Trim::default())
+            } else {
+                pareto_capped(next, &self.tune_dims, 4096, self.deadline_at)
+            };
             self.heuristic_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
             frontier = pruned;
@@ -3109,12 +3153,16 @@ impl<'a> Solver<'a> {
         });
         let dims = self.tune_dims;
         let mut pruned: Vec<LocalOffer> = Vec::new();
-        for o in offers {
-            if pruned.iter().any(|p| local_offer_dominates(p, &o, &dims)) {
-                continue;
+        if self.negative_recoil_max {
+            pruned = offers;
+        } else {
+            for o in offers {
+                if pruned.iter().any(|p| local_offer_dominates(p, &o, &dims)) {
+                    continue;
+                }
+                pruned.retain(|p| !local_offer_dominates(&o, p, &dims));
+                pruned.push(o);
             }
-            pruned.retain(|p| !local_offer_dominates(&o, p, &dims));
-            pruned.push(o);
         }
         pruned.sort_by(|a, b| {
             b.e_h
@@ -3860,12 +3908,15 @@ fn exact_part_metric(
 /// the DP can apply exactly one winner's delta.
 fn exact_laser_pro(part: &Part, mode: &str, panel_attrs: &[String]) -> ExactPart {
     let mut m = ExactPart::neutral_panel(panel_attrs.len());
+    // `modifier_included` treats every non-`con` addend of the selected laser
+    // part as a laser bonus, so the additive delta must cover them all, not
+    // just the `pro` ones used to rank laser parts.
     if !panel_attrs.is_empty() {
         if let Some(list) = part.display_mods.get(mode) {
             for modif in list {
                 if modif.condition_id.is_some()
                     || modif.modifier_type != "Addend"
-                    || modif.polarity.as_deref() != Some("pro")
+                    || modif.polarity.as_deref() == Some("con")
                 {
                     continue;
                 }
@@ -3880,7 +3931,7 @@ fn exact_laser_pro(part: &Part, mode: &str, panel_attrs: &[String]) -> ExactPart
         for modif in list {
             if modif.condition_id.is_some()
                 || modif.modifier_type != "Addend"
-                || modif.polarity.as_deref() != Some("pro")
+                || modif.polarity.as_deref() == Some("con")
             {
                 continue;
             }

@@ -146,6 +146,13 @@ DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncat
 
 调校需求的反解不使用线性闭式解, 而是用与精确评估相同的 `scale_ratio` 对单通道调校总量二分, 避免 `round2` 台阶把可行调校判成不可行或把不可行判成可行. `recoil-fire-stability` 的乐观下界同样扣除 `round2` 余量, 保证边界解不会被剪掉.
 
+边界处理:
+
+- 槽位自带结构默认件时, Defer 会被压制, DP 无法再选非结构件; 这类槽位把非结构候选保留在显式 action 列表里
+- 后坐力约束的 max 为负, 或加值/倍率为负时, 常规 Pareto 支配和下界不再成立, 对应剪枝关闭并回退到全枚举
+- 激光件的所有非 `con` Addend 都按选中激光的加成计入, 不只 `pro`
+- `optimal=false` 表示未证明最优 (含时间/预算截断和内部前沿上限); `truncated=true` 只表示时间或预算耗尽
+
 #### 单调曲线细分指标的归约
 
 `stability-fire-camera`, `stability-movement-camera`, `stability-hold-breath-recoil`, `stability-breath-range`, `stability-breath-duration` 都是稳定度标量 `dS` 经单调曲线得到的. 若 payload 中稳定度类 Addend 只来自无条件的 `10007`, 且指标的其他输入 (呼吸倍率, 呼吸/移动稳定性除子, 调校效果) 可证明为常数, 求解前按曲线反解出 `10007` 的 min/max, 交给现有面板 DP, 不再关闭 DP.
