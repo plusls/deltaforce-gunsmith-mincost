@@ -442,7 +442,7 @@ impl<'a> Solver<'a> {
             prices,
         };
         let relevance = compute_relevance(payload, weapon_id, options);
-        let slot_bounds = compute_bounds(payload, weapon_id, &options.mode);
+        let slot_bounds = compute_bounds(payload, weapon_id, &options.mode, options.laser_enabled);
         let (control_curve, gunkick_curve, gunkick0) = {
             let profile = payload.numeric_profiles.get(weapon_id);
             let curves = profile.map(|p| &p.linked_tables.recoil_curves);
@@ -954,7 +954,7 @@ impl<'a> Solver<'a> {
                 continue;
             }
             if let Some(part) = self.payload.parts.get(id) {
-                decided_bound.add_a(&part_own_bound(part, &self.options.mode));
+                decided_bound.add_a(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
             }
         }
         for item in &assembly.internal_parts {
@@ -965,7 +965,7 @@ impl<'a> Solver<'a> {
                 continue;
             };
             if decided.contains(&item.slot_path_key) {
-                decided_bound.add_a(&part_own_bound(part, &self.options.mode));
+                decided_bound.add_a(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
                 continue;
             }
             let parent_active = match &item.parent_slot_path_key {
@@ -975,7 +975,7 @@ impl<'a> Solver<'a> {
                 None => true,
             };
             if parent_active {
-                assumed_bound.add_optional(&part_own_bound(part, &self.options.mode));
+                assumed_bound.add_optional(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
                 optional_paths.insert(item.slot_path_key.as_str());
             }
         }
@@ -2582,8 +2582,25 @@ impl MetricBound {
     }
 }
 
-fn part_own_bound(part: &Part, mode: &str) -> MetricBound {
+fn laser_delta_range(
+    modifier: &crate::model::Modifier,
+    is_laser: bool,
+    laser_enabled: bool,
+    delta: f64,
+) -> (f64, f64) {
+    if !is_laser || modifier.polarity.as_deref() == Some("con") {
+        return (delta, delta);
+    }
+    if laser_enabled {
+        (delta.min(0.0), delta.max(0.0))
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+fn part_own_bound(part: &Part, mode: &str, laser_enabled: bool) -> MetricBound {
     let mut b = MetricBound::neutral();
+    let is_laser = crate::metrics::has_laser(part, mode);
     if let Some(list) = part.display_mods.get(mode) {
         for m in list {
             if m.condition_id.is_some() || m.modifier_type != "Addend" {
@@ -2595,8 +2612,9 @@ fn part_own_bound(part: &Part, mode: &str) -> MetricBound {
             let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) else {
                 continue;
             };
-            b.panel_max[idx] += delta;
-            b.panel_min[idx] += delta;
+            let (lower, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
+            b.panel_min[idx] += lower;
+            b.panel_max[idx] += upper;
         }
     }
     if let Some(list) = part.main_mods.get(mode) {
@@ -2605,7 +2623,9 @@ fn part_own_bound(part: &Part, mode: &str) -> MetricBound {
                 && m.modifier_type == "Addend"
                 && normalize_attr(m.attribute_id.as_deref()) == "10005"
             {
-                b.max_d += m.delta.map(|v| v.0).unwrap_or(0.0);
+                let delta = m.delta.map(|v| v.0).unwrap_or(0.0);
+                let (_, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
+                b.max_d += upper;
             }
         }
     }
@@ -2676,6 +2696,7 @@ fn compute_bounds(
     payload: &WeaponPayload,
     weapon_id: &str,
     mode: &str,
+    laser_enabled: bool,
 ) -> FxHashMap<(String, String), MetricBound> {
     let mut part_cache: FxHashMap<String, MetricBound> = FxHashMap::default();
     let mut slot_cache: FxHashMap<(String, String), MetricBound> = FxHashMap::default();
@@ -2695,6 +2716,7 @@ fn compute_bounds(
             slot_bound(
                 payload,
                 mode,
+                laser_enabled,
                 host,
                 slot,
                 &slot_rule_parts,
@@ -2711,6 +2733,7 @@ fn compute_bounds(
 fn part_bound(
     payload: &WeaponPayload,
     mode: &str,
+    laser_enabled: bool,
     id: &str,
     slot_rule_parts: &FxHashMap<String, Vec<String>>,
     part_cache: &mut FxHashMap<String, MetricBound>,
@@ -2723,7 +2746,7 @@ fn part_bound(
     let Some(part) = payload.parts.get(id) else {
         return MetricBound::neutral();
     };
-    let mut b = part_own_bound(part, mode);
+    let mut b = part_own_bound(part, mode, laser_enabled);
     if visited.contains(id) {
         return b;
     }
@@ -2733,6 +2756,7 @@ fn part_bound(
             let child = slot_bound(
                 payload,
                 mode,
+                laser_enabled,
                 id,
                 slot,
                 slot_rule_parts,
@@ -2752,6 +2776,7 @@ fn part_bound(
 fn slot_bound(
     payload: &WeaponPayload,
     mode: &str,
+    laser_enabled: bool,
     host: &str,
     slot: &crate::model::SlotDef,
     slot_rule_parts: &FxHashMap<String, Vec<String>>,
@@ -2768,6 +2793,7 @@ fn slot_bound(
         let b = part_bound(
             payload,
             mode,
+            laser_enabled,
             id,
             slot_rule_parts,
             part_cache,
@@ -2780,6 +2806,7 @@ fn slot_bound(
         let b = part_bound(
             payload,
             mode,
+            laser_enabled,
             id,
             slot_rule_parts,
             part_cache,
@@ -2793,6 +2820,7 @@ fn slot_bound(
             let b = part_bound(
                 payload,
                 mode,
+                laser_enabled,
                 id,
                 slot_rule_parts,
                 part_cache,
