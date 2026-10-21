@@ -279,6 +279,9 @@ struct TuneDims {
     move_effect: TuneDir,
     breath: TuneDir,
     move_stability: TuneDir,
+    recoil_h: TuneDir,
+    recoil_v: TuneDir,
+    recoil_k: TuneDir,
 }
 
 impl TuneDims {
@@ -291,10 +294,28 @@ impl TuneDims {
         let mut breath_low = false;
         let mut stability_high = false;
         let mut stability_low = false;
+        let mut h_high = false;
+        let mut h_low = false;
+        let mut v_high = false;
+        let mut v_low = false;
+        let mut k_high = false;
+        let mut k_low = false;
         for c in constraints {
             let max = c.max.is_some();
             let min = c.min.is_some();
             match c.id.as_str() {
+                "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
+                    h_high |= max;
+                    h_low |= min;
+                }
+                "recoil-continuous-vertical" | "recoil-single-vertical" => {
+                    v_high |= max;
+                    v_low |= min;
+                }
+                "recoil-fire-stability" => {
+                    k_high |= max;
+                    k_low |= min;
+                }
                 "handling-aim-time" => {
                     open_high |= max && !min;
                     open_low |= min && !max;
@@ -304,19 +325,28 @@ impl TuneDims {
                     move_high |= min && !max;
                 }
                 "stability-breath-range" => {
+                    breath_high |= max && !min;
+                    breath_low |= min && !max;
+                }
+                "stability-breath-duration" => {
                     breath_high |= min && !max;
                     breath_low |= max && !min;
                 }
-                "stability-breath-duration" => {
-                    breath_low |= min && !max;
-                    breath_high |= max && !min;
-                }
                 "stability-movement-camera" => {
-                    stability_high |= min && !max;
-                    stability_low |= max && !min;
+                    stability_high |= max && !min;
+                    stability_low |= min && !max;
                 }
                 _ => {}
             }
+        }
+        if !h_high && !h_low {
+            h_high = true;
+        }
+        if !v_high && !v_low {
+            v_high = true;
+        }
+        if !k_high && !k_low {
+            k_high = true;
         }
         let dir = |high: bool, low: bool| {
             if high && !low {
@@ -334,6 +364,9 @@ impl TuneDims {
             move_effect: dir(move_high, move_low),
             breath: dir(breath_high, breath_low),
             move_stability: dir(stability_high, stability_low),
+            recoil_h: dir(h_high, h_low),
+            recoil_v: dir(v_high, v_low),
+            recoil_k: dir(k_high, k_low),
         }
     }
 }
@@ -1723,24 +1756,30 @@ impl<'a> Solver<'a> {
             impossible: false,
         };
         for c in &self.options.constraints {
-            let Some(thr) = c.max else { continue };
-            match c.id.as_str() {
-                "recoil-continuous-horizontal" => {
-                    apply_linear_req(&mut req.lower_h, &mut req.upper_h, &mut req.impossible, b.cr * b.c_h, 1.0 + b.a_h, thr);
+            let (lower, upper) = match c.id.as_str() {
+                "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
+                    (&mut req.lower_h, &mut req.upper_h)
                 }
-                "recoil-continuous-vertical" => {
-                    apply_linear_req(&mut req.lower_v, &mut req.upper_v, &mut req.impossible, b.cr * b.c_v, 1.0 + b.a_v, thr);
+                "recoil-continuous-vertical" | "recoil-single-vertical" => {
+                    (&mut req.lower_v, &mut req.upper_v)
                 }
-                "recoil-single-horizontal" => {
-                    apply_linear_req(&mut req.lower_h, &mut req.upper_h, &mut req.impossible, b.cr * b.c_h, 1.0 + b.a_h, thr);
+                "recoil-fire-stability" => (&mut req.lower_k, &mut req.upper_k),
+                _ => continue,
+            };
+            let (k, base) = match c.id.as_str() {
+                "recoil-continuous-horizontal" | "recoil-single-horizontal" => {
+                    (b.cr * b.c_h, 1.0 + b.a_h)
                 }
-                "recoil-single-vertical" => {
-                    apply_linear_req(&mut req.lower_v, &mut req.upper_v, &mut req.impossible, b.cr * b.c_v, 1.0 + b.a_v, thr);
+                "recoil-continuous-vertical" | "recoil-single-vertical" => {
+                    (b.cr * b.c_v, 1.0 + b.a_v)
                 }
-                "recoil-fire-stability" => {
-                    apply_linear_req(&mut req.lower_k, &mut req.upper_k, &mut req.impossible, b.gk_ratio * b.c_k, 1.0, thr);
-                }
-                _ => {}
+                _ => (b.gk_ratio * b.c_k, 1.0),
+            };
+            if let Some(thr) = c.max {
+                apply_linear_req(lower, upper, &mut req.impossible, k, base, thr, true);
+            }
+            if let Some(thr) = c.min {
+                apply_linear_req(lower, upper, &mut req.impossible, k, base, thr, false);
             }
         }
         if req.impossible {
@@ -2770,9 +2809,9 @@ fn pareto_capped(
 }
 
 fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
-    a.e_h >= b.e_h - 1e-9
-        && a.e_v >= b.e_v - 1e-9
-        && a.e_k >= b.e_k - 1e-9
+    channel_ok(a.e_h, b.e_h, dims.recoil_h)
+        && channel_ok(a.e_v, b.e_v, dims.recoil_v)
+        && channel_ok(a.e_k, b.e_k, dims.recoil_k)
         && channel_ok(a.e_open, b.e_open, dims.open)
         && channel_ok(a.e_move, b.e_move, dims.move_effect)
         && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
@@ -2781,9 +2820,9 @@ fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
 }
 
 fn local_offer_dominates(a: &LocalOffer, b: &LocalOffer, dims: &TuneDims) -> bool {
-    a.e_h >= b.e_h - 1e-9
-        && a.e_v >= b.e_v - 1e-9
-        && a.e_k >= b.e_k - 1e-9
+    channel_ok(a.e_h, b.e_h, dims.recoil_h)
+        && channel_ok(a.e_v, b.e_v, dims.recoil_v)
+        && channel_ok(a.e_k, b.e_k, dims.recoil_k)
         && channel_ok(a.e_open, b.e_open, dims.open)
         && channel_ok(a.e_move, b.e_move, dims.move_effect)
         && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
@@ -2798,19 +2837,20 @@ fn apply_linear_req(
     k: f64,
     base: f64,
     threshold: f64,
+    is_max: bool,
 ) {
     if !k.is_finite() || !threshold.is_finite() {
         *impossible = true;
         return;
     }
     if k == 0.0 {
-        if 0.0 > threshold {
+        if (is_max && 0.0 > threshold) || (!is_max && 0.0 < threshold) {
             *impossible = true;
         }
         return;
     }
     let bound = 100.0 * (base - threshold / k);
-    if k > 0.0 {
+    if (k > 0.0) == is_max {
         *lower = lower.max(bound);
     } else {
         *upper = upper.min(bound);
