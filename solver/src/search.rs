@@ -173,6 +173,7 @@ pub struct Solver<'a> {
     gunkick_min: Option<f64>,
     gunkick0: f64,
     aim_scale: AimScaleFloor,
+    curves_nonincreasing: bool,
     weapon_price: i64,
     seed: bool,
     cost_cap: i64,
@@ -793,6 +794,7 @@ impl<'a> Solver<'a> {
             gunkick_min,
             gunkick0,
             aim_scale: aim_scale_floor(payload, weapon_id, &options.mode),
+            curves_nonincreasing,
             weapon_price,
             seed: false,
             cost_cap: i64::MAX,
@@ -1330,6 +1332,96 @@ impl<'a> Solver<'a> {
     }
 
 
+    fn dp_level_may_satisfy(&self, st: &DpState, sb: &DpSuffixBound) -> bool {
+        let mut has_recoil = false;
+        let mut aim_max: Option<f64> = None;
+        for c in &self.options.constraints {
+            let Some(max) = c.max else { continue };
+            match c.id.as_str() {
+                "recoil-continuous-horizontal"
+                | "recoil-single-horizontal"
+                | "recoil-continuous-vertical"
+                | "recoil-single-vertical"
+                | "recoil-fire-stability" => has_recoil = true,
+                "handling-aim-time" if c.min.is_none() => aim_max = Some(max),
+                _ => {}
+            }
+        }
+        if has_recoil {
+            if let (Some(control), Some(gunkick)) = (&self.control_curve, &self.gunkick_curve) {
+                if self.gunkick0 > 0.0 {
+                    let d_hi = st.metric.d + sb.d_max;
+                    let (cr, gk) = if self.curves_nonincreasing {
+                        (control.eval(d_hi), gunkick.eval(d_hi))
+                    } else {
+                        (self.control_min, self.gunkick_min)
+                    };
+                    if let (Some(cr), Some(gk)) = (cr, gk) {
+                        let c_h = if st.metric.ch < 0.0 || sb.ch_negative {
+                            0.0
+                        } else {
+                            (st.metric.ch * sb.ch_min).max(0.0)
+                        };
+                        let c_v = if st.metric.cv < 0.0 || sb.cv_negative {
+                            0.0
+                        } else {
+                            (st.metric.cv * sb.cv_min).max(0.0)
+                        };
+                        let c_k = if st.metric.ck < 0.0 || sb.ck_negative {
+                            0.0
+                        } else {
+                            (st.metric.ck * sb.ck_min).max(0.0)
+                        };
+                        let f_h = cr.max(0.0)
+                            * (1.0 + st.metric.ah + sb.ah_min
+                                - 0.01 * (st.metric.eh + sb.eh_max))
+                                .max(0.0)
+                            * c_h;
+                        let f_v = cr.max(0.0)
+                            * (1.0 + st.metric.av + sb.av_min
+                                - 0.01 * (st.metric.ev + sb.ev_max))
+                                .max(0.0)
+                            * c_v;
+                        let s = (gk / self.gunkick0).max(0.0)
+                            * (1.0 - 0.01 * (st.metric.ek + sb.ek_max)).max(0.0)
+                            * c_k;
+                        for c in &self.options.constraints {
+                            let Some(max) = c.max else { continue };
+                            if max < 0.0 {
+                                continue;
+                            }
+                            let value = match c.id.as_str() {
+                                "recoil-continuous-horizontal"
+                                | "recoil-single-horizontal" => f_h,
+                                "recoil-continuous-vertical" | "recoil-single-vertical" => {
+                                    f_v
+                                }
+                                "recoil-fire-stability" => s,
+                                _ => continue,
+                            };
+                            if value > max + 1e-9 {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(max) = aim_max {
+            let open = (st.metric.eopen + sb.eopen_max).max(0.0);
+            if let Some(v) = self.evaluator.aim_time(
+                st.metric.hs + sb.hs_max,
+                st.metric.adsm + sb.adsm_min,
+                open,
+            ) {
+                if v > max + 1e-9 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn dp_leaf(
         &mut self,
         selections: &FxHashMap<String, Option<String>>,
@@ -1491,6 +1583,7 @@ impl<'a> Solver<'a> {
             let min_cost = opts.iter().map(|o| o.cost).min().unwrap_or(0);
             suffix_min[idx] = suffix_min[idx + 1] + min_cost;
         }
+        let suffix_bound = dp_suffix_bounds(&options_per_slot);
 
         let mut states: Vec<DpState> = vec![DpState {
             cost: base_cost,
@@ -1525,6 +1618,7 @@ impl<'a> Solver<'a> {
                     next.push(DpState { cost, metric, choices });
                 }
             }
+            next.retain(|st| self.dp_level_may_satisfy(st, &suffix_bound[slot_idx + 1]));
             let (pruned, cut) = dp_pareto_capped(
                 next,
                 &self.dp_dims,
@@ -1575,7 +1669,6 @@ impl<'a> Solver<'a> {
                 _ => continue,
             };
             *slot = Some(slot.map_or(max, |cur| cur.min(max)));
-        }
         }
         let aim_max = self
             .options
@@ -2715,6 +2808,127 @@ struct DpState {
     cost: i64,
     metric: ExactPart,
     choices: Vec<SlotChoice>,
+}
+
+/// Optimistic completion bounds for the slots after a DP level. Each field is
+/// an extremum that can be added/multiplied to a partial state without looking
+/// at the actual choices, so a state that fails a bound here cannot be
+/// completed into a feasible build.
+#[derive(Debug, Clone, Copy)]
+struct DpSuffixBound {
+    d_min: f64,
+    d_max: f64,
+    ah_min: f64,
+    av_min: f64,
+    ch_min: f64,
+    cv_min: f64,
+    ck_min: f64,
+    ch_negative: bool,
+    cv_negative: bool,
+    ck_negative: bool,
+    eh_max: f64,
+    ev_max: f64,
+    ek_max: f64,
+    eopen_max: f64,
+    hs_max: f64,
+    adsm_min: f64,
+}
+
+fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
+    let mut out = vec![
+        DpSuffixBound {
+            d_min: 0.0,
+            d_max: 0.0,
+            ah_min: 0.0,
+            av_min: 0.0,
+            ch_min: 1.0,
+            cv_min: 1.0,
+            ck_min: 1.0,
+            ch_negative: false,
+            cv_negative: false,
+            ck_negative: false,
+            eh_max: 0.0,
+            ev_max: 0.0,
+            ek_max: 0.0,
+            eopen_max: 0.0,
+            hs_max: 0.0,
+            adsm_min: 0.0,
+        };
+        options_per_slot.len() + 1
+    ];
+    for idx in (0..options_per_slot.len()).rev() {
+        let opts = &options_per_slot[idx];
+        let mut d_min = f64::INFINITY;
+        let mut d_max = f64::NEG_INFINITY;
+        let mut ah_min = f64::INFINITY;
+        let mut av_min = f64::INFINITY;
+        let mut ch_min = f64::INFINITY;
+        let mut cv_min = f64::INFINITY;
+        let mut ck_min = f64::INFINITY;
+        let mut ch_negative = false;
+        let mut cv_negative = false;
+        let mut ck_negative = false;
+        let mut eh_max = f64::NEG_INFINITY;
+        let mut ev_max = f64::NEG_INFINITY;
+        let mut ek_max = f64::NEG_INFINITY;
+        let mut eopen_max = f64::NEG_INFINITY;
+        let mut hs_max = f64::NEG_INFINITY;
+        let mut adsm_min = f64::INFINITY;
+        for o in opts {
+            let m = &o.metric;
+            d_min = d_min.min(m.d);
+            d_max = d_max.max(m.d);
+            ah_min = ah_min.min(m.ah);
+            av_min = av_min.min(m.av);
+            ch_min = ch_min.min(m.ch);
+            cv_min = cv_min.min(m.cv);
+            ck_min = ck_min.min(m.ck);
+            ch_negative |= m.ch < 0.0;
+            cv_negative |= m.cv < 0.0;
+            ck_negative |= m.ck < 0.0;
+            eh_max = eh_max.max(m.eh);
+            ev_max = ev_max.max(m.ev);
+            ek_max = ek_max.max(m.ek);
+            eopen_max = eopen_max.max(m.eopen);
+            hs_max = hs_max.max(m.hs);
+            adsm_min = adsm_min.min(m.adsm);
+        }
+        if opts.is_empty() {
+            d_min = 0.0;
+            d_max = 0.0;
+            ah_min = 0.0;
+            av_min = 0.0;
+            ch_min = 1.0;
+            cv_min = 1.0;
+            ck_min = 1.0;
+            eh_max = 0.0;
+            ev_max = 0.0;
+            ek_max = 0.0;
+            eopen_max = 0.0;
+            hs_max = 0.0;
+            adsm_min = 0.0;
+        }
+        let next = out[idx + 1];
+        out[idx] = DpSuffixBound {
+            d_min: d_min + next.d_min,
+            d_max: d_max + next.d_max,
+            ah_min: ah_min + next.ah_min,
+            av_min: av_min + next.av_min,
+            ch_min: ch_min * next.ch_min,
+            cv_min: cv_min * next.cv_min,
+            ck_min: ck_min * next.ck_min,
+            ch_negative: ch_negative || next.ch_negative,
+            cv_negative: cv_negative || next.cv_negative,
+            ck_negative: ck_negative || next.ck_negative,
+            eh_max: eh_max + next.eh_max,
+            ev_max: ev_max + next.ev_max,
+            ek_max: ek_max + next.ek_max,
+            eopen_max: eopen_max + next.eopen_max,
+            hs_max: hs_max + next.hs_max,
+            adsm_min: adsm_min + next.adsm_min,
+        };
+    }
+    out
 }
 
 fn exact_part_metric(
@@ -4129,6 +4343,48 @@ mod tests {
             },
             choices: Vec::new(),
         }
+    }
+
+    #[test]
+    fn dp_suffix_bounds_accumulate_extrema_and_products() {
+        let opt = |d: f64, ah: f64, ch: f64, eh: f64, hs: f64, adsm: f64, eopen: f64| {
+            DpOption {
+                cost: 0,
+                metric: ExactPart {
+                    d,
+                    ah,
+                    ch,
+                    eh,
+                    hs,
+                    adsm,
+                    eopen,
+                    ..ExactPart::neutral()
+                },
+                choice: SlotChoice::Unset,
+            }
+        };
+        let slots = vec![
+            vec![
+                opt(2.0, 0.1, 0.9, 5.0, 1.0, 0.05, 3.0),
+                opt(-1.0, -0.2, 1.0, 2.0, 0.0, 0.0, 1.0),
+            ],
+            vec![opt(3.0, 0.3, 0.8, 4.0, 2.0, 0.1, 2.0)],
+        ];
+        let b = dp_suffix_bounds(&slots);
+        assert_eq!(b[2].d_max, 0.0);
+        assert_eq!(b[1].d_max, 3.0);
+        assert_eq!(b[1].d_min, 3.0);
+        assert!((b[0].d_max - 5.0).abs() < 1e-12);
+        assert!((b[0].d_min - 2.0).abs() < 1e-12);
+        assert!((b[0].ah_min - 0.1).abs() < 1e-12);
+        assert!((b[0].ch_min - 0.72).abs() < 1e-12);
+        assert!((b[0].eh_max - 9.0).abs() < 1e-12);
+        assert!((b[0].hs_max - 3.0).abs() < 1e-12);
+        assert!((b[0].adsm_min - 0.1).abs() < 1e-12);
+        assert!((b[0].eopen_max - 5.0).abs() < 1e-12);
+        assert!(!b[0].ch_negative);
+        let negative = vec![vec![opt(0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0)]];
+        assert!(dp_suffix_bounds(&negative)[0].ch_negative);
     }
 
     fn tuning_instance<'a>(slot_path: &str, slot_name: &str, part: &'a Part) -> TuningInstance<'a> {
