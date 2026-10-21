@@ -153,7 +153,9 @@ pub struct Solver<'a> {
     options: &'a SolveOptions,
     relevance: Relevance,
     offer_cache: FxHashMap<(String, String), Vec<Offer>>,
-    slot_bounds: FxHashMap<(String, String), MetricBound>,
+    part_bounds: FxHashMap<String, MetricBound>,
+    part_prices: FxHashMap<String, i64>,
+    slot_bounds: FxHashMap<String, FxHashMap<String, MetricBound>>,
     structural_parts: FxHashSet<String>,
     dp_ok: bool,
     dp_dims: DpDims,
@@ -186,7 +188,16 @@ pub struct Solver<'a> {
 
 #[derive(Debug, Clone, Default)]
 struct Relevance {
-    slots: FxHashSet<(String, String)>,
+    slots: FxHashMap<String, FxHashSet<String>>,
+}
+
+impl Relevance {
+    fn contains(&self, host: &str, slot: &str) -> bool {
+        self.slots
+            .get(host)
+            .map(|slots| slots.contains(slot))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -445,7 +456,30 @@ impl<'a> Solver<'a> {
             prices,
         };
         let relevance = compute_relevance(payload, weapon_id, options);
-        let slot_bounds = compute_bounds(payload, weapon_id, &options.mode, options.laser_enabled);
+        let flat_bounds = compute_bounds(payload, weapon_id, &options.mode, options.laser_enabled);
+        let mut slot_bounds: FxHashMap<String, FxHashMap<String, MetricBound>> =
+            FxHashMap::default();
+        for ((host, slot), bound) in flat_bounds {
+            slot_bounds.entry(host).or_default().insert(slot, bound);
+        }
+        let part_bounds: FxHashMap<String, MetricBound> = payload
+            .parts
+            .iter()
+            .map(|(id, part)| {
+                (
+                    id.clone(),
+                    part_own_bound(part, &options.mode, options.laser_enabled),
+                )
+            })
+            .collect();
+        let part_prices: FxHashMap<String, i64> = payload
+            .parts
+            .iter()
+            .map(|(id, part)| {
+                let price = prices.get(part.price_id()).copied().unwrap_or(0);
+                (id.clone(), price)
+            })
+            .collect();
         let (control_curve, gunkick_curve, gunkick0) = {
             let profile = payload.numeric_profiles.get(weapon_id);
             let curves = profile.map(|p| &p.linked_tables.recoil_curves);
@@ -584,6 +618,8 @@ impl<'a> Solver<'a> {
             options,
             relevance,
             offer_cache: FxHashMap::default(),
+            part_bounds,
+            part_prices,
             slot_bounds,
             structural_parts,
             dp_ok,
@@ -766,11 +802,7 @@ impl<'a> Solver<'a> {
             if decided.contains(&slot.path_key) || deferred.contains(&slot.path_key) {
                 continue;
             }
-            if !self
-                .relevance
-                .slots
-                .contains(&(slot.host_part_id.clone(), slot.slot.id.clone()))
-            {
+            if !self.relevance.contains(&slot.host_part_id, &slot.slot.id) {
                 continue;
             }
             next = Some(idx);
@@ -958,19 +990,21 @@ impl<'a> Solver<'a> {
             if !seen.insert((slot.path_key.as_str(), id.as_str())) {
                 continue;
             }
-            if let Some(part) = self.payload.parts.get(id) {
-                decided_bound.add_a(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
+            if let Some(b) = self.part_bounds.get(id) {
+                decided_bound.add_a(b);
             }
         }
         for item in &assembly.internal_parts {
             if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
                 continue;
             }
-            let Some(part) = self.payload.parts.get(&item.part_id) else {
+            if !self.payload.parts.contains_key(&item.part_id) {
                 continue;
-            };
+            }
             if decided.contains(&item.slot_path_key) {
-                decided_bound.add_a(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
+                if let Some(b) = self.part_bounds.get(&item.part_id) {
+                    decided_bound.add_a(b);
+                }
                 continue;
             }
             let parent_active = match &item.parent_slot_path_key {
@@ -980,7 +1014,9 @@ impl<'a> Solver<'a> {
                 None => true,
             };
             if parent_active {
-                assumed_bound.add_optional(&part_own_bound(part, &self.options.mode, self.options.laser_enabled));
+                if let Some(b) = self.part_bounds.get(&item.part_id) {
+                    assumed_bound.add_optional(b);
+                }
                 optional_paths.insert(item.slot_path_key.as_str());
             }
         }
@@ -990,16 +1026,13 @@ impl<'a> Solver<'a> {
             if decided.contains(&slot.path_key) {
                 continue;
             }
-            if !self
-                .relevance
-                .slots
-                .contains(&(slot.host_part_id.clone(), slot.slot.id.clone()))
-            {
+            if !self.relevance.contains(&slot.host_part_id, &slot.slot.id) {
                 continue;
             }
             if let Some(b) = self
                 .slot_bounds
-                .get(&(slot.host_part_id.clone(), slot.slot.id.clone()))
+                .get(&slot.host_part_id)
+                .and_then(|slots| slots.get(&slot.slot.id))
             {
                 bound.add_a(b);
             }
@@ -1110,11 +1143,7 @@ impl<'a> Solver<'a> {
     }
 
     fn part_price(&self, id: &str) -> i64 {
-        self.payload
-            .parts
-            .get(id)
-            .map(|p| self.evaluator.prices.get(p.price_id()).copied().unwrap_or(0))
-            .unwrap_or(0)
+        self.part_prices.get(id).copied().unwrap_or(0)
     }
 
     fn seed_panel_score(&self, id: &str) -> f64 {
@@ -1154,11 +1183,7 @@ impl<'a> Solver<'a> {
             if decided.contains(&slot.path_key) {
                 continue;
             }
-            if !self
-                .relevance
-                .slots
-                .contains(&(slot.host_part_id.clone(), slot.slot.id.clone()))
-            {
+            if !self.relevance.contains(&slot.host_part_id, &slot.slot.id) {
                 continue;
             }
             leaf_slots.push(slot);
@@ -1413,7 +1438,7 @@ impl<'a> Solver<'a> {
         if part.is_virtual {
             0
         } else {
-            self.evaluator.prices.get(part.price_id()).copied().unwrap_or(0)
+            self.part_prices.get(&part.id).copied().unwrap_or(0)
         }
     }
 
@@ -3414,7 +3439,7 @@ fn compute_relevance(
         }
     }
 
-    let mut slots: FxHashSet<(String, String)> = FxHashSet::default();
+    let mut slots: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
     for (host, list) in &payload.slots_by_host {
         for slot in list {
             let mut slot_relevant = slot
@@ -3430,7 +3455,7 @@ fn compute_relevance(
                 }
             }
             if slot_relevant {
-                slots.insert((host.clone(), slot.id.clone()));
+                slots.entry(host.clone()).or_default().insert(slot.id.clone());
             }
         }
     }
@@ -3498,6 +3523,19 @@ mod tests {
                 .collect(),
             ..serde_json::from_value(serde_json::json!({ "id": id })).unwrap()
         }
+    }
+
+    #[test]
+    fn relevance_matches_host_and_slot_without_allocation() {
+        let mut relevance = Relevance::default();
+        relevance
+            .slots
+            .entry("host-a".to_string())
+            .or_default()
+            .insert("slot-1".to_string());
+        assert!(relevance.contains("host-a", "slot-1"));
+        assert!(!relevance.contains("host-a", "slot-2"));
+        assert!(!relevance.contains("host-b", "slot-1"));
     }
 
     #[test]
