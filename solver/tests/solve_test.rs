@@ -1,4 +1,7 @@
 use serde_json::json;
+use std::fs;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn payload() -> serde_json::Value {
     json!({
@@ -125,4 +128,63 @@ fn infeasible_constraints_return_no_build() {
     let out = run(request);
     assert!(out["best"].is_null());
     assert_eq!(out["truncated"], false);
+}
+
+static CLI_DIR: AtomicU64 = AtomicU64::new(0);
+
+fn cli_dir() -> std::path::PathBuf {
+    let id = CLI_DIR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("dws-cli-{}-{id}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn cli_inputs(prices: serde_json::Value) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = cli_dir();
+    let payload_path = dir.join("payload.json");
+    let prices_path = dir.join("prices.json");
+    fs::write(&payload_path, serde_json::to_vec(&payload()).unwrap()).unwrap();
+    fs::write(&prices_path, serde_json::to_vec(&json!({ "prices": prices })).unwrap()).unwrap();
+    (payload_path, prices_path)
+}
+
+fn cli_command(payload_path: &std::path::Path, prices_path: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_solve"));
+    command
+        .args(["--payload", payload_path.to_str().unwrap()])
+        .args(["--prices", prices_path.to_str().unwrap()])
+        .args(["--weapon", "w1"])
+        .args(["--constraint", "recoil-continuous-horizontal:0.9"]);
+    command
+}
+
+#[test]
+fn cli_strict_prices_exclude_unpriced_parts() {
+    let (payload_path, prices_path) = cli_inputs(json!({ "w1": 1000, "p1": 100 }));
+    let output = cli_command(&payload_path, &prices_path).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["best"]["total_price"], 1100);
+    assert_eq!(out["best"]["selections"]["weapon:w1/slot:1:Muzzle_point"], "p1");
+}
+
+#[test]
+fn cli_allow_missing_prices_keeps_unpriced_parts() {
+    let (payload_path, prices_path) = cli_inputs(json!({ "w1": 1000, "p1": 100 }));
+    let output = cli_command(&payload_path, &prices_path)
+        .arg("--allow-missing-prices")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["best"]["total_price"], 1000);
+    assert_eq!(out["best"]["selections"]["weapon:w1/slot:1:Muzzle_point"], "p2");
+}
+
+#[test]
+fn cli_rejects_a_missing_weapon_price() {
+    let (payload_path, prices_path) = cli_inputs(json!({ "p1": 100, "p2": 50 }));
+    let output = cli_command(&payload_path, &prices_path).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("has no price"));
 }

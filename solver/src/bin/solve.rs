@@ -26,6 +26,7 @@ fn run() -> Result<(), String> {
     let mut cost_cap: Option<i64> = None;
     let mut first_solution = false;
     let mut deadline_ms: Option<u64> = None;
+    let mut allow_missing_prices = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -66,6 +67,7 @@ fn run() -> Result<(), String> {
                 deadline_ms = Some(value.parse::<u64>().map_err(|e| format!("bad deadline {value}: {e}"))?);
             }
             "--bipod-deployed" => bipod = true,
+            "--allow-missing-prices" => allow_missing_prices = true,
             "--cost-cap" => {
                 i += 1;
                 cost_cap = args.get(i).and_then(|v| v.parse().ok());
@@ -98,6 +100,12 @@ fn run() -> Result<(), String> {
     }
 
     if let Some(request_path) = request_path {
+        if prices_path.is_some() {
+            return Err(
+                "--prices cannot be combined with --request; put prices in the request JSON"
+                    .to_string(),
+            );
+        }
         if payload_path.is_none() {
             let text = fs::read_to_string(&request_path).map_err(|e| e.to_string())?;
             let out = delta_weapon_solver::solve_request(
@@ -127,8 +135,12 @@ fn run() -> Result<(), String> {
     };
 
     let payload = fs::read(&payload_path).map_err(|e| e.to_string())?;
+    let payload_model: delta_weapon_solver::model::WeaponPayload =
+        serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
     let mut prices = std::collections::BTreeMap::new();
+    let mut strict_prices = false;
     if let Some(path) = prices_path {
+        strict_prices = true;
         let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         let map = value
@@ -139,6 +151,28 @@ fn run() -> Result<(), String> {
         for (k, v) in map {
             if let Some(n) = v.as_f64() {
                 prices.insert(k, n);
+            }
+        }
+    }
+    if strict_prices && !allow_missing_prices {
+        let resolved_weapon = weapon_id
+            .clone()
+            .or_else(|| payload_model.weapon_id.clone())
+            .or_else(|| payload_model.weapon_ids.first().cloned());
+        if let Some(weapon) = resolved_weapon.as_ref().and_then(|id| payload_model.parts.get(id)) {
+            if !prices.contains_key(weapon.price_id()) {
+                return Err(format!(
+                    "weapon {} has no price; add it to the price file or pass --allow-missing-prices",
+                    weapon.id
+                ));
+            }
+        }
+        for (id, part) in &payload_model.parts {
+            if part.is_virtual() {
+                continue;
+            }
+            if !prices.contains_key(part.price_id()) {
+                excluded.push(id.clone());
             }
         }
     }
@@ -194,6 +228,10 @@ fn print_help() {
            recoil-single-horizontal, recoil-single-vertical, recoil-fire-stability,\n\
            and panel attribute ids (10001, 10005, 10006, 10007, 10008).\n\
          --first stops at the first feasible build instead of proving optimality.\n\
-         --deadline-ms N stops after N milliseconds and returns the best build found."
+         --deadline-ms N stops after N milliseconds and returns the best build found.
+\
+         With --prices, parts missing a price are excluded by default.
+\
+         Use --allow-missing-prices to treat them as price 0."
     );
 }
