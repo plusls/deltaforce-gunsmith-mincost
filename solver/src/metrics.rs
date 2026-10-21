@@ -919,6 +919,11 @@ pub fn tuning_available(slot_name: &str, part: &Part) -> bool {
 }
 
 pub fn quantize(value: f64, min: f64, max: f64, step: f64) -> f64 {
+    let decimals = decimals(min).max(decimals(max)).max(decimals(step));
+    quantize_with_decimals(value, min, max, step, decimals)
+}
+
+fn quantize_with_decimals(value: f64, min: f64, max: f64, step: f64, decimals: u32) -> f64 {
     let clamped = value.clamp(min, max);
     if step <= 0.0 {
         return clamped;
@@ -926,7 +931,6 @@ pub fn quantize(value: f64, min: f64, max: f64, step: f64) -> f64 {
     let n = ((clamped - min) / step).round();
     let raw = min + n * step;
     let clamped = raw.clamp(min, max);
-    let decimals = decimals(min).max(decimals(max)).max(decimals(step));
     round_to(clamped, decimals)
 }
 
@@ -1109,9 +1113,57 @@ fn scale_ratio(base: Option<f64>, multiplier: f64) -> f64 {
     round2(current / b)
 }
 
+fn points_are_sorted(points: &[CurveKey]) -> bool {
+    points.windows(2).all(|pair| {
+        pair[0].time < pair[1].time
+            || (pair[0].time == pair[1].time && pair[0].key_index <= pair[1].key_index)
+    })
+}
+
+fn eval_sorted_curve_points(points: &[CurveKey], x: f64) -> Option<f64> {
+    let first = &points[0];
+    if x <= first.time {
+        return Some(first.value);
+    }
+    let last = &points[points.len() - 1];
+    if x >= last.time {
+        return Some(last.value);
+    }
+    for i in 0..points.len() - 1 {
+        let a = &points[i];
+        let b = &points[i + 1];
+        if x > b.time {
+            continue;
+        }
+        if b.time == a.time {
+            return Some(b.value);
+        }
+        let t = (x - a.time) / (b.time - a.time);
+        return match a.interp_mode.as_str() {
+            "RCIM_Constant" => Some(a.value),
+            "RCIM_Cubic" => {
+                let dt = b.time - a.time;
+                let t2 = t * t;
+                let t3 = t2 * t;
+                Some(
+                    (2.0 * t3 - 3.0 * t2 + 1.0) * a.value
+                        + (t3 - 2.0 * t2 + t) * dt * a.leave_tangent
+                        + (-2.0 * t3 + 3.0 * t2) * b.value
+                        + (t3 - t2) * dt * b.arrive_tangent,
+                )
+            }
+            _ => Some(a.value + (b.value - a.value) * t),
+        };
+    }
+    Some(last.value)
+}
+
 pub fn eval_curve_points(points: &[CurveKey], x: f64) -> Option<f64> {
     if points.is_empty() || !x.is_finite() {
         return None;
+    }
+    if points_are_sorted(points) {
+        return eval_sorted_curve_points(points, x);
     }
     let mut keys: Vec<&CurveKey> = points.iter().collect();
     keys.sort_by(|a, b| {
@@ -1269,9 +1321,14 @@ pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
             }
         }
     }
+    let decimals = decimals(tune.min_value)
+        .max(decimals(tune.max_value))
+        .max(decimals(tune.step_value));
     let mut out: Vec<f64> = values
         .into_iter()
-        .map(|v| quantize(v, tune.min_value, tune.max_value, tune.step_value))
+        .map(|v| {
+            quantize_with_decimals(v, tune.min_value, tune.max_value, tune.step_value, decimals)
+        })
         .collect();
     out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
@@ -1317,6 +1374,36 @@ mod tests {
             leave_tangent: 0.0,
             arrive_tangent: 0.0,
             key_index: 0,
+        }
+    }
+
+    #[test]
+    fn curve_points_fast_path_matches_sorted_fallback() {
+        let sorted = vec![key(0.0, 1.0), key(10.0, 0.5), key(20.0, 0.75)];
+        let mut unsorted = sorted.clone();
+        unsorted.swap(0, 2);
+        assert!(points_are_sorted(&sorted));
+        assert!(!points_are_sorted(&unsorted));
+        for x in [-1.0, 0.0, 3.5, 10.0, 17.25, 20.0, 40.0] {
+            let fast = eval_sorted_curve_points(&sorted, x);
+            assert_eq!(fast, eval_curve_points(&sorted, x));
+            assert_eq!(fast, eval_curve_points(&unsorted, x));
+        }
+    }
+
+    #[test]
+    fn quantize_with_hoisted_decimals_matches_quantize() {
+        for (min, max, step, value) in [
+            (0.0, 10.0, 1.0, 2.6),
+            (-10.0, 10.0, 0.5, 2.4),
+            (0.25, 9.75, 0.25, 3.3),
+            (0.0, 100.0, 0.0, 42.0),
+        ] {
+            let d = decimals(min).max(decimals(max)).max(decimals(step));
+            assert_eq!(
+                quantize(value, min, max, step),
+                quantize_with_decimals(value, min, max, step, d)
+            );
         }
     }
 

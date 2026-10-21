@@ -2364,11 +2364,11 @@ fn exact_part_metric(
         let mut max_k = f64::NEG_INFINITY;
         let mut max_open = f64::NEG_INFINITY;
         for v in tune_offer_values(tune) {
-            let (h, vv, k) = tune_offer(tune, v);
-            max_h = max_h.max(h);
-            max_v = max_v.max(vv);
-            max_k = max_k.max(k);
-            max_open = max_open.max(tune_channels(tune, v).open);
+            let channels = tune_channels(tune, v);
+            max_h = max_h.max(channels.h);
+            max_v = max_v.max(channels.v);
+            max_k = max_k.max(channels.k);
+            max_open = max_open.max(channels.open);
         }
         if max_h.is_finite() {
             m.eh += max_h;
