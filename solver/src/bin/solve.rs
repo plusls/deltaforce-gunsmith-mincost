@@ -25,6 +25,7 @@ fn run() -> Result<(), String> {
     let mut excluded: Vec<String> = Vec::new();
     let mut cost_cap: Option<i64> = None;
     let mut first_solution = false;
+    let mut deadline_ms: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -59,6 +60,11 @@ fn run() -> Result<(), String> {
             }
             "--laser-off" => laser = false,
             "--first" => first_solution = true,
+            "--deadline-ms" => {
+                i += 1;
+                let value = args.get(i).ok_or("--deadline-ms needs a value")?;
+                deadline_ms = Some(value.parse::<u64>().map_err(|e| format!("bad deadline {value}: {e}"))?);
+            }
             "--bipod-deployed" => bipod = true,
             "--cost-cap" => {
                 i += 1;
@@ -148,6 +154,7 @@ fn run() -> Result<(), String> {
         "maxLeaves": max_leaves,
         "costCap": cost_cap,
         "firstSolution": first_solution,
+        "deadlineMs": deadline_ms,
     });
     let request = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     let out = solve_slices(&payload, &request)?;
@@ -186,6 +193,7 @@ fn print_help() {
          Supported metrics: recoil-continuous-horizontal, recoil-continuous-vertical,\n\
            recoil-single-horizontal, recoil-single-vertical, recoil-fire-stability,\n\
            and panel attribute ids (10001, 10005, 10006, 10007, 10008).\n\
-         --first stops at the first feasible build instead of proving optimality."
+         --first stops at the first feasible build instead of proving optimality.\n\
+         --deadline-ms N stops after N milliseconds and returns the best build found."
     );
 }

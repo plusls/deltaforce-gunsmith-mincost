@@ -15,7 +15,9 @@ export async function loadSolver(source) {
   } else {
     throw new TypeError("loadSolver expects a URL, Response, ArrayBuffer, or WebAssembly.Module");
   }
-  const instance = await WebAssembly.instantiate(module, {});
+  const instance = await WebAssembly.instantiate(module, {
+    env: { dws_now_ms: () => Date.now() },
+  });
   return createSolver(instance.exports);
 }
 

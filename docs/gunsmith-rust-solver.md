@@ -167,10 +167,11 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 
 ### 5.6 精确性边界
 
-- 无约束或只有 max 约束, 且未触发预算/前沿截断: 在 DP 支配关系成立的假设下是全局最优.
+- 无约束或只有 max 约束, 且未触发预算/前沿/时间截断: 在 DP 支配关系成立的假设下是全局最优.
 - 有 min 约束: `dp_ok=false`, 完整枚举, 可能较慢.
 - DP 前沿超过 200,000: 结果标记 `truncated`, `optimal=false`.
 - 节点/叶子预算耗尽: 同样标记 `truncated`.
+- `deadlineMs` 到期: 返回当前最好解, `truncated=true`, `optimal=false`. 时钟每 64 次预算检查读一次, 实际超时可能比设定值晚几十毫秒.
 - `forbidBindings` 不参与优化. 站点自身也只在生成改枪码时用它剔除需要折叠状态的配件, 优化器不检查.
 
 ## 6. 代码结构
@@ -208,7 +209,8 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
   "maxLeaves": 2000000,
   "maxResults": 5,
   "costCap": null,
-  "firstSolution": false
+  "firstSolution": false,
+  "deadlineMs": 5000
 }
 ```
 
@@ -230,6 +232,7 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
     "tuning": { "...": 50.0 },
     "constraints": [{ "id": "...", "value": 0.55, "max": 0.6, "ok": true }],
     "installed_parts": [{ "slot_path": "...", "part_id": "...", "price": 3541 }],
+    "installed_part_keys": ["slotPath\u0000partId"],
     "selections": { "path": "partId" }
   },
   "alternatives": [],
@@ -250,6 +253,7 @@ cargo build --release
   --constraint recoil-continuous-vertical:0.6 \
   --constraint recoil-fire-stability:0.8 \
   --first \
+  --deadline-ms 5000 \
   --max-nodes 5000000 \
   --max-leaves 2000000
 ```
@@ -282,6 +286,14 @@ dws_solve(payload_ptr, payload_len, request_ptr, request_len) -> *mut u8
 ```
 
 `dws_solve` 返回 4 字节小端长度 + JSON 字节. 调用方读完后用 `dws_dealloc(ptr, len + 4)` 释放.
+
+WASM 通过 `env.dws_now_ms` 导入单调毫秒时钟, 用于 `deadlineMs`. 实例化时必须提供:
+
+```js
+WebAssembly.instantiate(module, {
+  env: { dws_now_ms: () => Date.now() },
+});
+```
 
 浏览器/Node 封装:
 

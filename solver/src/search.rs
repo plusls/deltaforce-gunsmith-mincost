@@ -31,6 +31,7 @@ pub struct SolveOptions {
     pub max_results: usize,
     pub fixed_cost_cap: Option<i64>,
     pub first_solution: bool,
+    pub deadline_ms: Option<u64>,
 }
 
 impl Default for SolveOptions {
@@ -48,6 +49,7 @@ impl Default for SolveOptions {
             max_results: 10,
             fixed_cost_cap: None,
             first_solution: false,
+            deadline_ms: None,
         }
     }
 }
@@ -79,6 +81,7 @@ pub struct Solution {
     pub tuning: FxHashMap<String, f64>,
     pub constraints: Vec<ConstraintResult>,
     pub installed_parts: Vec<InstalledPart>,
+    pub installed_part_keys: Vec<String>,
     pub selections: FxHashMap<String, Option<String>>,
 }
 
@@ -135,6 +138,8 @@ pub struct Solver<'a> {
     seed: bool,
     cost_cap: i64,
     run_found: bool,
+    deadline_at: Option<u64>,
+    clock_ticks: u32,
     best: Option<Solution>,
     alternatives: Vec<Solution>,
     nodes: u64,
@@ -266,6 +271,8 @@ impl<'a> Solver<'a> {
             seed: false,
             cost_cap: i64::MAX,
             run_found: false,
+            deadline_at: None,
+            clock_ticks: 0,
             best: None,
             alternatives: Vec::new(),
             nodes: 0,
@@ -307,6 +314,11 @@ impl<'a> Solver<'a> {
             decided.insert(path.clone());
         }
 
+        self.deadline_at = self
+            .options
+            .deadline_ms
+            .filter(|ms| *ms > 0)
+            .map(|ms| now_ms().saturating_add(ms));
         let mut truncated = false;
         let mut total_nodes = 0u64;
         let mut total_leaves = 0u64;
@@ -353,7 +365,7 @@ impl<'a> Solver<'a> {
                 }
                 self.cost_cap = cap;
             }
-            if self.best.is_some() || (fixed_cap.is_some() && seed_found && !truncated) {
+            if (self.best.is_some() || (fixed_cap.is_some() && seed_found)) && !self.truncated {
                 reset(&mut self, &mut selections, &mut decided);
                 self.dfs(&mut selections, &mut decided, &mut deferred);
                 total_nodes += self.nodes;
@@ -391,6 +403,14 @@ impl<'a> Solver<'a> {
             self.truncated = true;
             self.stop = true;
             return true;
+        }
+        if let Some(deadline) = self.deadline_at {
+            self.clock_ticks = self.clock_ticks.wrapping_add(1);
+            if self.clock_ticks & 63 == 0 && now_ms() >= deadline {
+                self.truncated = true;
+                self.stop = true;
+                return true;
+            }
         }
         false
     }
@@ -1009,7 +1029,7 @@ impl<'a> Solver<'a> {
             return;
         }
         self.leaves += 1;
-        if self.leaves.is_multiple_of(4096) && self.budget_exceeded() {
+        if self.leaves.is_multiple_of(256) && self.budget_exceeded() {
             return;
         }
         let assembly = self.assembler.resolve(selections);
@@ -1068,6 +1088,11 @@ impl<'a> Solver<'a> {
             .map(|(k, v)| (k.clone(), *v))
             .collect::<FxHashMap<_, _>>();
         let installed_parts = self.installed_list(&assembly);
+        let mut installed_part_keys: Vec<String> = installed_parts
+            .iter()
+            .map(|p| format!("{}\0{}", p.slot_path, p.part_id))
+            .collect();
+        installed_part_keys.sort();
         let solution = Solution {
             attachment_price,
             total_price,
@@ -1100,6 +1125,7 @@ impl<'a> Solver<'a> {
             tuning,
             constraints: constraint_results,
             installed_parts,
+            installed_part_keys,
             selections: selections.clone(),
         };
         self.best_cost = total_price;
@@ -2383,5 +2409,24 @@ mod tests {
         a.add_a(&b);
         assert!((a.max_d - 7.0).abs() < 1e-9);
         assert!((a.min_c_h - 0.72).abs() < 1e-9);
+    }
+}
+
+
+fn now_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        #[link(wasm_import_module = "env")]
+        extern "C" {
+            fn dws_now_ms() -> f64;
+        }
+        unsafe { dws_now_ms() as u64 }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_millis() as u64
     }
 }

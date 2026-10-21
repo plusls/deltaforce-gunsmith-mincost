@@ -41,6 +41,8 @@ pub struct SolveRequest {
     pub cost_cap: Option<i64>,
     #[serde(rename = "firstSolution", default)]
     pub first_solution: bool,
+    #[serde(rename = "deadlineMs", default)]
+    pub deadline_ms: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -86,6 +88,7 @@ pub fn solve_request(req: SolveRequest) -> Result<SolveResult, String> {
         max_results: req.max_results,
         fixed_cost_cap: req.cost_cap,
         first_solution: req.first_solution,
+        deadline_ms: req.deadline_ms,
     };
     let payload = &req.payload;
     let solver = Solver::new(payload, &weapon_id, &prices, &options);
@@ -125,6 +128,8 @@ pub fn solve_slices(payload_json: &[u8], request_json: &[u8]) -> Result<Vec<u8>,
         cost_cap: Option<i64>,
         #[serde(rename = "firstSolution", default)]
         first_solution: bool,
+        #[serde(rename = "deadlineMs", default)]
+        deadline_ms: Option<u64>,
     }
     let wrap: Wrapper =
         serde_json::from_slice(request_json).map_err(|e| format!("request: {e}"))?;
@@ -144,6 +149,7 @@ pub fn solve_slices(payload_json: &[u8], request_json: &[u8]) -> Result<Vec<u8>,
         max_results: wrap.max_results,
         cost_cap: wrap.cost_cap,
         first_solution: wrap.first_solution,
+        deadline_ms: wrap.deadline_ms,
     };
     let result = solve_request(req)?;
     serde_json::to_vec(&result).map_err(|e| e.to_string())

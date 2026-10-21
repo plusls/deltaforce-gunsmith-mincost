@@ -45,6 +45,7 @@ https://www.bilibili.com/video/BV1x26KYTEwk
 - `docs/gunsmith-numerical-model.md`: 站点数值模型, 后坐力/精校/曲线公式
 - `docs/gunsmith-smart-build.md`: 站点"生成智能配件方案"的 worker 协议与 beam search 分析
 - `docs/gunsmith-rust-solver.md`: 约束下最低总价求解器 (Rust + WASM), 算法与实测结果
+- `docs/gunsmith-userscript.md`: 油猴脚本的数据来源, 接口约定与站点集成设计
 
 ```bash
 cargo build --release
