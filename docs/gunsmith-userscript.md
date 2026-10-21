@@ -1,8 +1,31 @@
 # Gunsmith 油猴脚本接口设计
 
-目标: 在 moligod 改枪页面上加一个"最低开销"按钮, 用本仓库的 Rust/WASM 求解器替换或旁路站点的 beam search.
+目标: 在 moligod 改枪页面上加一个"最低开销"按钮, 用本仓库的 Rust/WASM 求解器旁路站点的 beam search.
 
-本文只定义接口和数据流, 不包含具体脚本实现.
+实现位置:
+
+```text
+solver/js/site-adapter.mjs      站点请求 -> 求解请求, 求解结果 -> 站点结果
+solver/js/engine.mjs            WASM 引擎封装
+userscript/src/main.mjs         Worker hook, 按钮, 设置
+userscript/src/worker-main.mjs  独立 worker 内的求解循环
+userscript/build.mjs            打包: 内联 wasm base64 和 worker 源码
+userscript/test/build.test.mjs  打包与 worker 协议测试
+```
+
+构建:
+
+```bash
+cargo build --release --target wasm32-unknown-unknown
+node userscript/build.mjs
+# 产物: userscript/dist/gunsmith-mincost.user.js
+```
+
+测试:
+
+```bash
+node --test solver/js/*.test.mjs userscript/test/*.test.mjs
+```
 
 ## 1. 原则
 
@@ -66,8 +89,11 @@ moligod 页面
 ```text
 solver/src/*                  Rust 核心, 只认 JSON 请求
 solver/js/solver.mjs          WASM 加载与 C ABI 封装
-solver/js/site-adapter.mjs    上下文转换, 结果转换 (待实现)
-userscript/gunsmith.user.js   入口, Worker hook, 按钮 (待实现)
+solver/js/site-adapter.mjs    上下文转换, 约束映射, 结果转换
+solver/js/engine.mjs          创建引擎, 统一 solve 入口
+userscript/src/main.mjs       入口, Worker hook, 按钮, 设置持久化
+userscript/src/worker-main.mjs  worker 内初始化与求解
+userscript/build.mjs          生成单文件 userscript
 ```
 
 ## 4. 接口
@@ -116,9 +142,9 @@ type MinCostOptions = {
   constraints: SolverConstraint[];
   priceSource: "current" | "system";
   lockMode: "locked" | "current";
+  mode: "full" | "fast";              // 默认 full
 
   costCap?: number | null;
-  fast?: boolean;
   maxResults?: number;
   maxNodes?: number;
   maxLeaves?: number;
@@ -135,8 +161,8 @@ type MinCostOptions = {
 | `constraints` | 硬约束. 只有表中列出的指标支持精确求解 |
 | `priceSource` | `current` = 市场价 (最小开销), `system` = 系统价 (战备值) |
 | `lockMode` | `locked` 只固定用户锁定槽位, 与站点行为一致; `current` 固定当前整套配装, 只用于对比 |
+| `mode` | `full` 完整搜索并证明最优; `fast` 只找第一个可行解, 对应求解器 `firstSolution` |
 | `costCap` | 总价上限, 对应站点预算 |
-| `fast` | 只找第一个可行解, 不证明最优 |
 | `deadlineMs` | 软截止时间, 超时返回当前最好解并标记 `truncated` |
 | `missingPricePolicy` | 缺价时拒绝该配件, 或用系统价代替 |
 
@@ -164,22 +190,25 @@ type MinCostResult = {
 };
 
 interface MinCostEngine {
-  solve(context: GunsmithContext, options: MinCostOptions): Promise<MinCostResult>;
+  solve(context: GunsmithContext, options: MinCostOptions): MinCostResult;
+  solveSiteRequest(
+    context: GunsmithContext,
+    siteRequest: unknown,
+    overrides?: MinCostOptions,
+  ): MinCostResult;
 }
 ```
 
-引擎实现建议:
+创建引擎:
 
 ```js
 const engine = await createMinCostEngine({
-  wasm: wasmBytes,          // ArrayBuffer, base64, URL 或 WebAssembly.Module
-  worker: true,             // 尽量放进独立 worker
+  wasm: wasmBytes,       // Uint8Array / ArrayBuffer / WebAssembly.Module
+  wasmBase64: base64,    // 或直接传 base64 字符串
 });
-
-const result = await engine.solve(context, options);
 ```
 
-`solve` 必须是纯函数: 不读取全局状态, 不修改传入对象. 这样 CLI, Node 测试和油猴脚本共用同一套接口.
+`solve` 是同步纯函数: WASM 初始化后不读取全局状态, 不修改传入对象. 油猴脚本把它放进独立 worker, 所以页面主线程不阻塞. CLI, Node 测试和油猴脚本共用同一套接口.
 
 ### 4.4 上下文 -> 求解请求
 
@@ -234,12 +263,13 @@ function toSolveRequest(ctx, options) {
     maxNodes: options.maxNodes ?? 2_000_000,
     maxLeaves: options.maxLeaves ?? 1_000_000,
     costCap: options.costCap ?? null,
-    firstSolution: options.fast ?? false,
+    firstSolution: options.mode === "fast",
+    deadlineMs: options.deadlineMs ?? 5_000,
   };
 }
 ```
 
-缺价处理是必须的. Rust 现在把缺失价格当作 0, 对"最小开销"是危险的. adapter 必须在进入求解器前就排除缺价件, 或显式用系统价替代.
+缺价处理是必须的. Rust 核心把缺失价格当作 0, 对"最小开销"是危险的. adapter 在进入求解器前就排除缺价件, 或显式用系统价替代. CLI 的 `--prices` 也采用严格模式: 官方配件缺价直接排除, 除非传 `--allow-missing-prices`.
 
 ### 4.5 求解请求 -> 站点结果
 
@@ -421,7 +451,9 @@ maxLeaves   1,000,000
 deadlineMs  5,000
 ```
 
-Rust 目前没有 `deadlineMs`, 需要补一个按墙钟检查的入口. 没有它, 用户可能等几分钟.
+Rust 已经支持 `deadlineMs`: WASM 侧通过 `env.dws_now_ms` 读取墙钟, 每 64 次预算检查和每 256 个叶节点检查一次. 超时返回当前最好解并置 `truncated=true`; 若一个可行解都没有则返回 `infeasible`.
+
+脚本默认: 完整模式 5000 ms, 快速模式 2000 ms. 页面按钮可以切换.
 
 返回给用户的状态:
 
@@ -445,19 +477,43 @@ Rust 目前没有 `deadlineMs`, 需要补一个按墙钟检查的入口. 没有�
 
 站点 chunk 更新后, 类名和 worker URL 可能变化. 所有选择器都要有失败分支, 不能影响页面原有功能.
 
-## 11. 实施顺序
+## 11. 实施状态与验证
 
-1. Rust 输出补齐: 完整 5 个面板属性, `installedPartKeys` (或由 adapter 从 selections 生成), `deadlineMs`.
-2. `solver/js/site-adapter.mjs`: 上下文转换, 约束映射, 结果转换. 用固定 JSON 做 Node 测试.
-3. `solver/js/engine.mjs`: WASM 加载, worker 封装, `MinCostEngine` 接口.
-4. `userscript/gunsmith.user.js`: Worker hook, 上下文缓存, 按钮, 拦截与回包.
-5. 用 browser-harness 在真实页面验证:
-   - 抓一次站点请求, 确认 payload 和价格完整
-   - 点击脚本按钮, 确认站点卡片渲染
-   - 点"应用方案", 确认 selections 和精校生效
-6. 打包: base64 wasm, userscript 头, 版本号.
+已完成的阶段:
 
-## 12. 风险
+1. Rust 输出补齐: 5 个面板属性, `installedPartKeys`, `deadlineMs`.
+2. `solver/js/site-adapter.mjs`: 上下文转换, 约束映射, 结果转换. 19 个 Node 测试.
+3. `solver/js/engine.mjs`: WASM 加载, 统一 `solve` / `solveSiteRequest`. 6 个 Node 测试.
+4. `userscript/src/*`: Worker hook, payload 缓存, 独立 worker 求解, 按钮和设置. 3 个构建/协议测试.
+5. 真实页面验证 (RM277, 数据版本 `8629d01bf694f212aad051c5`).
+
+验证结果:
+
+```text
+约束: vertical <= 0.46, horizontal <= 0.58, stability <= 0.77
+锁定: 瞄具槽, 枪管槽
+laserEnabled: false
+完整模式: optimal, 总价 307614, 配件 201749, 5587 节点 / 9288 叶
+          浏览器 2347 ms (含首次 WASM 编译), Node 1375 ms
+快速模式: feasible, 0.26 s
+应用方案: 站点精校生效, 属性变为 vertical 0.34, horizontal 0.57, stability 0.77
+```
+
+用同样的 context / options 在 Node 里重跑, 节点数, 叶节点数, selections 和总价与浏览器完全一致, 说明 adapter 映射没有偏差.
+
+站点自带的"生成智能配件方案"在同一组约束下返回无解, 说明 beam search 的 128 状态 / 24 轮限制确实会漏解.
+
+安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及模式, 价格口径, 缺价策略三个下拉框.
+
+## 12. 已知限制
+
+- 站点 15 个细分指标和战备下限 (`preparednessEnabled`) 暂不支持, 会明确报错而不是静默忽略.
+- `min` 约束和无解约束可能接近截止时间. 完整模式会截断并提示, 快速模式只能给出可行解.
+- 站点更新导致 worker URL, payload 字段或 class 名变化时脚本会失效. hook 只匹配 `/optimizer\.worker/`, 不影响其他 worker.
+- 浏览器 CSP 禁止 `blob:` worker 时自动退回主线程, 大枪械会卡住页面约 1 到 2 秒.
+- 内置 wasm 使脚本约 1.03 MiB, gzip 后约 300 KB.
+
+## 13. 风险
 
 - 站点更新导致 worker URL 或内部字段变化.
 - `data` 缓存语义: 拦截请求后原 worker 缺数据.
