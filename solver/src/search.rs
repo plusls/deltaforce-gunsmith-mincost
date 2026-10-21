@@ -185,6 +185,7 @@ pub struct Solver<'a> {
     leaves: u64,
     truncated: bool,
     heuristic_incomplete: bool,
+    seed_beam_tried: bool,
     stop: bool,
     best_cost: i64,
     panel_base: [f64; 5],
@@ -806,6 +807,7 @@ impl<'a> Solver<'a> {
             leaves: 0,
             truncated: false,
             heuristic_incomplete: false,
+            seed_beam_tried: false,
             stop: false,
             best_cost: i64::MAX,
             panel_base,
@@ -835,6 +837,7 @@ impl<'a> Solver<'a> {
             solver.stop = false;
             solver.truncated = false;
             solver.heuristic_incomplete = false;
+            solver.seed_beam_tried = false;
             solver.nodes = 0;
             solver.leaves = 0;
             solver.run_found = false;
@@ -1585,6 +1588,23 @@ impl<'a> Solver<'a> {
         }
         let suffix_bound = dp_suffix_bounds(&options_per_slot);
 
+        if self.seed
+            && self.options.first_solution
+            && self.best_cost == i64::MAX
+            && !self.seed_beam_tried
+        {
+            self.seed_beam_tried = true;
+            if self.seed_beam_incumbent(
+                &base,
+                base_cost,
+                &options_per_slot,
+                &slot_paths,
+                &base_trial,
+            ) {
+                return;
+            }
+        }
+
         let mut states: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base,
@@ -1657,25 +1677,8 @@ impl<'a> Solver<'a> {
         } else {
             states.sort_by_key(|s| s.cost);
         }
-        let mut h_max: Option<f64> = None;
-        let mut v_max: Option<f64> = None;
-        let mut k_max: Option<f64> = None;
-        for c in &self.options.constraints {
-            let Some(max) = c.max else { continue };
-            let slot = match c.id.as_str() {
-                "recoil-continuous-horizontal" | "recoil-single-horizontal" => &mut h_max,
-                "recoil-continuous-vertical" | "recoil-single-vertical" => &mut v_max,
-                "recoil-fire-stability" => &mut k_max,
-                _ => continue,
-            };
-            *slot = Some(slot.map_or(max, |cur| cur.min(max)));
-        }
-        let aim_max = self
-            .options
-            .constraints
-            .iter()
-            .find(|c| c.id == "handling-aim-time" && c.min.is_none())
-            .and_then(|c| c.max);
+        let (h_max, v_max, k_max) = recoil_maxima(&self.options.constraints);
+        let aim_max = aim_time_max(&self.options.constraints);
         for st in states {
             if self.budget_exceeded() {
                 return;
@@ -1726,6 +1729,157 @@ impl<'a> Solver<'a> {
                 return;
             }
         }
+    }
+
+    /// Cheap constraint-directed incumbent for first-solution mode.
+    ///
+    /// A narrow beam keeps only the states with the best optimistic bound
+    /// slack at every level, then evaluates the cheapest optimistically
+    /// feasible members of the final beam. The beam never prunes the exact
+    /// search: it only calls `leaf`, which validates every constraint, and
+    /// the regular Pareto DP runs whenever no candidate is feasible.
+    fn seed_beam_incumbent(
+        &mut self,
+        base: &ExactPart,
+        base_cost: i64,
+        options_per_slot: &[Vec<DpOption>],
+        slot_paths: &[String],
+        base_trial: &FxHashMap<String, Option<String>>,
+    ) -> bool {
+        const BEAM_WIDTH: usize = 1024;
+        const EVAL_LIMIT: usize = 16;
+        if options_per_slot.is_empty() {
+            return false;
+        }
+        let (h_max, v_max, k_max) = recoil_maxima(&self.options.constraints);
+        let aim_max = aim_time_max(&self.options.constraints);
+        if h_max.is_none() && v_max.is_none() && k_max.is_none() && aim_max.is_none() {
+            return false;
+        }
+        let mut beam: Vec<DpState> = vec![DpState {
+            cost: base_cost,
+            metric: base.clone(),
+            choices: Vec::new(),
+        }];
+        for opts in options_per_slot {
+            let mut scored: Vec<(f64, f64, i64, DpState)> =
+                Vec::with_capacity(beam.len().saturating_mul(opts.len()).min(BEAM_WIDTH * 8));
+            for st in &beam {
+                for opt in opts {
+                    let cost = st.cost + opt.cost;
+                    let total = cost + self.weapon_price;
+                    if self.cost_cap < i64::MAX && total > self.cost_cap {
+                        continue;
+                    }
+                    let mut metric = st.metric.clone();
+                    metric.add(&opt.metric);
+                    let mut choices = st.choices.clone();
+                    choices.push(opt.choice.clone());
+                    let margin = seed_candidate_margin(
+                        &metric,
+                        h_max,
+                        v_max,
+                        k_max,
+                        aim_max,
+                        self.control_curve.as_ref(),
+                        self.gunkick_curve.as_ref(),
+                        self.gunkick0,
+                        &self.aim_scale,
+                        &self.evaluator,
+                    );
+                    let rank = self.seed_metric_score(&metric);
+                    scored.push((margin, rank, cost, DpState { cost, metric, choices }));
+                }
+            }
+            scored.sort_by(|a, b| match (a.0 >= 0.0, b.0 >= 0.0) {
+                (true, true) => a
+                    .2
+                    .cmp(&b.2)
+                    .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal))
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)),
+                (false, false) => b
+                    .0
+                    .partial_cmp(&a.0)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+                    .then_with(|| a.2.cmp(&b.2)),
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+            });
+            scored.truncate(BEAM_WIDTH);
+            beam = scored.into_iter().map(|(_, _, _, st)| st).collect();
+            if beam.is_empty() {
+                return false;
+            }
+        }
+        let margins: Vec<f64> = beam
+            .iter()
+            .map(|st| {
+                seed_candidate_margin(
+                    &st.metric,
+                    h_max,
+                    v_max,
+                    k_max,
+                    aim_max,
+                    self.control_curve.as_ref(),
+                    self.gunkick_curve.as_ref(),
+                    self.gunkick0,
+                    &self.aim_scale,
+                    &self.evaluator,
+                )
+            })
+            .collect();
+        for idx in incumbent_eval_order(&beam, &margins)
+            .into_iter()
+            .take(EVAL_LIMIT)
+        {
+            if self.stop {
+                return self.best.is_some();
+            }
+            let st = &beam[idx];
+            if optimistic_recoil_exceeds(
+                &st.metric,
+                h_max,
+                v_max,
+                k_max,
+                self.control_curve.as_ref(),
+                self.gunkick_curve.as_ref(),
+                self.gunkick0,
+                &self.aim_scale,
+            ) {
+                continue;
+            }
+            if let Some(max) = aim_max {
+                if let Some(best) = self.evaluator.aim_time(
+                    st.metric.hs,
+                    st.metric.adsm,
+                    st.metric.eopen.max(0.0),
+                ) {
+                    if best > max + 1e-9 {
+                        continue;
+                    }
+                }
+            }
+            let mut trial = base_trial.clone();
+            for (path, choice) in slot_paths.iter().zip(st.choices.iter()) {
+                match choice {
+                    SlotChoice::Unset => {
+                        trial.remove(path);
+                    }
+                    SlotChoice::Remove => {
+                        trial.insert(path.clone(), None);
+                    }
+                    SlotChoice::Part(id) => {
+                        trial.insert(path.clone(), Some(id.clone()));
+                    }
+                }
+            }
+            self.leaf(&trial);
+            if self.stop || self.best.is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     fn dp_part_price(&self, part: &Part) -> i64 {
@@ -3956,6 +4110,120 @@ fn aim_scale_floor(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> AimS
 /// The raw recoil is additionally scaled by the aim profile override, so the
 /// bound uses the smallest multiplier any candidate part could apply.
 #[allow(clippy::too_many_arguments)]
+fn recoil_maxima(constraints: &[Constraint]) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let mut h_max: Option<f64> = None;
+    let mut v_max: Option<f64> = None;
+    let mut k_max: Option<f64> = None;
+    for c in constraints {
+        let Some(max) = c.max else { continue };
+        let slot = match c.id.as_str() {
+            "recoil-continuous-horizontal" | "recoil-single-horizontal" => &mut h_max,
+            "recoil-continuous-vertical" | "recoil-single-vertical" => &mut v_max,
+            "recoil-fire-stability" => &mut k_max,
+            _ => continue,
+        };
+        *slot = Some(slot.map_or(max, |cur| cur.min(max)));
+    }
+    (h_max, v_max, k_max)
+}
+
+fn aim_time_max(constraints: &[Constraint]) -> Option<f64> {
+    constraints
+        .iter()
+        .find(|c| c.id == "handling-aim-time" && c.min.is_none())
+        .and_then(|c| c.max)
+}
+
+fn relative_margin(max: f64, value: f64) -> f64 {
+    (max - value) / max.abs().max(1e-6)
+}
+
+/// Slack of the best possible completion of `metric` against every recoil
+/// maximum, using the per-channel tuning maxima. Positive values are
+/// optimistically feasible. `INFINITY` means no recoil maximum applies.
+fn optimistic_recoil_margin(
+    metric: &ExactPart,
+    h_max: Option<f64>,
+    v_max: Option<f64>,
+    k_max: Option<f64>,
+    control: Option<&Curve>,
+    gunkick: Option<&Curve>,
+    gunkick0: f64,
+    aim: &AimScaleFloor,
+) -> f64 {
+    let mut margin = f64::INFINITY;
+    let cr = control.and_then(|c| c.eval(metric.d)).unwrap_or(1.0);
+    if let Some(max) = h_max {
+        if aim.enabled {
+            let f_h = cr * (1.0 + metric.ah - metric.eh / 100.0) * metric.ch;
+            let lower = f_h * aim.h_factor - aim.h_margin;
+            margin = margin.min(relative_margin(max, lower));
+        }
+    }
+    if let Some(max) = v_max {
+        if aim.enabled {
+            let f_v = cr * (1.0 + metric.av - metric.ev / 100.0) * metric.cv;
+            let lower = f_v * aim.v_factor - aim.v_margin;
+            margin = margin.min(relative_margin(max, lower));
+        }
+    }
+    if let Some(max) = k_max {
+        if let Some(gk) = gunkick.and_then(|c| c.eval(metric.d)) {
+            if gunkick0 != 0.0 {
+                let stability = gk / gunkick0 * (1.0 - metric.ek / 100.0) * metric.ck;
+                let rounded0 = ((gunkick0 + f64::EPSILON) * 100.0).round() / 100.0;
+                let lower = if rounded0 == 0.0 {
+                    stability
+                } else {
+                    stability - (0.005 / rounded0.abs() + 0.005)
+                };
+                margin = margin.min(relative_margin(max, lower));
+            }
+        }
+    }
+    margin
+}
+
+fn seed_candidate_margin(
+    metric: &ExactPart,
+    h_max: Option<f64>,
+    v_max: Option<f64>,
+    k_max: Option<f64>,
+    aim_max: Option<f64>,
+    control: Option<&Curve>,
+    gunkick: Option<&Curve>,
+    gunkick0: f64,
+    aim: &AimScaleFloor,
+    evaluator: &Evaluator,
+) -> f64 {
+    let mut margin =
+        optimistic_recoil_margin(metric, h_max, v_max, k_max, control, gunkick, gunkick0, aim);
+    if let Some(max) = aim_max {
+        if let Some(value) = evaluator.aim_time(metric.hs, metric.adsm, metric.eopen.max(0.0)) {
+            margin = margin.min(relative_margin(max, value));
+        }
+    }
+    if margin.is_finite() {
+        margin
+    } else {
+        0.0
+    }
+}
+
+/// Orders incumbent candidates: optimistically feasible states first (they are
+/// the ones whose tuning maxima can still meet every bound), cheapest first.
+fn incumbent_eval_order(beam: &[DpState], margins: &[f64]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..beam.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = margins.get(a).copied().unwrap_or(f64::NEG_INFINITY) >= 0.0;
+        let fb = margins.get(b).copied().unwrap_or(f64::NEG_INFINITY) >= 0.0;
+        fb.cmp(&fa)
+            .then_with(|| beam[a].cost.cmp(&beam[b].cost))
+            .then_with(|| a.cmp(&b))
+    });
+    order
+}
+
 fn optimistic_recoil_exceeds(
     metric: &ExactPart,
     h_max: Option<f64>,
@@ -5090,6 +5358,72 @@ mod tests {
             reach_targets(&increments, [Some(2), None, None, None], 1),
             ReachResult::Budget
         );
+    }
+
+    #[test]
+    fn recoil_maxima_keep_the_tightest_bound_per_axis() {
+        let constraints = vec![
+            Constraint::new("recoil-continuous-horizontal", None, Some(0.8)),
+            Constraint::new("recoil-single-horizontal", None, Some(0.6)),
+            Constraint::new("recoil-continuous-vertical", None, Some(0.4)),
+            Constraint::new("recoil-fire-stability", None, Some(0.9)),
+            Constraint::new("handling-aim-time", None, Some(400.0)),
+            Constraint::new("recoil-continuous-vertical", Some(0.1), None),
+        ];
+        let (h, v, k) = recoil_maxima(&constraints);
+        assert_eq!(h, Some(0.6));
+        assert_eq!(v, Some(0.4));
+        assert_eq!(k, Some(0.9));
+        assert_eq!(aim_time_max(&constraints), Some(400.0));
+    }
+
+    #[test]
+    fn optimistic_recoil_margin_reports_slack() {
+        let control = curve(&[(0.0, 1.0), (100.0, 0.5)]);
+        let gunkick = curve(&[(0.0, 1.0), (100.0, 0.5)]);
+        let untuned = state_metric(0.0, 0.2, 1.0, 0.0);
+        let tuned = state_metric(0.0, 0.2, 1.0, 80.0);
+        let m_untuned = optimistic_recoil_margin(
+            &untuned,
+            Some(0.5),
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        );
+        let m_tuned = optimistic_recoil_margin(
+            &tuned,
+            Some(0.5),
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        );
+        assert!(m_tuned > m_untuned);
+        assert!(m_tuned > 0.0);
+        assert!(m_untuned < 0.0);
+        assert!(optimistic_recoil_margin(
+            &tuned,
+            None,
+            None,
+            None,
+            Some(&control),
+            Some(&gunkick),
+            1.0,
+            &AimScaleFloor::identity(),
+        )
+        .is_infinite());
+    }
+
+    #[test]
+    fn incumbent_eval_order_prefers_optimistically_feasible_then_cheapest() {
+        let beam = vec![part(0.0, 10, vec![]), part(0.0, 5, vec![]), part(0.0, 20, vec![])];
+        assert_eq!(incumbent_eval_order(&beam, &[0.1, -0.2, 0.3]), vec![0, 2, 1]);
+        assert_eq!(incumbent_eval_order(&beam, &[-0.1, -0.2, -0.3]), vec![1, 0, 2]);
     }
 }
 
