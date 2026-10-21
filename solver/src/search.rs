@@ -653,6 +653,7 @@ impl<'a> Solver<'a> {
         let mut total_nodes = 0u64;
         let mut total_leaves = 0u64;
         if self.options.first_solution {
+            self.cost_cap = fixed_cap.unwrap_or(i64::MAX);
             self.seed = true;
             self.dfs(&mut selections, &mut decided, &mut deferred);
             self.seed = false;
