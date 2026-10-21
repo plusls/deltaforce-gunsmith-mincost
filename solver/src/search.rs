@@ -66,6 +66,19 @@ pub struct ConstraintResult {
     pub ok: bool,
 }
 
+/// Abort a speculative exact pass once its Pareto frontier exceeds this many
+/// states. The frontier is kept cost-ordered, so aborting only affects how
+/// quickly a tighter incumbent is found; the final pass has no such limit.
+const FRONTIER_ABORT_STATES: usize = 8_192;
+/// Do not abort a DP level before it has run this long. Fast passes with a
+/// wide-but-short-lived frontier must still complete exactly.
+const FRONTIER_ABORT_LEVEL_MS: u64 = 1_000;
+/// Work units (DFS nodes plus evaluated leaves) the heuristic improvement
+/// pass may spend without improving the incumbent before it gives up.
+const SEED_IMPROVE_WORK: u64 = 10_000;
+/// Hard wall-clock cap on the heuristic improvement pass.
+const SEED_IMPROVE_MS: u64 = 8_000;
+
 pub const PANEL_ATTRS: [&str; 5] = ["10001", "10005", "10006", "10007", "10008"];
 pub const RECOIL_METRICS: [&str; 5] = [
     "recoil-continuous-horizontal",
@@ -178,6 +191,12 @@ pub struct Solver<'a> {
     curves_nonincreasing: bool,
     weapon_price: i64,
     seed: bool,
+    seed_continue: bool,
+    seed_continue_until: u64,
+    seed_continue_deadline: Option<std::time::Instant>,
+    frontier_abort: Option<usize>,
+    frontier_abort_not_before: Option<std::time::Instant>,
+    aborted_pass: bool,
     cost_cap: i64,
     run_found: bool,
     deadline_at: Option<u64>,
@@ -815,6 +834,12 @@ impl<'a> Solver<'a> {
             curves_nonincreasing,
             weapon_price,
             seed: false,
+            seed_continue: false,
+            seed_continue_until: 0,
+            seed_continue_deadline: None,
+            frontier_abort: None,
+            frontier_abort_not_before: None,
+            aborted_pass: false,
             cost_cap: i64::MAX,
             run_found: false,
             deadline_at: None,
@@ -929,11 +954,63 @@ impl<'a> Solver<'a> {
                 && !(self.truncated && deadline_hit)
             {
                 reset(&mut self, &mut selections, &mut decided);
+                self.frontier_abort = Some(FRONTIER_ABORT_STATES);
                 self.dfs(&mut selections, &mut decided, &mut deferred);
+                self.frontier_abort = None;
+                self.frontier_abort_not_before = None;
                 total_nodes += self.nodes;
                 total_leaves += self.leaves;
-                truncated |= self.truncated;
-                incomplete = self.heuristic_incomplete;
+                if self.aborted_pass {
+                    // The exact frontier grew past the point where the DP can
+                    // finish in reasonable time. Spend a bounded slice of the
+                    // budget on the cheap heuristic search to tighten the
+                    // incumbent, then rerun the exact pass with that bound.
+                    self.aborted_pass = false;
+                    let deadline_hit = self
+                        .deadline_at
+                        .is_some_and(|deadline| now_ms() >= deadline);
+                    if deadline_hit {
+                        truncated = true;
+                    } else {
+                        self.nodes = 0;
+                        self.leaves = 0;
+                        self.run_found = false;
+                        self.stop = false;
+                        self.truncated = false;
+                        self.heuristic_incomplete = false;
+                        self.seed = true;
+                        self.seed_continue = true;
+                        self.seed_continue_until = self.work() + SEED_IMPROVE_WORK;
+                        self.seed_continue_deadline = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(SEED_IMPROVE_MS),
+                        );
+                        self.dfs(&mut selections, &mut decided, &mut deferred);
+                        self.seed = false;
+                        self.seed_continue = false;
+                        self.seed_continue_deadline = None;
+                        total_nodes += self.nodes;
+                        total_leaves += self.leaves;
+                        let improve_stopped = self.truncated
+                            || self
+                                .deadline_at
+                                .is_some_and(|deadline| now_ms() >= deadline);
+                        if improve_stopped {
+                            truncated = true;
+                            incomplete = self.heuristic_incomplete;
+                        } else {
+                            reset(&mut self, &mut selections, &mut decided);
+                            self.dfs(&mut selections, &mut decided, &mut deferred);
+                            total_nodes += self.nodes;
+                            total_leaves += self.leaves;
+                            truncated |= self.truncated;
+                            incomplete = self.heuristic_incomplete;
+                        }
+                    }
+                } else {
+                    truncated |= self.truncated;
+                    incomplete = self.heuristic_incomplete;
+                }
             }
         } else {
             self.cost_cap = fixed_cap.unwrap_or(i64::MAX);
@@ -964,6 +1041,19 @@ impl<'a> Solver<'a> {
         }
     }
 
+    fn work(&self) -> u64 {
+        self.nodes.saturating_add(self.leaves)
+    }
+
+    fn seed_continue_exhausted(&self) -> bool {
+        self.seed
+            && self.seed_continue
+            && (self.work() >= self.seed_continue_until
+                || self
+                    .seed_continue_deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d))
+    }
+
     fn budget_exceeded(&mut self) -> bool {
         if self.nodes >= self.options.max_nodes || self.leaves >= self.options.max_leaves {
             self.truncated = true;
@@ -987,6 +1077,10 @@ impl<'a> Solver<'a> {
         deferred: &mut FxHashSet<String>,
     ) {
         if self.stop || self.budget_exceeded() {
+            return;
+        }
+        if self.seed_continue_exhausted() {
+            self.stop = true;
             return;
         }
         self.nodes += 1;
@@ -1743,6 +1837,12 @@ impl<'a> Solver<'a> {
             // small capability-ranked frontier. The optimal pass needs its
             // cost-ranked frontier intact.
             let dp_limit = if self.seed { 8192 } else { 200_000 };
+            if !self.seed && self.frontier_abort.is_some() {
+                self.frontier_abort_not_before = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_millis(FRONTIER_ABORT_LEVEL_MS),
+                );
+            }
             let (pruned, cut) = dp_pareto_capped(
                 next,
                 &self.dp_dims,
@@ -1751,7 +1851,14 @@ impl<'a> Solver<'a> {
                 dp_limit,
                 self.deadline_at,
                 self.seed,
+                if self.seed { None } else { self.frontier_abort },
+                self.frontier_abort_not_before,
             );
+            if cut.aborted {
+                self.aborted_pass = true;
+                self.stop = true;
+                return;
+            }
             self.heuristic_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
             next = pruned;
@@ -2073,6 +2180,10 @@ impl<'a> Solver<'a> {
         if self.stop {
             return;
         }
+        if self.seed_continue_exhausted() {
+            self.stop = true;
+            return;
+        }
         self.leaves += 1;
         if self.budget_exceeded() {
             return;
@@ -2202,12 +2313,23 @@ impl<'a> Solver<'a> {
         }
         self.run_found = true;
         if self.seed {
-            self.stop = true;
+            if self.seed_continue {
+                self.seed_continue_until = self.work() + SEED_IMPROVE_WORK;
+            } else {
+                self.stop = true;
+            }
         }
     }
 
     fn push_alternative(&mut self, solution: Solution) {
         if self.options.max_results == 0 {
+            return;
+        }
+        if self.alternatives.iter().any(|existing| {
+            existing.total_price == solution.total_price
+                && existing.installed_part_keys == solution.installed_part_keys
+                && existing.tuning == solution.tuning
+        }) {
             return;
         }
         let limit = self.options.max_results;
@@ -4009,13 +4131,25 @@ fn dp_pareto(
     panel_dirs: &[PanelDir],
     aim_dir: AimDir,
 ) -> Vec<DpState> {
-    dp_pareto_capped(states, dims, panel_dirs, aim_dir, usize::MAX, None, false).0
+    dp_pareto_capped(
+        states,
+        dims,
+        panel_dirs,
+        aim_dir,
+        usize::MAX,
+        None,
+        false,
+        None,
+        None,
+    )
+    .0
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Trim {
     capped: bool,
     deadline: bool,
+    aborted: bool,
 }
 
 fn dp_pareto_capped(
@@ -4026,6 +4160,8 @@ fn dp_pareto_capped(
     limit: usize,
     deadline_at: Option<u64>,
     seed: bool,
+    abort_at: Option<usize>,
+    abort_not_before: Option<std::time::Instant>,
 ) -> (Vec<DpState>, Trim) {
     if seed {
         // The seed pass only has to return one feasible build, and the cap
@@ -4077,6 +4213,12 @@ fn dp_pareto_capped(
         }
         if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
             trim.deadline = true;
+            break;
+        }
+        if abort_at.is_some_and(|a| out.len() >= a)
+            && abort_not_before.is_none_or(|t| std::time::Instant::now() >= t)
+        {
+            trim.aborted = true;
             break;
         }
         if out
@@ -6115,11 +6257,66 @@ mod tests {
     }
 
     #[test]
+    fn dp_abort_stops_a_frontier_that_exceeds_the_speculative_limit() {
+        let mut dims = DpDims::default();
+        dims.d = true;
+        // Every state has a distinct, higher `d` at a higher cost, so none of
+        // them is dominated and the frontier keeps growing.
+        let states: Vec<DpState> = (0..8).map(|i| part(i as f64, i, vec![])).collect();
+        let (out, trim) = dp_pareto_capped(
+            states,
+            &dims,
+            &[],
+            AimDir::Ignore,
+            usize::MAX,
+            None,
+            false,
+            Some(3),
+            None,
+        );
+        assert!(trim.aborted);
+        assert!(!trim.capped);
+        assert!(!trim.deadline);
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn dp_abort_waits_for_the_grace_period() {
+        let mut dims = DpDims::default();
+        dims.d = true;
+        let states: Vec<DpState> = (0..8).map(|i| part(i as f64, i, vec![])).collect();
+        let not_before = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (out, trim) = dp_pareto_capped(
+            states,
+            &dims,
+            &[],
+            AimDir::Ignore,
+            usize::MAX,
+            None,
+            false,
+            Some(3),
+            Some(not_before),
+        );
+        assert!(!trim.aborted);
+        assert_eq!(out.len(), 8);
+    }
+
+    #[test]
     fn dp_cap_is_not_reported_as_deadline() {
         let mut dims = DpDims::default();
         dims.d = true;
         let states = vec![part(5.0, 5, vec![]), part(20.0, 10, vec![])];
-        let (out, trim) = dp_pareto_capped(states, &dims, &[], AimDir::Ignore, 1, None, false);
+        let (out, trim) = dp_pareto_capped(
+            states,
+            &dims,
+            &[],
+            AimDir::Ignore,
+            1,
+            None,
+            false,
+            None,
+            None,
+        );
         assert_eq!(out.len(), 1);
         assert!(trim.capped);
         assert!(!trim.deadline);
@@ -6138,6 +6335,8 @@ mod tests {
             usize::MAX,
             Some(0),
             false,
+            None,
+            None,
         );
         assert!(out.is_empty());
         assert!(!trim.capped);

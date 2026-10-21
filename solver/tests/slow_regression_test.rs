@@ -2,9 +2,17 @@ use serde_json::Value;
 use std::time::Instant;
 
 fn run_case(request_file: &str, expected_total_price: u64) {
-    let payload = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/rm277-stability-fire-camera.payload.json"
+    run_case_with_payload(
+        "rm277-stability-fire-camera.payload.json",
+        request_file,
+        expected_total_price,
+    );
+}
+
+fn run_case_with_payload(payload_file: &str, request_file: &str, expected_total_price: u64) {
+    let payload = std::fs::read(format!(
+        "{}/tests/fixtures/{payload_file}",
+        env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
     let request = std::fs::read(format!(
@@ -53,4 +61,14 @@ fn live_aim400_only_regression() {
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn no_aim_regression() {
     run_case("no_aim.request.json", 252275);
+}
+
+#[test]
+#[ignore = "slow regression; run with --release -- --ignored"]
+fn ak12_aim_recoil_regression() {
+    run_case_with_payload(
+        "ak12-aim-recoil.payload.json",
+        "ak12-aim-recoil.request.json",
+        208037,
+    );
 }

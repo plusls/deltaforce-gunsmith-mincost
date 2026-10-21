@@ -142,6 +142,8 @@
 
 DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncated`, 此时结果不再声明 optimal.
 
+12 维前沿 (带 `handling-aim-time` 约束) 在部分武器上会让单层远超 8,192 状态, 单次 DP 扫描耗时数分钟. 此时第一次精确 pass 会在前沿超过 8,192 且该层运行超过 1 秒后投机中止, 不产出结果; 随后用有界启发式 (10,000 work unit 或 8 秒) 抬高 incumbent, 再用未放宽的完整精确搜索重跑. 最终结果始终来自完整精确搜索, 中止只影响找上界的快慢.
+
 #### 单调曲线细分指标的归约
 
 `stability-fire-camera`, `stability-movement-camera`, `stability-hold-breath-recoil`, `stability-breath-range`, `stability-breath-duration` 都是稳定度标量 `dS` 经单调曲线得到的. 若 payload 中稳定度类 Addend 只来自无条件的 `10007`, 且指标的其他输入 (呼吸倍率, 呼吸/移动稳定性除子, 调校效果) 可证明为常数, 求解前按曲线反解出 `10007` 的 min/max, 交给现有面板 DP, 不再关闭 DP.
@@ -345,7 +347,9 @@ node solver/js/smoke.mjs \
 cargo test --release --test slow_regression_test -- --ignored --nocapture
 ```
 
-原生 release 下单线程耗时合计约 9.5 s (测试默认并行执行).
+原生 release 下六个用例单线程耗时合计约 18.5 s (测试默认并行执行).
+
+AK12 五约束 (垂直/水平/开火稳定/开镜时间/开火镜头稳定) 加上锁定配件: 前端 200 s 预算下原先只返回首个可行解 438,540; 加入前沿中止与有界 incumbent 提升后 9.8 s 证明最优 208,037.
 
 环境: WSL2, Rust 1.98.1, release + LTO.
 
