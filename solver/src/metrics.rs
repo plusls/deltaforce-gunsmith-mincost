@@ -253,12 +253,7 @@ impl<'a> Evaluator<'a> {
 
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = has_laser(part, mode);
-            for m in part
-                .main_mods
-                .get(mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.main_mods_for(self.weapon_id, mode) {
                 if !is_addend(m) {
                     continue;
                 }
@@ -459,12 +454,7 @@ impl<'a> Evaluator<'a> {
         let laser_index = laser_pro_index(parts, self.mode);
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = has_laser(part, self.mode);
-            for m in part
-                .display_mods
-                .get(self.mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.display_mods_for(self.weapon_id, self.mode) {
                 if !is_addend(m) {
                     continue;
                 }
@@ -489,12 +479,7 @@ impl<'a> Evaluator<'a> {
             let mut mult_a = 0.0;
             for (idx, part) in parts.iter().enumerate() {
                 let laser_part = has_laser(part, self.mode);
-                for m in part
-                    .display_mods
-                    .get(self.mode)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[])
-                {
+                for m in part.display_mods_for(self.weapon_id, self.mode) {
                     if !modifier_included(m, laser_part, self.laser_enabled, idx == laser_index) {
                         continue;
                     }
@@ -583,12 +568,7 @@ impl<'a> Evaluator<'a> {
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
-            for m in part
-                .main_mods
-                .get(mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.main_mods_for(self.weapon_id, mode) {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
                     continue;
                 }
@@ -649,12 +629,7 @@ impl<'a> Evaluator<'a> {
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
-            for m in part
-                .main_mods
-                .get(mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.main_mods_for(self.weapon_id, mode) {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
                     continue;
                 }
@@ -662,12 +637,7 @@ impl<'a> Evaluator<'a> {
                     handling += m.delta.map(|v| v.0).unwrap_or(0.0);
                 }
             }
-            for m in part
-                .display_mods
-                .get(mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.display_mods_for(self.weapon_id, mode) {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" || !include(m) {
                     continue;
                 }
@@ -934,7 +904,7 @@ impl<'a> Evaluator<'a> {
                 let raw_range = breath_factor.unwrap() * breath_c * 0.4 * breath_scale * breath_inv;
                 let raw_duration =
                     100.0 / (atten_speed.unwrap() * breath_time) * (1.0 / breath_inv);
-                let movement_ratio = movement_camera * movement_camera_scale.unwrap() * move_inv;
+                let movement_ratio = movement_camera * move_inv;
                 out.breath_range = Some(raw_range);
                 out.breath_duration = Some(raw_duration);
                 out.movement_camera = Some(round2(movement_ratio));
@@ -1198,7 +1168,10 @@ pub fn stability_metric_at(profile: &NumericProfile, id: &str, stability: f64) -
     let breath_config = hold.get("WeaponBreathConfig")?;
     let breath_factor = jnum(hold, "StandBreathFactor")?;
     let atten_speed = jnum(breath_config, "AttenSpeed").filter(|v| *v > 0.0)?;
-    let movement_camera_scale = jnum(
+    // The raw camera-stability value multiplies by GSWovement_CameraScale, but
+    // the reported metric (`display.movementCameraStability` on the site) does
+    // not. Require the scale for parity with `detail_with`, then ignore it.
+    jnum(
         profile.detail.raw_supporting_values.get("stability")?,
         "GSMovement_CameraScale",
     )?;
@@ -1226,7 +1199,7 @@ pub fn stability_metric_at(profile: &NumericProfile, id: &str, stability: f64) -
 
     match id {
         "stability-fire-camera" => Some(round2(fire_camera)),
-        "stability-movement-camera" => Some(round2(movement_camera * movement_camera_scale)),
+        "stability-movement-camera" => Some(round2(movement_camera)),
         "stability-hold-breath-recoil" => Some(hold_recoil),
         "stability-breath-range" => Some(breath_factor * 0.4 * breath_scale),
         "stability-breath-duration" => Some(100.0 / (atten_speed * breath_time)),

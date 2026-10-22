@@ -63,7 +63,7 @@ pub fn reduce_stability_constraints(
     let Some(profile) = payload.numeric_profiles.get(weapon_id) else {
         return constraints.to_vec();
     };
-    if !stability_delta_is_panel_only(payload, mode) {
+    if !stability_delta_is_panel_only(payload, weapon_id, mode) {
         return constraints.to_vec();
     }
     let Some(base) = stability_base(payload, weapon_id, mode) else {
@@ -342,12 +342,9 @@ fn classify_direction(f: &impl Fn(f64) -> Option<f64>, points: &[f64]) -> Option
 
 /// `dS` must come exclusively from unconditional `10007` addends, otherwise
 /// the panel score cannot stand in for it.
-fn stability_delta_is_panel_only(payload: &WeaponPayload, mode: &str) -> bool {
+fn stability_delta_is_panel_only(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> bool {
     for part in payload.parts.values() {
-        let Some(list) = part.display_mods.get(mode) else {
-            continue;
-        };
-        for modifier in list {
+        for modifier in part.display_mods_for(weapon_id, mode) {
             if modifier.modifier_type != "Addend" {
                 continue;
             }

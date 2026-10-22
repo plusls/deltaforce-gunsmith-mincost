@@ -45,6 +45,10 @@ pub struct Part {
     pub main_mods: Map<String, Vec<Modifier>>,
     #[serde(rename = "modifiersByMode", default)]
     pub display_mods: Map<String, Vec<Modifier>>,
+    #[serde(rename = "baselineRecoveryModifiersByWeaponMode", default)]
+    pub display_baseline_mods: Map<String, Map<String, Vec<Modifier>>>,
+    #[serde(rename = "mainAttributeBaselineRecoveryModifiersByWeaponMode", default)]
+    pub main_baseline_mods: Map<String, Map<String, Vec<Modifier>>>,
     #[serde(rename = "rawModifiersByMode", default)]
     pub raw_mods: Map<String, Vec<Modifier>>,
     #[serde(rename = "rawRecoilMultipliersByMode", default)]
@@ -582,6 +586,50 @@ impl Part {
     }
     pub fn price_id(&self) -> &str {
         self.official_object_id.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Display modifiers that apply to `weapon_id` in `mode`: the part's own
+    /// list followed by the weapon's baseline recovery list. The site appends
+    /// the baseline list after the normal one, so callers that care about
+    /// ordering (the last `Initial` for 10001 wins) see the same sequence.
+    pub fn display_mods_for<'b>(
+        &'b self,
+        weapon_id: &str,
+        mode: &str,
+    ) -> impl Iterator<Item = &'b Modifier> + 'b {
+        let normal = self
+            .display_mods
+            .get(mode)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let baseline = self
+            .display_baseline_mods
+            .get(weapon_id)
+            .and_then(|m| m.get(mode))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        normal.iter().chain(baseline.iter())
+    }
+
+    /// Main attribute modifiers that apply to `weapon_id` in `mode`, with the
+    /// same normal-then-baseline order as [`Part::display_mods_for`].
+    pub fn main_mods_for<'b>(
+        &'b self,
+        weapon_id: &str,
+        mode: &str,
+    ) -> impl Iterator<Item = &'b Modifier> + 'b {
+        let normal = self
+            .main_mods
+            .get(mode)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let baseline = self
+            .main_baseline_mods
+            .get(weapon_id)
+            .and_then(|m| m.get(mode))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        normal.iter().chain(baseline.iter())
     }
 }
 
