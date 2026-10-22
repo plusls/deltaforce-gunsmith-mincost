@@ -178,6 +178,12 @@ DP 前沿每层上限 200,000 状态 (种子 pass 为 8,192). 超过时按价格
 
 精确 pass 正常完成 (没有时间/预算截断) 后, 若该 pass 触发了精校前沿截断, 且距离 deadline 仍不少于 `TUNE_STAGE2_MIN_MS` (1,000 ms), 求解器会清空精校前沿缓存, 把上限提升到 `TUNE_STAGE2_CAP`/`TUNE_STAGE2_NEXT` (65,536/65,536) 重跑一次精确 pass. 重跑无截断时结果可证明最优; 撞到 deadline 时 `truncated=true`, 保留上一轮的 incumbent; 仍然截断时 `heuristic_incomplete` 保持. 第二阶段有独立的节点/叶子预算, 与既有多次 pass 的行为一致. `firstSolution` 模式只跑种子 DFS, 不进入第二阶段.
 
+调校前沿的支配方向来自约束, 不是固定映射. `handling-sprint-fire-delay` 与 `handling-aim-time` 同为开镜速度通道 (`open`), `handling-aim-move-speed` 为移动通道, `stability-breath-*` 为呼吸通道, `stability-movement-camera` 为移动稳定性通道; 只有 max 时取"越大越好", 只有 min 时取"越小越好". 同一指标同时有 min 和 max (band) 时该通道为 `Equal`: 不同通道值的 offer 互不支配, 否则一个区间外的 offer 会把唯一落在区间内的 offer 支配掉, 导致更大调校空间反而报无解. `Equal` 通道用按 1e6 量化值分桶的 Pareto 剪枝, 并对相邻 ±1 桶探测, 避免 band 场景退化成 O(n²); 没有 `Equal` 通道或维度超过 3 时仍走全扫描. band 会显著增加前沿规模, 因此可能撞到精校上限并失去最优性证明, 但返回的仍是找到的最优价格.
+
+前沿缓存把调校 key 按前沿存一份 (`Rc<Vec<String>>`), 每个 offer 只存 `Vec<f64>`, 不再为每个 offer 克隆 key 字符串. sprint band 用例 (18010000037) 因此从约 1.65 GB 峰值内存/102 s 降到约 465 MB/71 s, 结果与节点数不变.
+
+pick 前的单调极值预过滤只在可证明安全时拒绝整条前沿: 开镜速度通道的区间跨越 `open = -100` (`1/(1+open/100)` 的 clamp 跳变点) 时跳过, 端点值方向与假设方向矛盾时 (例如 payload 出现负的呼吸曲线) 也跳过; 跳过只会少剪枝, 不会误剪.
+
 ### 5.4 叶子精确评估
 
 DP 只负责生成候选组合和剪枝. 每个最终状态都会走一遍完整评估:

@@ -104,6 +104,145 @@ fn panel_attr_index(id: &str) -> Option<usize> {
     PANEL_ATTRS.iter().position(|attr| *attr == id)
 }
 
+/// Whether a detail metric consumes one of the tuning sums. Every other
+/// supported detail metric is a function of the installed parts alone, so a
+/// single evaluation can rule out the entire tuning frontier.
+fn detail_constraint_needs_tuning(id: &str) -> bool {
+    matches!(
+        id,
+        "handling-aim-time"
+            | "handling-sprint-fire-delay"
+            | "handling-aim-move-speed"
+            | "stability-breath-range"
+            | "stability-breath-duration"
+            | "stability-movement-camera"
+    )
+}
+
+/// A tuning sum that a single detail metric depends on monotonically. The
+/// metric's value is otherwise fixed by the installed parts, so evaluating it
+/// at the extreme sum values present in the frontier proves whether any offer
+/// can satisfy the constraint.
+#[derive(Clone, Copy)]
+enum MonotoneChannel {
+    Open,
+    MoveStability,
+    BreathStability,
+}
+
+impl MonotoneChannel {
+    /// Returns the channel and whether the metric increases with it.
+    fn for_constraint(id: &str) -> Option<(Self, bool)> {
+        match id {
+            "handling-aim-time" | "handling-sprint-fire-delay" => Some((Self::Open, false)),
+            "stability-movement-camera" => Some((Self::MoveStability, false)),
+            "stability-breath-range" => Some((Self::BreathStability, false)),
+            "stability-breath-duration" => Some((Self::BreathStability, true)),
+            _ => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Open => 0,
+            Self::MoveStability => 1,
+            Self::BreathStability => 2,
+        }
+    }
+
+    fn value(self, offer: &Offer) -> f64 {
+        match self {
+            Self::Open => offer.e_open,
+            Self::MoveStability => offer.e_move_stability,
+            Self::BreathStability => offer.e_breath,
+        }
+    }
+
+    fn sums(self, value: f64) -> DetailSums {
+        let mut sums = DetailSums::default();
+        match self {
+            Self::Open => sums.open_speed = value,
+            Self::MoveStability => sums.move_stability = value,
+            Self::BreathStability => sums.breath_stability = value,
+        }
+        sums
+    }
+}
+
+/// Proves whether some offer can satisfy every monotone detail constraint.
+/// Returns false only when an extreme evaluation shows that no offer can.
+fn frontier_reachable(
+    frontier: &[Offer],
+    parts: &[&Part],
+    constraints: &[&Constraint],
+    evaluator: &Evaluator<'_>,
+) -> bool {
+    if frontier.is_empty() {
+        return false;
+    }
+    let mut ranges = [(f64::INFINITY, f64::NEG_INFINITY); 3];
+    for offer in frontier {
+        for channel in [
+            MonotoneChannel::Open,
+            MonotoneChannel::MoveStability,
+            MonotoneChannel::BreathStability,
+        ] {
+            let value = channel.value(offer);
+            let range = &mut ranges[channel.index()];
+            range.0 = range.0.min(value);
+            range.1 = range.1.max(value);
+        }
+    }
+    for constraint in constraints {
+        let Some((channel, increasing)) = MonotoneChannel::for_constraint(&constraint.id) else {
+            continue;
+        };
+        let (lo, hi) = ranges[channel.index()];
+        if !lo.is_finite() || !hi.is_finite() {
+            continue;
+        }
+        // `tuning_scale` is `clamp_factor(1 / (1 + open / 100))`. Below
+        // `open = -100` the ratio turns negative and clamps to the low bound,
+        // so a range that straddles -100 is not monotone and the extreme test
+        // would be invalid.
+        if matches!(channel, MonotoneChannel::Open) && lo <= -100.0 && hi > -100.0 {
+            continue;
+        }
+        let evaluate = |value: f64| {
+            evaluator
+                .detail_with(parts, &channel.sums(value))
+                .value(&constraint.id)
+        };
+        let (lo_value, hi_value) = (evaluate(lo), evaluate(hi));
+        // Every mapped metric depends on the channel through a positive
+        // constant times a monotone shape, so the direction follows the
+        // assumed sign. A payload with a negative breath curve or breath
+        // factor would reverse it; skip instead of rejecting when the
+        // endpoints contradict the assumed direction.
+        let direction_ok = match (lo_value, hi_value) {
+            (Some(low), Some(high)) if increasing => high >= low - 1e-9,
+            (Some(low), Some(high)) => high <= low + 1e-9,
+            _ => false,
+        };
+        if !direction_ok {
+            continue;
+        }
+        if let Some(max) = constraint.max {
+            let smallest = if increasing { lo_value } else { hi_value };
+            if smallest.is_some_and(|value| value > max + 1e-9) {
+                return false;
+            }
+        }
+        if let Some(min) = constraint.min {
+            let largest = if increasing { hi_value } else { lo_value };
+            if largest.is_some_and(|value| value < min - 1e-9) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InstalledPart {
     pub slot_path: String,
@@ -306,13 +445,17 @@ struct Offer {
     e_move_runtime: f64,
     e_breath: f64,
     e_move_stability: f64,
-    values: Vec<(String, f64)>,
+    values: Vec<f64>,
     deviation: f64,
 }
 
 #[derive(Clone)]
 struct CachedFrontier {
     offers: Rc<Vec<Offer>>,
+    /// Tuning keys in the same order as every offer's `values`. The keys are
+    /// identical for all offers in a frontier, so they are stored once instead
+    /// of once per offer.
+    keys: Rc<Vec<String>>,
     capped: bool,
 }
 
@@ -367,25 +510,25 @@ impl TuneDims {
                     k_high |= max;
                     k_low |= min;
                 }
-                "handling-aim-time" => {
-                    open_high |= max && !min;
-                    open_low |= min && !max;
+                "handling-aim-time" | "handling-sprint-fire-delay" => {
+                    open_high |= max;
+                    open_low |= min;
                 }
                 "handling-aim-move-speed" => {
-                    move_low |= max && !min;
-                    move_high |= min && !max;
+                    move_low |= max;
+                    move_high |= min;
                 }
                 "stability-breath-range" => {
-                    breath_high |= max && !min;
-                    breath_low |= min && !max;
+                    breath_high |= max;
+                    breath_low |= min;
                 }
                 "stability-breath-duration" => {
-                    breath_high |= min && !max;
-                    breath_low |= max && !min;
+                    breath_high |= min;
+                    breath_low |= max;
                 }
                 "stability-movement-camera" => {
-                    stability_high |= max && !min;
-                    stability_low |= min && !max;
+                    stability_high |= max;
+                    stability_low |= min;
                 }
                 _ => {}
             }
@@ -668,7 +811,7 @@ impl<'a> Solver<'a> {
             .map(|(id, part)| {
                 (
                     id.clone(),
-                    part_own_bound(part, &options.mode, options.laser_enabled),
+                    part_own_bound(part, weapon_id, &options.mode, options.laser_enabled),
                 )
             })
             .collect();
@@ -1302,71 +1445,66 @@ impl<'a> Solver<'a> {
         if !has_panel && !has_recoil_max {
             return false;
         }
+        let has_visible_bound = |slot: &crate::assembly::VisibleSlot| {
+            self.relevance.contains(&slot.host_part_id, &slot.slot.id)
+                && self
+                    .slot_bounds
+                    .get(&slot.host_part_id)
+                    .and_then(|slots| slots.get(&slot.slot.id))
+                    .is_some()
+        };
+        let roots = bound_roots(
+            &assembly.visible_slots,
+            &assembly.internal_parts,
+            decided,
+            has_visible_bound,
+        );
         let mut decided_bound = MetricBound::neutral();
         let mut assumed_bound = MetricBound::neutral();
-        let mut optional_paths: FxHashSet<&str> = FxHashSet::default();
-        let mut seen: FxHashSet<(&str, &str)> = FxHashSet::default();
-        for slot in &assembly.visible_slots {
-            if !decided.contains(&slot.path_key) {
-                continue;
-            }
-            let Some(id) = slot
-                .selected_part_id
-                .as_ref()
-                .or(slot.internal_part_id.as_ref())
-            else {
-                continue;
-            };
-            if !seen.insert((slot.path_key.as_str(), id.as_str())) {
-                continue;
-            }
-            if let Some(b) = self.part_bounds.get(id) {
-                decided_bound.add_a(b);
-            }
-        }
-        for item in &assembly.internal_parts {
-            if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
-                continue;
-            }
-            if !self.payload.parts.contains_key(&item.part_id) {
-                continue;
-            }
-            if decided.contains(&item.slot_path_key) {
-                if let Some(b) = self.part_bounds.get(&item.part_id) {
-                    decided_bound.add_a(b);
+        for root in roots {
+            match root {
+                BoundRoot::DecidedVisible(idx) => {
+                    let slot = &assembly.visible_slots[idx];
+                    let Some(id) = slot
+                        .selected_part_id
+                        .as_ref()
+                        .or(slot.internal_part_id.as_ref())
+                    else {
+                        continue;
+                    };
+                    if let Some(b) = self.part_bounds.get(id) {
+                        decided_bound.add_a(b);
+                    }
                 }
-                continue;
-            }
-            let parent_active = match &item.parent_slot_path_key {
-                Some(parent) => {
-                    decided.contains(parent) || optional_paths.contains(parent.as_str())
+                BoundRoot::DecidedInternal(idx) => {
+                    let item = &assembly.internal_parts[idx];
+                    if let Some(b) = self.part_bounds.get(&item.part_id) {
+                        decided_bound.add_a(b);
+                    }
                 }
-                None => true,
-            };
-            if parent_active {
-                if let Some(b) = self.part_bounds.get(&item.part_id) {
-                    assumed_bound.add_optional(b);
+                BoundRoot::AssumedVisible(idx) => {
+                    let slot = &assembly.visible_slots[idx];
+                    if let Some(b) = self
+                        .slot_bounds
+                        .get(&slot.host_part_id)
+                        .and_then(|slots| slots.get(&slot.slot.id))
+                    {
+                        assumed_bound.add_a(b);
+                    }
                 }
-                optional_paths.insert(item.slot_path_key.as_str());
+                BoundRoot::OptionalInternal(idx) => {
+                    let item = &assembly.internal_parts[idx];
+                    if !self.payload.parts.contains_key(&item.part_id) {
+                        continue;
+                    }
+                    if let Some(b) = self.part_bounds.get(&item.part_id) {
+                        assumed_bound.add_optional(b);
+                    }
+                }
             }
         }
         let mut bound = decided_bound;
         bound.add_a(&assumed_bound);
-        for slot in &assembly.visible_slots {
-            if decided.contains(&slot.path_key) {
-                continue;
-            }
-            if !self.relevance.contains(&slot.host_part_id, &slot.slot.id) {
-                continue;
-            }
-            if let Some(b) = self
-                .slot_bounds
-                .get(&slot.host_part_id)
-                .and_then(|slots| slots.get(&slot.slot.id))
-            {
-                bound.add_a(b);
-            }
-        }
         for c in &self.search_constraints {
             if let Some(idx) = panel_attr_index(&c.id) {
                 if idx == 0 {
@@ -1696,6 +1834,7 @@ impl<'a> Solver<'a> {
             let is_laser = crate::metrics::has_laser(part, mode);
             let m = exact_part_metric(
                 part,
+                self.evaluator.weapon_id,
                 slot_name,
                 mode,
                 self.options.bipod_deployed,
@@ -1713,7 +1852,12 @@ impl<'a> Solver<'a> {
                 {
                     base_laser_pro = Some(LaserPro {
                         score,
-                        metric: exact_laser_pro(part, mode, &self.panel_attrs),
+                        metric: exact_laser_pro(
+                            part,
+                            self.evaluator.weapon_id,
+                            mode,
+                            &self.panel_attrs,
+                        ),
                     });
                 }
             }
@@ -2195,6 +2339,7 @@ impl<'a> Solver<'a> {
         } else {
             let m = exact_part_metric(
                 part,
+                self.evaluator.weapon_id,
                 slot_name,
                 mode,
                 self.options.bipod_deployed,
@@ -2211,7 +2356,7 @@ impl<'a> Solver<'a> {
         let laser_pro = if is_laser && self.options.laser_enabled {
             Some(LaserPro {
                 score: crate::metrics::laser_pro_score(part, mode),
-                metric: exact_laser_pro(part, mode, &self.panel_attrs),
+                metric: exact_laser_pro(part, self.evaluator.weapon_id, mode, &self.panel_attrs),
             })
         } else {
             None
@@ -2440,6 +2585,8 @@ impl<'a> Solver<'a> {
         let mut laser_parts: Vec<(usize, f64)> = Vec::new();
         for (idx, part) in parts.iter().enumerate() {
             if crate::metrics::has_laser(part, mode) {
+                // Primary-laser ranking mirrors site `ct`: raw `modifiersByMode`
+                // only, never the baseline recovery list.
                 let score: f64 = part
                     .display_mods
                     .get(mode)
@@ -2465,12 +2612,7 @@ impl<'a> Solver<'a> {
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = crate::metrics::has_laser(part, mode);
             let selected_laser = laser_idx == Some(idx);
-            for m in part
-                .main_mods
-                .get(mode)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[])
-            {
+            for m in part.main_mods_for(self.evaluator.weapon_id, mode) {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" {
                     continue;
                 }
@@ -2926,28 +3068,31 @@ impl<'a> Solver<'a> {
         parts: &[&Part],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
         let cache_key = tune_cache_key(instances);
-        let (frontier, capped) = if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
-            (cached.offers.clone(), cached.capped)
-        } else {
-            let (built, capped) = self.build_tune_frontier(instances)?;
-            let built = Rc::new(built);
-            if self.tune_frontier_cache.len() >= TUNE_FRONTIER_CACHE_LIMIT {
-                self.tune_frontier_cache.clear();
-            }
-            self.tune_frontier_cache.insert(
-                cache_key,
-                CachedFrontier {
-                    offers: built.clone(),
-                    capped,
-                },
-            );
-            (built, capped)
-        };
+        let (frontier, keys, capped) =
+            if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
+                (cached.offers.clone(), cached.keys.clone(), cached.capped)
+            } else {
+                let (built, keys, capped) = self.build_tune_frontier(instances)?;
+                let built = Rc::new(built);
+                let keys = Rc::new(keys);
+                if self.tune_frontier_cache.len() >= TUNE_FRONTIER_CACHE_LIMIT {
+                    self.tune_frontier_cache.clear();
+                }
+                self.tune_frontier_cache.insert(
+                    cache_key,
+                    CachedFrontier {
+                        offers: built.clone(),
+                        keys: keys.clone(),
+                        capped,
+                    },
+                );
+                (built, keys, capped)
+            };
         if capped {
             self.heuristic_incomplete = true;
             self.tune_incomplete = true;
         }
-        Self::pick_from_frontier(&frontier, req, parts, self.options, &self.evaluator)
+        Self::pick_from_frontier(&frontier, &keys, req, parts, self.options, &self.evaluator)
     }
 
     fn stage2_time_ok(&self) -> bool {
@@ -2960,7 +3105,7 @@ impl<'a> Solver<'a> {
     fn build_tune_frontier(
         &mut self,
         instances: &[TuningInstance<'a>],
-    ) -> Option<(Vec<Offer>, bool)> {
+    ) -> Option<(Vec<Offer>, Vec<String>, bool)> {
         let tune_cap = self.tune_cap;
         let tune_next = self.tune_next;
         let mut capped = false;
@@ -2977,6 +3122,7 @@ impl<'a> Solver<'a> {
             deviation: 0.0,
         };
         let mut frontier: Vec<Offer> = vec![empty()];
+        let mut keys: Vec<String> = Vec::new();
         for inst in instances {
             if self.budget_exceeded() {
                 return None;
@@ -3008,6 +3154,7 @@ impl<'a> Solver<'a> {
                     }
                 };
                 let key_base = Evaluator::tuning_key(&inst.slot_path, &inst.part.id, &tune.tune_id);
+                keys.push(key_base.clone());
                 let default = tune.default_value;
                 let mut next = Vec::new();
                 for a in &group {
@@ -3016,7 +3163,7 @@ impl<'a> Solver<'a> {
                             break;
                         }
                         let mut values = a.values.clone();
-                        values.push((key_base.clone(), b.value));
+                        values.push(b.value);
                         next.push(Offer {
                             e_h: a.e_h + b.e_h,
                             e_v: a.e_v + b.e_v,
@@ -3058,7 +3205,7 @@ impl<'a> Solver<'a> {
                         break;
                     }
                     let mut values = a.values.clone();
-                    values.extend(b.values.iter().cloned());
+                    values.extend_from_slice(&b.values);
                     next.push(Offer {
                         e_h: a.e_h + b.e_h,
                         e_v: a.e_v + b.e_v,
@@ -3090,21 +3237,58 @@ impl<'a> Solver<'a> {
             self.truncated |= cut.deadline;
             frontier = pruned;
         }
-        Some((frontier, capped))
+        // The reported tuning map zips keys with values, so a length mismatch
+        // would silently drop tunings. Keep an O(frontier) check in release.
+        assert!(
+            frontier.iter().all(|o| o.values.len() == keys.len()),
+            "tuning frontier keys and values are misaligned"
+        );
+        Some((frontier, keys, capped))
     }
 
     fn pick_from_frontier(
         frontier: &[Offer],
+        keys: &[String],
         req: &TuneReq,
         parts: &[&Part],
         options: &SolveOptions,
         evaluator: &Evaluator<'a>,
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        assert!(
+            frontier.iter().all(|o| o.values.len() == keys.len()),
+            "tuning frontier keys and values are misaligned"
+        );
         let detail_constraints: Vec<&Constraint> = options
             .constraints
             .iter()
             .filter(|c| !is_panel_attr(&c.id) && !is_recoil_metric(&c.id))
             .collect();
+        // Detail metrics that ignore the tuning sums are fixed for these parts.
+        // Reject the whole frontier once instead of once per offer; this is the
+        // common case for expensive assemblies.
+        let parts_only: Vec<&Constraint> = detail_constraints
+            .iter()
+            .copied()
+            .filter(|c| !detail_constraint_needs_tuning(&c.id))
+            .collect();
+        if !parts_only.is_empty() {
+            let neutral = evaluator.detail_with(parts, &DetailSums::default());
+            let ok = parts_only.iter().all(|c| {
+                let Some(value) = neutral.value(&c.id) else {
+                    return false;
+                };
+                c.min.map(|m| value >= m - 1e-9).unwrap_or(true)
+                    && c.max.map(|m| value <= m + 1e-9).unwrap_or(true)
+            });
+            if !ok {
+                return None;
+            }
+        }
+        if !detail_constraints.is_empty()
+            && !frontier_reachable(frontier, parts, &detail_constraints, evaluator)
+        {
+            return None;
+        }
         let mut best: Option<&Offer> = None;
         let mut best_score = f64::NEG_INFINITY;
         for o in frontier {
@@ -3158,10 +3342,16 @@ impl<'a> Solver<'a> {
         }
         let best = best?;
         let mut state = TuningState::default();
-        for (key, value) in &best.values {
+        for (key, value) in keys.iter().zip(best.values.iter()) {
             state.insert(key.clone(), *value);
         }
-        Some((state, best.values.clone()))
+        Some((
+            state,
+            keys.iter()
+                .cloned()
+                .zip(best.values.iter().copied())
+                .collect(),
+        ))
     }
 
     fn tune_offers(&mut self, part_id: &str, tune: &crate::model::TuningOption) -> Vec<LocalOffer> {
@@ -3178,7 +3368,7 @@ impl<'a> Solver<'a> {
                     e_move_runtime: o.e_move_runtime,
                     e_breath: o.e_breath,
                     e_move_stability: o.e_move_stability,
-                    value: o.values.first().map(|v| v.1).unwrap_or(tune.default_value),
+                    value: o.values.first().copied().unwrap_or(tune.default_value),
                 })
                 .collect();
         }
@@ -3249,7 +3439,7 @@ impl<'a> Solver<'a> {
                 e_move_runtime: o.e_move_runtime,
                 e_breath: o.e_breath,
                 e_move_stability: o.e_move_stability,
-                values: vec![(String::new(), o.value)],
+                values: vec![o.value],
                 deviation: deviation(o.value),
             })
             .collect();
@@ -3796,6 +3986,7 @@ fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
 
 fn exact_part_metric(
     part: &Part,
+    weapon_id: &str,
     slot_name: &str,
     mode: &str,
     bipod_deployed: bool,
@@ -3805,35 +3996,31 @@ fn exact_part_metric(
 ) -> ExactPart {
     let mut m = ExactPart::neutral_panel(panel_attrs.len());
     if !panel_attrs.is_empty() {
-        if let Some(list) = part.display_mods.get(mode) {
-            for modif in list {
-                if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
-                    continue;
-                }
-                if is_laser && modif.polarity.as_deref() != Some("con") && !include_laser_pro {
-                    continue;
-                }
-                let attr = normalize_attr(modif.attribute_id.as_deref());
-                if let Some(pos) = panel_attrs.iter().position(|a| *a == attr) {
-                    m.panel[pos] += modif.delta.map(|v| v.0).unwrap_or(0.0);
-                }
-            }
-        }
-    }
-    if let Some(list) = part.main_mods.get(mode) {
-        for modif in list {
+        for modif in part.display_mods_for(weapon_id, mode) {
             if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
                 continue;
             }
             if is_laser && modif.polarity.as_deref() != Some("con") && !include_laser_pro {
                 continue;
             }
-            if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
-                m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
+            let attr = normalize_attr(modif.attribute_id.as_deref());
+            if let Some(pos) = panel_attrs.iter().position(|a| *a == attr) {
+                m.panel[pos] += modif.delta.map(|v| v.0).unwrap_or(0.0);
             }
-            if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
-                m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
-            }
+        }
+    }
+    for modif in part.main_mods_for(weapon_id, mode) {
+        if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
+            continue;
+        }
+        if is_laser && modif.polarity.as_deref() != Some("con") && !include_laser_pro {
+            continue;
+        }
+        if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
+            m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
+        }
+        if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
+            m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
         }
     }
     if let Some(rr) = part.raw_recoil.get(mode) {
@@ -3968,41 +4155,37 @@ fn exact_part_metric(
 /// `exact_part_metric` skips these modifiers for laser parts unless the caller
 /// knows the part wins the single-laser selection; this helper extracts them so
 /// the DP can apply exactly one winner's delta.
-fn exact_laser_pro(part: &Part, mode: &str, panel_attrs: &[String]) -> ExactPart {
+fn exact_laser_pro(part: &Part, weapon_id: &str, mode: &str, panel_attrs: &[String]) -> ExactPart {
     let mut m = ExactPart::neutral_panel(panel_attrs.len());
     // `modifier_included` treats every non-`con` addend of the selected laser
     // part as a laser bonus, so the additive delta must cover them all, not
     // just the `pro` ones used to rank laser parts.
     if !panel_attrs.is_empty() {
-        if let Some(list) = part.display_mods.get(mode) {
-            for modif in list {
-                if modif.condition_id.is_some()
-                    || modif.modifier_type != "Addend"
-                    || modif.polarity.as_deref() == Some("con")
-                {
-                    continue;
-                }
-                let attr = normalize_attr(modif.attribute_id.as_deref());
-                if let Some(pos) = panel_attrs.iter().position(|a| *a == attr) {
-                    m.panel[pos] += modif.delta.map(|v| v.0).unwrap_or(0.0);
-                }
-            }
-        }
-    }
-    if let Some(list) = part.main_mods.get(mode) {
-        for modif in list {
+        for modif in part.display_mods_for(weapon_id, mode) {
             if modif.condition_id.is_some()
                 || modif.modifier_type != "Addend"
                 || modif.polarity.as_deref() == Some("con")
             {
                 continue;
             }
-            if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
-                m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
+            let attr = normalize_attr(modif.attribute_id.as_deref());
+            if let Some(pos) = panel_attrs.iter().position(|a| *a == attr) {
+                m.panel[pos] += modif.delta.map(|v| v.0).unwrap_or(0.0);
             }
-            if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
-                m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
-            }
+        }
+    }
+    for modif in part.main_mods_for(weapon_id, mode) {
+        if modif.condition_id.is_some()
+            || modif.modifier_type != "Addend"
+            || modif.polarity.as_deref() == Some("con")
+        {
+            continue;
+        }
+        if normalize_attr(modif.attribute_id.as_deref()) == "10005" {
+            m.d += modif.delta.map(|v| v.0).unwrap_or(0.0);
+        }
+        if HANDLING_ATTRS.contains(&normalize_attr(modif.attribute_id.as_deref())) {
+            m.hs += modif.delta.map(|v| v.0).unwrap_or(0.0);
         }
     }
     m
@@ -4481,6 +4664,131 @@ impl MetricBound {
     }
 }
 
+/// One assembly node whose metric bound `cannot_satisfy` accumulates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundRoot {
+    /// A decided visible slot: add the selected part's own bound.
+    DecidedVisible(usize),
+    /// A decided hidden slot carrying an internal part: add the part's own bound.
+    DecidedInternal(usize),
+    /// An undecided visible slot: add the recursive slot bound for its subtree.
+    AssumedVisible(usize),
+    /// An implicitly selected part below an active parent: add its own bound
+    /// optimistically (it may or may not be installed in a completion).
+    OptionalInternal(usize),
+}
+
+/// Selects the nodes whose metric bounds are disjoint, so every part below an
+/// active slot is counted at most once.
+///
+/// `slot_bounds` for an undecided visible slot is recursive: it is the best
+/// bound over every candidate part and all of that part's child slots. Its
+/// descendants therefore must not contribute again. Decided visible slots and
+/// internal parts only contribute their own [`part_own_bound`], so they do not
+/// cover their descendants: those are visited and counted individually.
+///
+/// This keeps the result optimistic: an uncovered part is either counted
+/// exactly once through its own bound, or absorbed by a recursive slot bound
+/// that dominates every candidate in that slot. A part under a counted
+/// subtree is skipped, and subtrees are rooted only at top-most covered nodes.
+fn bound_roots(
+    visible_slots: &[crate::assembly::VisibleSlot],
+    internal_parts: &[crate::assembly::InternalPart],
+    decided: &FxHashSet<String>,
+    has_visible_bound: impl Fn(&crate::assembly::VisibleSlot) -> bool,
+) -> Vec<BoundRoot> {
+    let mut parent: FxHashMap<&str, Option<&str>> = FxHashMap::default();
+    for slot in visible_slots {
+        parent.insert(slot.path_key.as_str(), slot.parent_slot_path_key.as_deref());
+    }
+    for item in internal_parts {
+        parent.insert(
+            item.slot_path_key.as_str(),
+            item.parent_slot_path_key.as_deref(),
+        );
+    }
+    fn covered_ancestor<'a>(
+        mut path: Option<&'a str>,
+        parent: &FxHashMap<&'a str, Option<&'a str>>,
+        covered: &FxHashSet<&'a str>,
+    ) -> bool {
+        while let Some(key) = path {
+            if covered.contains(key) {
+                return true;
+            }
+            path = parent.get(key).copied().flatten();
+        }
+        false
+    }
+    // Coverage invariant: `covered` holds exactly the paths whose recursive
+    // `slot_bound` was added. Every later node under a covered path is skipped,
+    // so each subtree is counted once; nodes outside one count only their own
+    // bound and never extend coverage.
+    let mut nodes: Vec<(usize, bool, usize)> =
+        Vec::with_capacity(visible_slots.len() + internal_parts.len());
+    for (idx, slot) in visible_slots.iter().enumerate() {
+        nodes.push((slot.depth, true, idx));
+    }
+    for (idx, item) in internal_parts.iter().enumerate() {
+        nodes.push((item.depth, false, idx));
+    }
+    // Ancestors always have a smaller depth, so this visits every node before
+    // any descendant. Visible slots sort first within a depth because a visible
+    // slot and its internal-part record describe the same node.
+    nodes.sort_by_key(|&(depth, visible, idx)| (depth, !visible, idx));
+
+    let mut roots = Vec::new();
+    let mut covered: FxHashSet<&str> = FxHashSet::default();
+    let mut optional_paths: FxHashSet<&str> = FxHashSet::default();
+    let mut seen: FxHashSet<(&str, &str)> = FxHashSet::default();
+    for (_, visible, idx) in nodes {
+        if visible {
+            let slot = &visible_slots[idx];
+            if covered_ancestor(slot.parent_slot_path_key.as_deref(), &parent, &covered) {
+                continue;
+            }
+            if decided.contains(&slot.path_key) {
+                let Some(id) = slot
+                    .selected_part_id
+                    .as_ref()
+                    .or(slot.internal_part_id.as_ref())
+                else {
+                    continue;
+                };
+                if seen.insert((slot.path_key.as_str(), id.as_str())) {
+                    roots.push(BoundRoot::DecidedVisible(idx));
+                }
+            } else if has_visible_bound(slot) {
+                covered.insert(slot.path_key.as_str());
+                roots.push(BoundRoot::AssumedVisible(idx));
+            }
+        } else {
+            let item = &internal_parts[idx];
+            if covered.contains(item.slot_path_key.as_str())
+                || covered_ancestor(item.parent_slot_path_key.as_deref(), &parent, &covered)
+            {
+                continue;
+            }
+            if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
+                continue;
+            }
+            if decided.contains(&item.slot_path_key) {
+                roots.push(BoundRoot::DecidedInternal(idx));
+                continue;
+            }
+            let parent_active = match item.parent_slot_path_key.as_deref() {
+                Some(parent) => decided.contains(parent) || optional_paths.contains(parent),
+                None => true,
+            };
+            if parent_active {
+                optional_paths.insert(item.slot_path_key.as_str());
+                roots.push(BoundRoot::OptionalInternal(idx));
+            }
+        }
+    }
+    roots
+}
+
 fn laser_delta_range(
     modifier: &crate::model::Modifier,
     is_laser: bool,
@@ -4497,35 +4805,31 @@ fn laser_delta_range(
     }
 }
 
-fn part_own_bound(part: &Part, mode: &str, laser_enabled: bool) -> MetricBound {
+fn part_own_bound(part: &Part, weapon_id: &str, mode: &str, laser_enabled: bool) -> MetricBound {
     let mut b = MetricBound::neutral();
     let is_laser = crate::metrics::has_laser(part, mode);
-    if let Some(list) = part.display_mods.get(mode) {
-        for m in list {
-            if m.condition_id.is_some() || m.modifier_type != "Addend" {
-                continue;
-            }
-            let Some(idx) = panel_attr_index(normalize_attr(m.attribute_id.as_deref())) else {
-                continue;
-            };
-            let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) else {
-                continue;
-            };
-            let (lower, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
-            b.panel_min[idx] += lower;
-            b.panel_max[idx] += upper;
+    for m in part.display_mods_for(weapon_id, mode) {
+        if m.condition_id.is_some() || m.modifier_type != "Addend" {
+            continue;
         }
+        let Some(idx) = panel_attr_index(normalize_attr(m.attribute_id.as_deref())) else {
+            continue;
+        };
+        let Some(delta) = m.delta.map(|v| v.0).filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let (lower, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
+        b.panel_min[idx] += lower;
+        b.panel_max[idx] += upper;
     }
-    if let Some(list) = part.main_mods.get(mode) {
-        for m in list {
-            if m.condition_id.is_none()
-                && m.modifier_type == "Addend"
-                && normalize_attr(m.attribute_id.as_deref()) == "10005"
-            {
-                let delta = m.delta.map(|v| v.0).unwrap_or(0.0);
-                let (_, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
-                b.max_d += upper;
-            }
+    for m in part.main_mods_for(weapon_id, mode) {
+        if m.condition_id.is_none()
+            && m.modifier_type == "Addend"
+            && normalize_attr(m.attribute_id.as_deref()) == "10005"
+        {
+            let delta = m.delta.map(|v| v.0).unwrap_or(0.0);
+            let (_, upper) = laser_delta_range(m, is_laser, laser_enabled, delta);
+            b.max_d += upper;
         }
     }
     if let Some(rr) = part.raw_recoil.get(mode) {
@@ -4624,6 +4928,7 @@ fn compute_bounds(
         for slot in slots {
             slot_bound(
                 payload,
+                weapon_id,
                 mode,
                 laser_enabled,
                 host,
@@ -4641,6 +4946,7 @@ fn compute_bounds(
 #[allow(clippy::too_many_arguments)]
 fn part_bound(
     payload: &WeaponPayload,
+    weapon_id: &str,
     mode: &str,
     laser_enabled: bool,
     id: &str,
@@ -4655,7 +4961,7 @@ fn part_bound(
     let Some(part) = payload.parts.get(id) else {
         return MetricBound::neutral();
     };
-    let mut b = part_own_bound(part, mode, laser_enabled);
+    let mut b = part_own_bound(part, weapon_id, mode, laser_enabled);
     if visited.contains(id) {
         return b;
     }
@@ -4664,6 +4970,7 @@ fn part_bound(
         for slot in slots {
             let child = slot_bound(
                 payload,
+                weapon_id,
                 mode,
                 laser_enabled,
                 id,
@@ -4684,6 +4991,7 @@ fn part_bound(
 #[allow(clippy::too_many_arguments)]
 fn slot_bound(
     payload: &WeaponPayload,
+    weapon_id: &str,
     mode: &str,
     laser_enabled: bool,
     host: &str,
@@ -4701,6 +5009,7 @@ fn slot_bound(
     for id in &slot.candidate_ids {
         let b = part_bound(
             payload,
+            weapon_id,
             mode,
             laser_enabled,
             id,
@@ -4714,6 +5023,7 @@ fn slot_bound(
     for id in &slot.virtual_candidate_ids {
         let b = part_bound(
             payload,
+            weapon_id,
             mode,
             laser_enabled,
             id,
@@ -4728,6 +5038,7 @@ fn slot_bound(
         for id in ids {
             let b = part_bound(
                 payload,
+                weapon_id,
                 mode,
                 laser_enabled,
                 id,
@@ -4908,9 +5219,62 @@ fn pareto_capped(
             )
     });
     let mut trim = Trim::default();
+    let equal_dims = equal_channels(dims);
+    // An `Equal` channel only admits dominators with the same value, so offers
+    // can be partitioned by those values. Bucketing turns the quadratic scan
+    // into an average-constant one when a band constraint (min and max on the
+    // same metric) pins that channel. Without `Equal` channels every offer can
+    // dominate every other, so keep the full scan.
+    if equal_dims.is_empty() || equal_dims.len() > 3 {
+        let mut out: Vec<Offer> = Vec::new();
+        for (idx, o) in offers.into_iter().enumerate() {
+            if out.len() >= limit {
+                trim.capped = true;
+                break;
+            }
+            if idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
+                trim.deadline = true;
+                break;
+            }
+            if out.iter().any(|p| offer_dominates(p, &o, dims)) {
+                continue;
+            }
+            out.retain(|p| !offer_dominates(&o, p, dims));
+            out.push(o);
+        }
+        return (out, trim);
+    }
+    // Quantization is much coarser than `channel_ok`'s 1e-9 tolerance, so equal
+    // channel values land in the same or an adjacent bucket; probing the 3^k
+    // neighbors never misses a dominator.
+    const BUCKET_SCALE: f64 = 1e6;
+    let bucket_key = |o: &Offer| -> Vec<i64> {
+        equal_dims
+            .iter()
+            .map(|channel| (channel(o) * BUCKET_SCALE).round() as i64)
+            .collect()
+    };
+    let neighbor_keys = |key: &[i64]| -> Vec<Vec<i64>> {
+        let mut keys = vec![Vec::with_capacity(key.len())];
+        for &value in key {
+            let mut next = Vec::with_capacity(keys.len() * 3);
+            for base in &keys {
+                for delta in -1..=1 {
+                    let mut candidate = base.clone();
+                    candidate.push(value + delta);
+                    next.push(candidate);
+                }
+            }
+            keys = next;
+        }
+        keys
+    };
+    let mut buckets: FxHashMap<Vec<i64>, Vec<usize>> = FxHashMap::default();
     let mut out: Vec<Offer> = Vec::new();
+    let mut alive: Vec<bool> = Vec::new();
+    let mut kept = 0usize;
     for (idx, o) in offers.into_iter().enumerate() {
-        if out.len() >= limit {
+        if kept >= limit {
             trim.capped = true;
             break;
         }
@@ -4918,13 +5282,76 @@ fn pareto_capped(
             trim.deadline = true;
             break;
         }
-        if out.iter().any(|p| offer_dominates(p, &o, dims)) {
+        let key = bucket_key(&o);
+        let neighbors = neighbor_keys(&key);
+        let mut dominated = false;
+        for neighbor in &neighbors {
+            let Some(list) = buckets.get(neighbor) else {
+                continue;
+            };
+            if list
+                .iter()
+                .any(|&i| alive[i] && offer_dominates(&out[i], &o, dims))
+            {
+                dominated = true;
+                break;
+            }
+        }
+        if dominated {
             continue;
         }
-        out.retain(|p| !offer_dominates(&o, p, dims));
+        let kept_idx = out.len();
         out.push(o);
+        alive.push(true);
+        kept += 1;
+        for neighbor in &neighbors {
+            let Some(list) = buckets.get_mut(neighbor) else {
+                continue;
+            };
+            for &i in list.iter() {
+                if alive[i] && offer_dominates(&out[kept_idx], &out[i], dims) {
+                    alive[i] = false;
+                    kept -= 1;
+                }
+            }
+        }
+        buckets.entry(key).or_default().push(kept_idx);
     }
+    let out = out
+        .into_iter()
+        .zip(alive)
+        .filter_map(|(offer, alive)| alive.then_some(offer))
+        .collect();
     (out, trim)
+}
+
+/// Channels whose dominance relation is exact equality, in a fixed order.
+fn equal_channels(dims: &TuneDims) -> Vec<fn(&Offer) -> f64> {
+    type Accessor = fn(&Offer) -> f64;
+    let mut channels: Vec<Accessor> = Vec::new();
+    if dims.open == TuneDir::Equal {
+        channels.push(|o| o.e_open);
+    }
+    if dims.move_effect == TuneDir::Equal {
+        channels.push(|o| o.e_move);
+        channels.push(|o| o.e_move_runtime);
+    }
+    if dims.breath == TuneDir::Equal {
+        channels.push(|o| o.e_breath);
+    }
+    if dims.move_stability == TuneDir::Equal {
+        channels.push(|o| o.e_move_stability);
+    }
+    if dims.recoil_h == TuneDir::Equal {
+        channels.push(|o| o.e_h);
+    }
+    if dims.recoil_v == TuneDir::Equal {
+        channels.push(|o| o.e_v);
+    }
+    if dims.recoil_k == TuneDir::Equal {
+        channels.push(|o| o.e_k);
+    }
+    channels
 }
 
 fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
@@ -5424,7 +5851,12 @@ fn compute_relevance(
 
     for (id, part) in &payload.parts {
         let mut relevant = !part.extra_occupy_socket_ids.is_empty();
-        for list in part.main_mods.values() {
+        for list in part.main_mods.values().chain(
+            part.main_baseline_mods
+                .get(weapon_id)
+                .into_iter()
+                .flat_map(|m| m.values()),
+        ) {
             for m in list {
                 if m.condition_id.is_none()
                     && m.modifier_type == "Addend"
@@ -5442,7 +5874,12 @@ fn compute_relevance(
             }
         }
         if want_handling || want_stability || want_hipfire {
-            for list in part.display_mods.values() {
+            for list in part.display_mods.values().chain(
+                part.display_baseline_mods
+                    .get(weapon_id)
+                    .into_iter()
+                    .flat_map(|m| m.values()),
+            ) {
                 for m in list {
                     if m.condition_id.is_some() || m.modifier_type != "Addend" {
                         continue;
@@ -5528,7 +5965,12 @@ fn compute_relevance(
             relevant = true;
         }
         if !attribute_constraints.is_empty() {
-            for list in part.display_mods.values() {
+            for list in part.display_mods.values().chain(
+                part.display_baseline_mods
+                    .get(weapon_id)
+                    .into_iter()
+                    .flat_map(|m| m.values()),
+            ) {
                 for m in list {
                     if attribute_constraints.contains(normalize_attr(m.attribute_id.as_deref())) {
                         relevant = true;
@@ -6241,10 +6683,10 @@ mod tests {
         let panel_attrs = vec!["10008".to_string()];
         let option = DpOption {
             cost,
-            metric: exact_part_metric(&part, "X", mode, false, true, false, &panel_attrs),
+            metric: exact_part_metric(&part, "w1", "X", mode, false, true, false, &panel_attrs),
             laser_pro: Some(LaserPro {
                 score: crate::metrics::laser_pro_score(&part, mode),
-                metric: exact_laser_pro(&part, mode, &panel_attrs),
+                metric: exact_laser_pro(&part, "w1", mode, &panel_attrs),
             }),
             choice: SlotChoice::Part(id.to_string()),
         };
@@ -6266,9 +6708,19 @@ mod tests {
 
         // The evaluator applies the modifiers of one laser, the best scoring
         // one, so the DP metric for both parts must match that single delta.
-        let mut once = exact_part_metric(&strong_part, "X", mode, false, true, true, &panel_attrs);
+        let mut once = exact_part_metric(
+            &strong_part,
+            "w1",
+            "X",
+            mode,
+            false,
+            true,
+            true,
+            &panel_attrs,
+        );
         once.add(&exact_part_metric(
             &weak_part,
+            "w1",
             "X",
             mode,
             false,
@@ -6292,9 +6744,10 @@ mod tests {
         let (best, best_part) = laser_option("laser-c", 300, 20.0, 30.0, -1.0);
         let replaced = dp_advance(&forward, &best, 600);
         let mut expected =
-            exact_part_metric(&best_part, "X", mode, false, true, true, &panel_attrs);
+            exact_part_metric(&best_part, "w1", "X", mode, false, true, true, &panel_attrs);
         expected.add(&exact_part_metric(
             &weak_part,
+            "w1",
             "X",
             mode,
             false,
@@ -6304,6 +6757,7 @@ mod tests {
         ));
         expected.add(&exact_part_metric(
             &strong_part,
+            "w1",
             "X",
             mode,
             false,
@@ -6566,6 +7020,226 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(trim.capped);
         assert!(!trim.deadline);
+    }
+
+    #[test]
+    fn tune_dims_maps_sprint_delay_like_aim_time() {
+        let band = [Constraint::new(
+            "handling-sprint-fire-delay",
+            Some(146.64),
+            Some(222.09),
+        )];
+        assert_eq!(TuneDims::from_constraints(&band).open, TuneDir::Equal);
+        let capped = [Constraint::new("handling-sprint-fire-delay", None, Some(222.09))];
+        assert_eq!(TuneDims::from_constraints(&capped).open, TuneDir::Higher);
+        let floor = [Constraint::new(
+            "handling-sprint-fire-delay",
+            Some(146.64),
+            None,
+        )];
+        assert_eq!(TuneDims::from_constraints(&floor).open, TuneDir::Lower);
+    }
+
+    #[test]
+    fn tune_dims_maps_detail_bands_to_equal() {
+        for id in [
+            "handling-aim-time",
+            "handling-aim-move-speed",
+            "stability-breath-range",
+            "stability-breath-duration",
+            "stability-movement-camera",
+        ] {
+            let dims = TuneDims::from_constraints(&[Constraint::new(id, Some(1.0), Some(2.0))]);
+            let mapped = match id {
+                "handling-aim-time" => dims.open,
+                "handling-aim-move-speed" => dims.move_effect,
+                "stability-breath-range" | "stability-breath-duration" => dims.breath,
+                _ => dims.move_stability,
+            };
+            assert_eq!(mapped, TuneDir::Equal, "{id}");
+        }
+    }
+
+    #[test]
+    fn pareto_keeps_distinct_open_sums_for_a_band() {
+        let dims = TuneDims::from_constraints(&[Constraint::new(
+            "handling-sprint-fire-delay",
+            Some(146.64),
+            Some(222.09),
+        )]);
+        let mut low = offer();
+        low.e_open = 10.0;
+        let mut high = offer();
+        high.e_open = 20.0;
+        let (out, _) = pareto_capped(vec![low, high], &dims, 4096, None);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn pareto_keeps_the_highest_open_for_a_max_only_bound() {
+        let dims = TuneDims::from_constraints(&[Constraint::new(
+            "handling-sprint-fire-delay",
+            None,
+            Some(222.09),
+        )]);
+        let mut low = offer();
+        low.e_open = 10.0;
+        let mut high = offer();
+        high.e_open = 20.0;
+        let (out, _) = pareto_capped(vec![low, high], &dims, 4096, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].e_open, 20.0);
+    }
+
+    #[test]
+    fn pareto_equal_bucket_still_prunes_dominated_offers() {
+        let dims = TuneDims::from_constraints(&[
+            Constraint::new("handling-sprint-fire-delay", Some(146.64), Some(222.09)),
+            Constraint::new("recoil-single-horizontal", Some(1.0), None),
+        ]);
+        let mut weak = offer();
+        weak.e_open = 10.0;
+        weak.e_h = 2.0;
+        let mut strong = offer();
+        strong.e_open = 10.0;
+        strong.e_h = 1.0;
+        let (out, _) = pareto_capped(vec![weak, strong], &dims, 4096, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].e_h, 1.0);
+    }
+
+    fn visible_slot(
+        path: &str,
+        parent: Option<&str>,
+        depth: usize,
+        selected: Option<&str>,
+        internal: Option<&str>,
+    ) -> crate::assembly::VisibleSlot {
+        crate::assembly::VisibleSlot {
+            path_key: path.to_string(),
+            parent_slot_path_key: parent.map(str::to_string),
+            host_part_id: "host".to_string(),
+            depth,
+            slot: crate::assembly::SlotView {
+                id: "slot".to_string(),
+                name: "slot".to_string(),
+                virtual_candidate_ids: Vec::new(),
+            },
+            candidate_ids: Vec::new(),
+            selected_part_id: selected.map(str::to_string),
+            internal_part_id: internal.map(str::to_string),
+            internal_is_default: false,
+        }
+    }
+
+    fn internal_part(
+        path: &str,
+        parent: Option<&str>,
+        depth: usize,
+        part: &str,
+    ) -> crate::assembly::InternalPart {
+        crate::assembly::InternalPart {
+            slot_path_key: path.to_string(),
+            parent_slot_path_key: parent.map(str::to_string),
+            host_part_id: "host".to_string(),
+            depth,
+            slot: crate::assembly::SlotView {
+                id: "slot".to_string(),
+                name: "slot".to_string(),
+                virtual_candidate_ids: Vec::new(),
+            },
+            part_id: part.to_string(),
+            source: "default".to_string(),
+        }
+    }
+
+    fn decided_set(paths: &[&str]) -> FxHashSet<String> {
+        paths.iter().map(|path| (*path).to_string()).collect()
+    }
+
+    #[test]
+    fn bound_roots_count_an_undecided_subtree_once() {
+        let visible = vec![
+            visible_slot("w/slot:1:A", None, 0, None, None),
+            visible_slot(
+                "w/slot:1:A/part:P/slot:2:B",
+                Some("w/slot:1:A"),
+                1,
+                Some("Q"),
+                None,
+            ),
+        ];
+        let internal = vec![internal_part(
+            "w/slot:1:A/part:P/slot:3:H",
+            Some("w/slot:1:A"),
+            1,
+            "R",
+        )];
+        let decided = decided_set(&["w/slot:1:A/part:P/slot:2:B"]);
+        let roots = bound_roots(&visible, &internal, &decided, |slot| {
+            slot.path_key == "w/slot:1:A"
+        });
+        assert_eq!(roots, vec![BoundRoot::AssumedVisible(0)]);
+    }
+
+    #[test]
+    fn bound_roots_keep_own_bounds_under_decided_parents() {
+        let visible = vec![
+            visible_slot("w/slot:1:A", None, 0, Some("P"), None),
+            visible_slot(
+                "w/slot:1:A/part:P/slot:2:B",
+                Some("w/slot:1:A"),
+                1,
+                Some("Q"),
+                None,
+            ),
+        ];
+        let internal = vec![
+            internal_part("w/slot:1:A/part:P/slot:3:H", Some("w/slot:1:A"), 1, "R"),
+            internal_part(
+                "w/slot:1:A/part:P/slot:3:H/part:R/slot:4:K",
+                Some("w/slot:1:A/part:P/slot:3:H"),
+                2,
+                "S",
+            ),
+        ];
+        let decided = decided_set(&["w/slot:1:A", "w/slot:1:A/part:P/slot:2:B"]);
+        let roots = bound_roots(&visible, &internal, &decided, |_| true);
+        assert_eq!(
+            roots,
+            vec![
+                BoundRoot::DecidedVisible(0),
+                BoundRoot::DecidedVisible(1),
+                BoundRoot::OptionalInternal(0),
+                BoundRoot::OptionalInternal(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn bound_roots_dedup_the_internal_record_of_a_visible_slot() {
+        let visible = vec![visible_slot("w/slot:1:A", None, 0, None, Some("P"))];
+        let internal = vec![internal_part("w/slot:1:A", None, 0, "P")];
+        let decided = decided_set(&["w/slot:1:A"]);
+        let roots = bound_roots(&visible, &internal, &decided, |_| true);
+        assert_eq!(roots, vec![BoundRoot::DecidedVisible(0)]);
+    }
+
+    #[test]
+    fn bound_roots_do_not_cover_when_no_recursive_bound_exists() {
+        let visible = vec![
+            visible_slot("w/slot:1:A", None, 0, None, None),
+            visible_slot(
+                "w/slot:1:A/part:P/slot:2:B",
+                Some("w/slot:1:A"),
+                1,
+                Some("Q"),
+                None,
+            ),
+        ];
+        let decided = decided_set(&["w/slot:1:A/part:P/slot:2:B"]);
+        let roots = bound_roots(&visible, &[], &decided, |_| false);
+        assert_eq!(roots, vec![BoundRoot::DecidedVisible(1)]);
     }
 
     #[test]
