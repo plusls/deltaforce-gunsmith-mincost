@@ -140,7 +140,7 @@
 - 精校可用性用 `tuningSocketAvailability` 和槽位名判断, 不可用时不记收益.
 - 面板 DP 支持单独的 max 或 min 约束; 同一属性同时有 min 和 max 时关闭 DP. `10001` 始终关闭 DP.
 
-DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncated`, 此时结果不再声明 optimal.
+DP 前沿每层上限 200,000 状态 (种子 pass 为 8,192). 超过时按价格截断并置 `heuristic_incomplete`, 结果 `optimal=false`; 该上限本身不置 `truncated`, 与时间/预算截断区分开.
 
 12 维前沿 (带 `handling-aim-time` 约束) 在部分武器上会让单层远超 8,192 状态, 单次 DP 扫描耗时数分钟. 此时第一次精确 pass 会在前沿超过 8,192 且该层运行超过 1 秒后投机中止, 不产出结果; 随后用有界启发式 (10,000 work unit 或 8 秒) 抬高 incumbent, 再用未放宽的完整精确搜索重跑. 最终结果始终来自完整精确搜索, 中止只影响找上界的快慢.
 
@@ -174,6 +174,10 @@ DP 前沿每层上限 200,000 状态. 超过时按价格截断并设置 `truncat
 
 注意: 下界只累计"已决定"的槽位价格. 如果把未决定槽位的最低价也加上, 会因为换父配件导致子槽位消失而高估, 从而错误剪枝. 这是实现时踩过的坑.
 
+精校前沿有独立的候选上限: 单个配件内和跨结构组合并的中间候选列表各受 `TUNE_NEXT_LIMIT` (16,384) 限制, Pareto 剪枝后每组最多保留 `TUNE_CAP` (4,096) 个非支配解. 触发任一上限都会置 `heuristic_incomplete`, 该结果不能声明最优. 缓存的前沿会记录构建时是否被截断, 后续 pass 复用被截断的缓存时重新置位 `heuristic_incomplete`, 因此种子 pass 的截断前沿不会被精确 pass 静默复用.
+
+精确 pass 正常完成 (没有时间/预算截断) 后, 若该 pass 触发了精校前沿截断, 且距离 deadline 仍不少于 `TUNE_STAGE2_MIN_MS` (1,000 ms), 求解器会清空精校前沿缓存, 把上限提升到 `TUNE_STAGE2_CAP`/`TUNE_STAGE2_NEXT` (65,536/65,536) 重跑一次精确 pass. 重跑无截断时结果可证明最优; 撞到 deadline 时 `truncated=true`, 保留上一轮的 incumbent; 仍然截断时 `heuristic_incomplete` 保持. 第二阶段有独立的节点/叶子预算, 与既有多次 pass 的行为一致. `firstSolution` 模式只跑种子 DFS, 不进入第二阶段.
+
 ### 5.4 叶子精确评估
 
 DP 只负责生成候选组合和剪枝. 每个最终状态都会走一遍完整评估:
@@ -202,7 +206,8 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 
 - 无约束或只有 max 约束, 且未触发预算/前沿/时间截断: 在 DP 支配关系成立的假设下是全局最优.
 - 有 min 约束: `dp_ok=false`, 完整枚举, 可能较慢.
-- DP 前沿超过 200,000: 结果标记 `truncated`, `optimal=false`.
+- DP 前沿超过 200,000 (种子 pass 8,192): 置 `heuristic_incomplete`, `optimal=false`, 不置 `truncated`; 该上限不触发精校前沿的第二阶段重跑.
+- 精校前沿超过 4,096 / 16,384 上限: 同样置 `heuristic_incomplete`, `optimal=false`. 若精确 pass 未因时间/预算被截断, 且剩余时间不少于 1,000 ms, 会用 65,536 上限重跑一次精确 pass, 见 5.3.
 - 节点/叶子预算耗尽: 同样标记 `truncated`.
 - `deadlineMs` 到期: 返回当前最好解, `truncated=true`, `optimal=false`. 时钟每 64 次预算检查读一次, 实际超时可能比设定值晚几十毫秒.
 - `forbidBindings` 不参与优化. 站点自身也只在生成改枪码时用它剔除需要折叠状态的配件, 优化器不检查.
@@ -455,7 +460,7 @@ GET https://moligod.com/api/gunsmith/share-codes/6LM1E480BO0F121KNDPVA
 
 搜索顺序是便宜优先, 因此"便宜但全部违反约束"的分支会被先枚举. 约束很紧时 (例如同时要求后坐力三项和 `handling-aim-time`), 首个可行解可能出现在很深的叶节点, 5 秒预算内找不到是可能的, 即使可行解实际存在.
 
-截止时间的检查点: 每个 DFS 节点, 每个叶节点, 每次 DP 状态更新, 以及精校 Pareto 的每 1024 个候选. 精校前沿单次最多构建 16,384 个候选, 保留 4,096 个非支配解, 超出即置 `truncated`. 带 `handling-aim-time` max 约束时, DP 状态会先用"最大开镜速度精校潜力"算一次乐观瞄准时间, 连乐观值都超限的状态直接丢弃.
+截止时间的检查点: 每个 DFS 节点, 每个叶节点, 每次 DP 状态更新, 以及精校 Pareto 的每 1024 个候选. 精校前沿的两类中间候选列表 (单个配件内、跨结构组合并) 各上限 16,384, Pareto 剪枝后最多保留 4,096 个非支配解; 触发任一上限置 `heuristic_incomplete` (结果 `optimal=false`), 不置 `truncated`. 若精确 pass 未被时间/预算截断且剩余时间不少于 1,000 ms, 会清空精校前沿缓存并用 65,536/65,536 的上限重跑一次精确 pass; 重跑仍截断时 `heuristic_incomplete` 保持, 撞到 deadline 时保留上一轮 incumbent 并置 `truncated=true`. 带 `handling-aim-time` max 约束时, DP 状态会先用"最大开镜速度精校潜力"算一次乐观瞄准时间, 连乐观值都超限的状态直接丢弃.
 
 ### 10.2 静态复杂度
 

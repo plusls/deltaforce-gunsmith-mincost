@@ -182,7 +182,10 @@ pub struct Solver<'a> {
     seed_panel_attrs: Vec<usize>,
     seed_aim: f64,
     dp_metric_cache: FxHashMap<(String, String), ExactPart>,
-    tune_frontier_cache: FxHashMap<String, Rc<Vec<Offer>>>,
+    tune_frontier_cache: FxHashMap<String, CachedFrontier>,
+    tune_cap: usize,
+    tune_next: usize,
+    tune_incomplete: bool,
     control_curve: Option<Curve>,
     gunkick_curve: Option<Curve>,
     control_min: Option<f64>,
@@ -305,6 +308,12 @@ struct Offer {
     e_move_stability: f64,
     values: Vec<(String, f64)>,
     deviation: f64,
+}
+
+#[derive(Clone)]
+struct CachedFrontier {
+    offers: Rc<Vec<Offer>>,
+    capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -837,6 +846,9 @@ impl<'a> Solver<'a> {
             search_constraints,
             dp_metric_cache: FxHashMap::default(),
             tune_frontier_cache: FxHashMap::default(),
+            tune_cap: TUNE_CAP,
+            tune_next: TUNE_NEXT_LIMIT,
+            tune_incomplete: false,
             control_curve,
             gunkick_curve,
             control_min,
@@ -891,6 +903,7 @@ impl<'a> Solver<'a> {
             solver.stop = false;
             solver.truncated = false;
             solver.heuristic_incomplete = false;
+            solver.tune_incomplete = false;
             solver.seed_beam_tried = false;
             solver.nodes = 0;
             solver.leaves = 0;
@@ -910,6 +923,7 @@ impl<'a> Solver<'a> {
         let mut incomplete: bool;
         let mut total_nodes = 0u64;
         let mut total_leaves = 0u64;
+        let mut exact_pass_ran = false;
         if self.options.first_solution {
             self.cost_cap = fixed_cap.unwrap_or(i64::MAX);
             self.seed = true;
@@ -968,6 +982,7 @@ impl<'a> Solver<'a> {
                 reset(&mut self, &mut selections, &mut decided);
                 self.frontier_abort = Some(FRONTIER_ABORT_STATES);
                 self.dfs(&mut selections, &mut decided, &mut deferred);
+                exact_pass_ran = true;
                 self.frontier_abort = None;
                 self.frontier_abort_not_before = None;
                 total_nodes += self.nodes;
@@ -990,6 +1005,7 @@ impl<'a> Solver<'a> {
                         self.stop = false;
                         self.truncated = false;
                         self.heuristic_incomplete = false;
+                        self.tune_incomplete = false;
                         self.seed = true;
                         self.seed_continue = true;
                         self.seed_continue_until = self.work() + SEED_IMPROVE_WORK;
@@ -1024,10 +1040,25 @@ impl<'a> Solver<'a> {
         } else {
             self.cost_cap = fixed_cap.unwrap_or(i64::MAX);
             self.dfs(&mut selections, &mut decided, &mut deferred);
+            exact_pass_ran = true;
             total_nodes += self.nodes;
             total_leaves += self.leaves;
             truncated = self.truncated;
             incomplete = self.heuristic_incomplete;
+        }
+        if exact_pass_ran && self.tune_incomplete && !truncated && self.stage2_time_ok() {
+            self.tune_cap = TUNE_STAGE2_CAP;
+            self.tune_next = TUNE_STAGE2_NEXT;
+            // Cached frontiers were built under the first pass's caps.
+            self.tune_frontier_cache.clear();
+            reset(&mut self, &mut selections, &mut decided);
+            deferred.clear();
+            self.aborted_pass = false;
+            self.dfs(&mut selections, &mut decided, &mut deferred);
+            total_nodes += self.nodes;
+            total_leaves += self.leaves;
+            truncated = self.truncated;
+            incomplete = self.heuristic_incomplete || self.aborted_pass;
         }
         let optimal = !truncated && !incomplete && self.best.is_some();
         let message = if truncated {
@@ -2895,21 +2926,44 @@ impl<'a> Solver<'a> {
         parts: &[&Part],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
         let cache_key = tune_cache_key(instances);
-        let frontier = if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
-            cached.clone()
+        let (frontier, capped) = if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
+            (cached.offers.clone(), cached.capped)
         } else {
-            let built = self.build_tune_frontier(instances)?;
+            let (built, capped) = self.build_tune_frontier(instances)?;
             let built = Rc::new(built);
             if self.tune_frontier_cache.len() >= TUNE_FRONTIER_CACHE_LIMIT {
                 self.tune_frontier_cache.clear();
             }
-            self.tune_frontier_cache.insert(cache_key, built.clone());
-            built
+            self.tune_frontier_cache.insert(
+                cache_key,
+                CachedFrontier {
+                    offers: built.clone(),
+                    capped,
+                },
+            );
+            (built, capped)
         };
+        if capped {
+            self.heuristic_incomplete = true;
+            self.tune_incomplete = true;
+        }
         Self::pick_from_frontier(&frontier, req, parts, self.options, &self.evaluator)
     }
 
-    fn build_tune_frontier(&mut self, instances: &[TuningInstance<'a>]) -> Option<Vec<Offer>> {
+    fn stage2_time_ok(&self) -> bool {
+        match self.deadline_at {
+            None => true,
+            Some(deadline) => deadline.saturating_sub(now_ms()) >= TUNE_STAGE2_MIN_MS,
+        }
+    }
+
+    fn build_tune_frontier(
+        &mut self,
+        instances: &[TuningInstance<'a>],
+    ) -> Option<(Vec<Offer>, bool)> {
+        let tune_cap = self.tune_cap;
+        let tune_next = self.tune_next;
+        let mut capped = false;
         let empty = || Offer {
             e_h: 0.0,
             e_v: 0.0,
@@ -2958,7 +3012,7 @@ impl<'a> Solver<'a> {
                 let mut next = Vec::new();
                 for a in &group {
                     for b in &offers {
-                        if next.len() >= TUNE_NEXT_LIMIT {
+                        if next.len() >= tune_next {
                             break;
                         }
                         let mut values = a.values.clone();
@@ -2976,17 +3030,21 @@ impl<'a> Solver<'a> {
                             deviation: a.deviation + (b.value - default).abs(),
                         });
                     }
-                    if next.len() >= TUNE_NEXT_LIMIT {
+                    if next.len() >= tune_next {
+                        capped = true;
                         self.heuristic_incomplete = true;
+                        self.tune_incomplete = true;
                         break;
                     }
                 }
                 let (pruned, cut) = if self.negative_recoil_max {
                     (next, Trim::default())
                 } else {
-                    pareto_capped(next, &self.tune_dims, 4096, self.deadline_at)
+                    pareto_capped(next, &self.tune_dims, tune_cap, self.deadline_at)
                 };
                 self.heuristic_incomplete |= cut.capped;
+                capped |= cut.capped;
+                self.tune_incomplete |= cut.capped;
                 self.truncated |= cut.deadline;
                 group = pruned;
             }
@@ -2996,7 +3054,7 @@ impl<'a> Solver<'a> {
             let mut next = Vec::new();
             for a in &frontier {
                 for b in &group {
-                    if next.len() >= TUNE_NEXT_LIMIT {
+                    if next.len() >= tune_next {
                         break;
                     }
                     let mut values = a.values.clone();
@@ -3014,21 +3072,25 @@ impl<'a> Solver<'a> {
                         deviation: a.deviation + b.deviation,
                     });
                 }
-                if next.len() >= TUNE_NEXT_LIMIT {
+                if next.len() >= tune_next {
+                    capped = true;
                     self.heuristic_incomplete = true;
+                    self.tune_incomplete = true;
                     break;
                 }
             }
             let (pruned, cut) = if self.negative_recoil_max {
                 (next, Trim::default())
             } else {
-                pareto_capped(next, &self.tune_dims, 4096, self.deadline_at)
+                pareto_capped(next, &self.tune_dims, tune_cap, self.deadline_at)
             };
             self.heuristic_incomplete |= cut.capped;
+            capped |= cut.capped;
+            self.tune_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
             frontier = pruned;
         }
-        Some(frontier)
+        Some((frontier, capped))
     }
 
     fn pick_from_frontier(
@@ -4784,7 +4846,11 @@ fn curve_min_value(curve: &Curve) -> Option<f64> {
     }
 }
 
+const TUNE_CAP: usize = 4_096;
 const TUNE_NEXT_LIMIT: usize = 16_384;
+const TUNE_STAGE2_CAP: usize = 65_536;
+const TUNE_STAGE2_NEXT: usize = 65_536;
+const TUNE_STAGE2_MIN_MS: u64 = 1_000;
 /// Upper bound on cached tuning frontiers. Entries are a few hundred KB at most;
 /// the cap keeps pathological payloads from growing the solver without bound.
 const TUNE_FRONTIER_CACHE_LIMIT: usize = 512;
