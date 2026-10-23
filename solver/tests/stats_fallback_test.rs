@@ -1,6 +1,6 @@
-use delta_weapon_solver::assembly::Assembler;
-use delta_weapon_solver::metrics::{has_laser, BuildMetrics, Evaluator, TuningState};
-use delta_weapon_solver::model::{Map, WeaponPayload};
+use gunsmith_mincost::assembly::Assembler;
+use gunsmith_mincost::metrics::{has_laser, BuildMetrics, Evaluator, TuningState};
+use gunsmith_mincost::model::{Map, WeaponPayload};
 use flate2::read::GzDecoder;
 use rustc_hash::FxHashMap;
 use serde_json::{json, Value};

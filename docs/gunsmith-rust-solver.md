@@ -317,10 +317,10 @@ cargo build --release
 ### 6.4 WASM
 
 ```bash
-cargo build --release --target wasm32-unknown-unknown -p delta-weapon-solver
+cargo build --release --target wasm32-unknown-unknown -p gunsmith-mincost
 ```
 
-产物: `target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm`.
+产物: `target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm`.
 
 导出 C ABI:
 
@@ -345,7 +345,7 @@ WebAssembly.instantiate(module, {
 ```js
 import { loadSolver } from "./solver/js/solver.mjs";
 
-const solver = await loadSolver("/delta_weapon_solver.wasm");
+const solver = await loadSolver("/gunsmith_mincost.wasm");
 const result = solver.solve(weaponPayload, request);
 ```
 
@@ -353,7 +353,7 @@ Node 冒烟测试:
 
 ```bash
 node solver/js/smoke.mjs \
-  target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm \
+  target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm \
   weapon.json request.json
 ```
 

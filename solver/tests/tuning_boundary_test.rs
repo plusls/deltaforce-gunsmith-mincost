@@ -1,5 +1,5 @@
-use delta_weapon_solver::model::WeaponPayload;
-use delta_weapon_solver::search::{Constraint, SolveOptions, SolveResult, Solver};
+use gunsmith_mincost::model::WeaponPayload;
+use gunsmith_mincost::search::{Constraint, SolveOptions, SolveResult, Solver};
 use rustc_hash::FxHashMap;
 
 const WEAPON: &str = "w1";

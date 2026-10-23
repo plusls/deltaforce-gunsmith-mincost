@@ -30,7 +30,7 @@ fn run_case_with_payload_and_leaves(
     ))
     .unwrap();
     let started = Instant::now();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     let elapsed = started.elapsed();
     let out: Value = serde_json::from_slice(&out).unwrap();
     println!("{request_file}: {elapsed:?}");

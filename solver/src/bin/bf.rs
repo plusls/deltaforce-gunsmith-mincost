@@ -1,7 +1,7 @@
-use delta_weapon_solver::assembly::{Assembler, Assembly};
-use delta_weapon_solver::metrics::{quantize, Evaluator, TuningState};
-use delta_weapon_solver::model::{Map, WeaponPayload};
-use delta_weapon_solver::search::Constraint;
+use gunsmith_mincost::assembly::{Assembler, Assembly};
+use gunsmith_mincost::metrics::{quantize, Evaluator, TuningState};
+use gunsmith_mincost::model::{Map, WeaponPayload};
+use gunsmith_mincost::search::Constraint;
 use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -32,7 +32,7 @@ fn parse_spec(path: &str) -> Spec {
     }
 }
 
-fn metric_value(id: &str, m: &delta_weapon_solver::metrics::BuildMetrics) -> Option<f64> {
+fn metric_value(id: &str, m: &gunsmith_mincost::metrics::BuildMetrics) -> Option<f64> {
     match id {
         "recoil-continuous-horizontal" => Some(m.recoil.continuous_h),
         "recoil-continuous-vertical" => Some(m.recoil.continuous_v),
@@ -48,7 +48,7 @@ fn metric_value(id: &str, m: &delta_weapon_solver::metrics::BuildMetrics) -> Opt
 
 fn check(
     constraints: &[Constraint],
-    m: &delta_weapon_solver::metrics::BuildMetrics,
+    m: &gunsmith_mincost::metrics::BuildMetrics,
 ) -> (bool, Vec<Value>) {
     let mut ok = true;
     let mut out = Vec::new();
@@ -64,7 +64,7 @@ fn check(
     (ok, out)
 }
 
-fn tune_values(tune: &delta_weapon_solver::model::TuningOption, cap: usize) -> Option<Vec<f64>> {
+fn tune_values(tune: &gunsmith_mincost::model::TuningOption, cap: usize) -> Option<Vec<f64>> {
     let mut vals = vec![tune.min_value, tune.max_value, tune.default_value];
     for e in &tune.display_effects {
         for k in &e.curve_points {
@@ -167,7 +167,7 @@ impl<'a> Bf<'a> {
         let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
         let mut skip = false;
         for inst in &instances {
-            if !delta_weapon_solver::metrics::tuning_available(&inst.slot_name, inst.part) {
+            if !gunsmith_mincost::metrics::tuning_available(&inst.slot_name, inst.part) {
                 continue;
             }
             for tune in &inst.part.tuning_options {
@@ -422,7 +422,7 @@ fn main() {
 
     let solve_started = Instant::now();
     let request_bytes = serde_json::to_vec(&spec.request).unwrap();
-    let solved = delta_weapon_solver::solve_slices(&payload_bytes, &request_bytes);
+    let solved = gunsmith_mincost::solve_slices(&payload_bytes, &request_bytes);
     let solve_elapsed = solve_started.elapsed().as_secs_f64();
 
     let mut out = json!({

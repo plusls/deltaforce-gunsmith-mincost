@@ -22,7 +22,7 @@ jobs:
         run: cargo build --release
 
       - name: Build WASM
-        run: cargo build --release --target wasm32-unknown-unknown -p delta-weapon-solver
+        run: cargo build --release --target wasm32-unknown-unknown -p gunsmith-mincost
 
       - name: Install Node
         uses: actions/setup-node@v4

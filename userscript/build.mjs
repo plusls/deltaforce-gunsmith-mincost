@@ -6,7 +6,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
 const defaultWasmPath = resolve(
   repo,
-  "target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm",
+  "target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm",
 );
 
 function stripModule(source) {
@@ -56,7 +56,7 @@ ${mainSource}
 
 const metadata = `// ==UserScript==
 // @name         moligod 改枪最低开销
-// @namespace    https://github.com/plusls/delta-weapon-custom
+// @namespace    https://github.com/plusls/gunsmith-mincost
 // @version      0.3.10
 // @description  在硬条件约束下搜索总价最低的改枪方案
 // @match        https://moligod.com/gunsmith/*

@@ -1,8 +1,8 @@
-use delta_weapon_solver::assembly::Assembler;
-use delta_weapon_solver::constraint_reduction::reduce_stability_constraints;
-use delta_weapon_solver::metrics::{BuildMetrics, Evaluator, TuningState};
-use delta_weapon_solver::model::{Num, WeaponPayload};
-use delta_weapon_solver::search::{Constraint, SolveOptions, SolveResult, Solver};
+use gunsmith_mincost::assembly::Assembler;
+use gunsmith_mincost::constraint_reduction::reduce_stability_constraints;
+use gunsmith_mincost::metrics::{BuildMetrics, Evaluator, TuningState};
+use gunsmith_mincost::model::{Num, WeaponPayload};
+use gunsmith_mincost::search::{Constraint, SolveOptions, SolveResult, Solver};
 use flate2::read::GzDecoder;
 use rustc_hash::FxHashMap;
 use std::fs::File;
@@ -112,7 +112,7 @@ fn explicitly_selecting_the_default_part_matches_leaving_it_unset() {
         .iter()
         .all(|slot| slot.selected_part_id.as_deref() != Some(INTERNAL_SIGHT)));
 
-    let evaluate_with = |assembly: &delta_weapon_solver::assembly::Assembly| {
+    let evaluate_with = |assembly: &gunsmith_mincost::assembly::Assembly| {
         let evaluator = Evaluator {
             payload: &payload,
             weapon_id: WEAPON,
@@ -260,7 +260,7 @@ fn laser_initial_and_mult_a_follow_the_laser_rule() {
     .unwrap();
     let prices = FxHashMap::default();
     let panel = |order: [&str; 2], laser: bool| {
-        let parts: Vec<&delta_weapon_solver::model::Part> = order
+        let parts: Vec<&gunsmith_mincost::model::Part> = order
             .iter()
             .map(|id| payload.parts.get(*id).unwrap())
             .collect();

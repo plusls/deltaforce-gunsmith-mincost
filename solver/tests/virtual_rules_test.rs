@@ -1,5 +1,5 @@
-use delta_weapon_solver::assembly::Assembler;
-use delta_weapon_solver::model::{Map, WeaponPayload};
+use gunsmith_mincost::assembly::Assembler;
+use gunsmith_mincost::model::{Map, WeaponPayload};
 use serde_json::json;
 
 fn payload() -> WeaponPayload {

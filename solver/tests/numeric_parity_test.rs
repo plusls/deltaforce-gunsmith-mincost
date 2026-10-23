@@ -9,15 +9,15 @@
 //! `movementCameraStabilityCurve(dS) / max(0.1, 1 + dS_move / 100)`.
 //! `GSMovement_CameraScale` only scales the raw value, never the reported one.
 
-use delta_weapon_solver::metrics::{stability_metric_at, DetailSums, Evaluator};
-use delta_weapon_solver::model::WeaponPayload;
+use gunsmith_mincost::metrics::{stability_metric_at, DetailSums, Evaluator};
+use gunsmith_mincost::model::WeaponPayload;
 use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
 
 fn run_payload(payload: &Value, request: Value) -> Value {
     let payload = serde_json::to_vec(payload).unwrap();
     let request = serde_json::to_vec(&request).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 

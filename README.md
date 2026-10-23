@@ -1,4 +1,4 @@
-# Delta Weapon Custom
+# gunsmith-mincost
 
 三角洲行动（moligod 改枪页）的约束改枪求解器。核心用 Rust 实现并编译为 WASM，通过 Tampermonkey 脚本嵌入改枪页，在站点原有“生成智能配件方案”旁提供“最低开销”求解。
 
@@ -45,7 +45,7 @@ docs/                  数值模型、站点 worker 协议、求解器算法、�
 rustup target add wasm32-unknown-unknown
 
 cargo build --release
-cargo build --release --target wasm32-unknown-unknown -p delta-weapon-solver
+cargo build --release --target wasm32-unknown-unknown -p gunsmith-mincost
 node userscript/build.mjs
 # 产物: userscript/dist/gunsmith-mincost.user.js
 ```
@@ -112,7 +112,7 @@ target/release/solve --payload weapon.json --prices prices.json \
 
 ```bash
 node solver/js/smoke.mjs \
-  target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm \
+  target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm \
   weapon.json request.json
 ```
 
@@ -151,6 +151,10 @@ node solver/js/brute-diff.mjs cases/*.json
 ```
 
 `brute-diff.mjs` 会对每个 case 同时运行 `solve` 和 `bf`，比较总价、约束值与复算结果，出现 `DIFF` 时以非零状态退出。详见 `docs/gunsmith-testing.md`。
+
+## 致谢
+
+本项目的数值模型、站点数据结构与“智能配件方案”的分析起点都来自 moligod 的改枪页实现，没有它就没有可复刻的精确规则和可用的数据格式。求解器、WASM 封装、油猴脚本与测试工具是基于这些工作另外实现的。
 
 ## 说明
 

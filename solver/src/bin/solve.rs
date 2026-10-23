@@ -1,5 +1,5 @@
-use delta_weapon_solver::search::Constraint;
-use delta_weapon_solver::{solve_slices, SolveRequest};
+use gunsmith_mincost::search::Constraint;
+use gunsmith_mincost::{solve_slices, SolveRequest};
 use std::fs;
 use std::io::{self, Read, Write};
 
@@ -108,7 +108,7 @@ fn run() -> Result<(), String> {
         }
         if payload_path.is_none() {
             let text = fs::read_to_string(&request_path).map_err(|e| e.to_string())?;
-            let out = delta_weapon_solver::solve_request(
+            let out = gunsmith_mincost::solve_request(
                 serde_json::from_str::<SolveRequest>(&text).map_err(|e| e.to_string())?,
             )?;
             println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
@@ -127,7 +127,7 @@ fn run() -> Result<(), String> {
         io::stdin()
             .read_to_string(&mut text)
             .map_err(|e| e.to_string())?;
-        let out = delta_weapon_solver::solve_request(
+        let out = gunsmith_mincost::solve_request(
             serde_json::from_str::<SolveRequest>(&text).map_err(|e| e.to_string())?,
         )?;
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
@@ -135,7 +135,7 @@ fn run() -> Result<(), String> {
     };
 
     let payload = fs::read(&payload_path).map_err(|e| e.to_string())?;
-    let payload_model: delta_weapon_solver::model::WeaponPayload =
+    let payload_model: gunsmith_mincost::model::WeaponPayload =
         serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
     let mut prices = std::collections::BTreeMap::new();
     let mut strict_prices = false;

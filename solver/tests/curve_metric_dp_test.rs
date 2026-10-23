@@ -1,6 +1,6 @@
-use delta_weapon_solver::constraint_reduction::reduce_stability_constraints;
-use delta_weapon_solver::model::WeaponPayload;
-use delta_weapon_solver::search::Constraint;
+use gunsmith_mincost::constraint_reduction::reduce_stability_constraints;
+use gunsmith_mincost::model::WeaponPayload;
+use gunsmith_mincost::search::Constraint;
 use serde_json::{json, Value};
 
 fn curve_payload(fire_camera_keys: Value) -> Value {
@@ -114,7 +114,7 @@ fn reduce(payload: &Value, constraints: Value) -> Vec<Constraint> {
 fn run(payload: &Value, request: Value) -> Value {
     let payload = serde_json::to_vec(payload).unwrap();
     let request = serde_json::to_vec(&request).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -248,7 +248,7 @@ fn real_fire_camera_case_uses_the_dp() {
         "/tests/fixtures/rm277-stability-fire-camera.request.json"
     ))
     .unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     let out: Value = serde_json::from_slice(&out).unwrap();
     let best = out["best"].as_object().unwrap();
     assert_eq!(out["optimal"], true);

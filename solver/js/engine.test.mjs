@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "../..");
 const wasmPath = resolve(
   repo,
-  "target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm",
+  "target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm",
 );
 
 const payload = {

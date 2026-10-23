@@ -1,4 +1,4 @@
-use delta_weapon_solver::{solve_request, SolveRequest};
+use gunsmith_mincost::{solve_request, SolveRequest};
 
 fn run_case(fixture: &str, expected_total_price: i64) {
     let path = format!(
@@ -44,7 +44,7 @@ fn run_slices(payload_file: &str, request_file: &str, expected_total_price: i64)
     let payload = std::fs::read(format!("{base}/{payload_file}")).unwrap();
     let request = std::fs::read(format!("{base}/{request_file}")).unwrap();
     let out: serde_json::Value =
-        serde_json::from_slice(&delta_weapon_solver::solve_slices(&payload, &request).unwrap())
+        serde_json::from_slice(&gunsmith_mincost::solve_slices(&payload, &request).unwrap())
             .unwrap();
     assert_eq!(out["optimal"], true, "{payload_file}");
     assert_eq!(out["truncated"], false, "{payload_file}");

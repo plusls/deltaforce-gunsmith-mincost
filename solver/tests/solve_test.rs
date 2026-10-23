@@ -83,7 +83,7 @@ fn run(request: serde_json::Value) -> serde_json::Value {
 fn run_payload(payload: &serde_json::Value, request: serde_json::Value) -> serde_json::Value {
     let payload = serde_json::to_vec(payload).unwrap();
     let request = serde_json::to_vec(&request).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -318,7 +318,7 @@ fn unsupported_constraint_is_rejected() {
         "constraints": [{ "id": "not-a-metric", "max": 1.0 }]
     }))
     .unwrap();
-    let err = delta_weapon_solver::solve_slices(&payload, &request).unwrap_err();
+    let err = gunsmith_mincost::solve_slices(&payload, &request).unwrap_err();
     assert!(err.contains("unsupported constraint"));
 }
 

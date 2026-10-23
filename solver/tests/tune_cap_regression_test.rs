@@ -30,7 +30,7 @@ fn shared_payload_json() -> Vec<u8> {
 fn run_request_case(request_fixture: &str, expected_price: u64) {
     let payload = shared_payload_json();
     let request = serde_json::to_vec(&read_request_fixture(request_fixture)).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     let out: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(out["optimal"], true, "{request_fixture}: {out}");
     assert_eq!(out["truncated"], false, "{request_fixture}: {out}");
@@ -48,7 +48,7 @@ fn run_case(fixture: &str, expected_price: u64) {
     let fixture_json = read_fixture(fixture);
     let payload = serde_json::to_vec(&fixture_json["payload"]).unwrap();
     let request = serde_json::to_vec(&fixture_json["request"]).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     let out: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(out["optimal"], true, "{fixture}: {out}");
     assert_eq!(out["truncated"], false, "{fixture}: {out}");
@@ -101,7 +101,7 @@ fn real_18010000037_4_regression() {
     let fixture_json = read_fixture("real_18010000037_4.json.gz");
     let payload = serde_json::to_vec(&fixture_json["payload"]).unwrap();
     let request = serde_json::to_vec(&fixture_json["request"]).unwrap();
-    let out = delta_weapon_solver::solve_slices(&payload, &request).unwrap();
+    let out = gunsmith_mincost::solve_slices(&payload, &request).unwrap();
     let out: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(out["truncated"], false, "{out}");
     assert_eq!(out["best"]["total_price"], 254468, "{out}");
@@ -139,7 +139,7 @@ fn sprint_band_free_tuning_returns_aligned_tuning_keys_and_values() {
     ))
     .unwrap();
     let out: Value =
-        serde_json::from_slice(&delta_weapon_solver::solve_slices(&payload, &request).unwrap())
+        serde_json::from_slice(&gunsmith_mincost::solve_slices(&payload, &request).unwrap())
             .unwrap();
     let tuning = out["best"]["tuning"].as_object().unwrap();
     assert_eq!(tuning.len(), 4, "{tuning:?}");
