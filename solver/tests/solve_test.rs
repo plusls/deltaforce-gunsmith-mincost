@@ -524,14 +524,16 @@ fn audit_dp_keeps_a_default_that_satisfies_the_constraint() {
         prices,
         json!([{"id": "recoil-continuous-horizontal", "max": 0.8}]),
     );
-    assert_eq!(audit_best_price(&payload, request), Some(1400));
+    // The default `d1` stays internal, and the ordinary price excludes
+    // internal parts, so only the weapon price is paid.
+    assert_eq!(audit_best_price(&payload, request), Some(1000));
 }
 
 #[test]
 fn audit_dp_can_remove_a_structural_default() {
     let parts = json!({
         "w1": {"id": "w1", "name": "gun"},
-        "h": audit_part("h", json!({"rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.1}}})),
+        "h": audit_part("h", json!({"rawRecoilMultipliersByMode": {"operations": {"horizontal": 0.3}}})),
         "c": audit_part("c", json!({"rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.1}}})),
         "x": audit_part("x", json!({"rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.1}}})),
         "y": audit_part("y", json!({"rawRecoilMultipliersByMode": {"operations": {"horizontal": -0.2}}}))
@@ -790,7 +792,7 @@ fn audit_laser_pro_panel_is_excluded_when_the_laser_is_off() {
     let extra = json!({
         "defaultPresetsByWeapon": {"w1": {"nodes": [
             {"isRoot": true, "partId": "w1"},
-            {"partId": "L", "pathKey": "weapon:w1/slot:1:Muzzle_point"}
+            {"partId": "a1", "pathKey": "weapon:w1/slot:1:Muzzle_point"}
         ]}}
     });
     let payload = audit_payload(
@@ -811,6 +813,9 @@ fn audit_laser_pro_panel_is_excluded_when_the_laser_is_off() {
         ]),
     );
     request["laserEnabled"] = json!(false);
+    // Explicitly selecting a non-default laser keeps it visible, so the panel
+    // exercises the laser inclusion rule.
+    request["lockedPathKeys"] = json!({"weapon:w1/slot:1:Muzzle_point": "L"});
     let out = run_payload(&payload, request);
     assert_eq!(out["best"]["total_price"], 1100);
     assert_eq!(out["best"]["panel"]["10005"], 43.0);

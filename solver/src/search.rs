@@ -320,7 +320,7 @@ pub struct Solver<'a> {
     panel_dirs: Vec<PanelDir>,
     seed_panel_attrs: Vec<usize>,
     seed_aim: f64,
-    dp_metric_cache: FxHashMap<(String, String), ExactPart>,
+    dp_metric_cache: FxHashMap<(String, String, bool), ExactPart>,
     tune_frontier_cache: FxHashMap<String, CachedFrontier>,
     tune_cap: usize,
     tune_next: usize,
@@ -876,7 +876,7 @@ impl<'a> Solver<'a> {
                     .map(|slots| !slots.is_empty())
                     .unwrap_or(false)
                 || rule_part_ids.contains(id)
-                || crate::metrics::has_laser(part, &options.mode)
+                || crate::metrics::has_laser(part)
                 || !part.aim_recoil_profiles.is_empty();
             if structural {
                 structural_parts.insert(id.clone());
@@ -946,18 +946,9 @@ impl<'a> Solver<'a> {
             dp_ok = false;
         }
         let mut panel_base = [0.0f64; 5];
-        if let Some(stats) = payload
-            .weapon_stats
-            .get(weapon_id)
-            .and_then(|s| s.by_mode.get(&options.mode))
-        {
+        if let Some(stats) = payload.weapon_stats.get(weapon_id) {
             for (idx, attr) in PANEL_ATTRS.iter().enumerate() {
-                panel_base[idx] = stats
-                    .display
-                    .get(*attr)
-                    .copied()
-                    .or_else(|| stats.base.get(*attr).copied())
-                    .unwrap_or(0.0);
+                panel_base[idx] = stats.display_stat(&options.mode, attr).unwrap_or(0.0);
             }
         }
         let weapon_price = payload
@@ -1473,13 +1464,19 @@ impl<'a> Solver<'a> {
                         continue;
                     };
                     if let Some(b) = self.part_bounds.get(id) {
-                        decided_bound.add_a(b);
+                        if slot.selected_part_id.is_some() {
+                            decided_bound.add_a(b);
+                        } else {
+                            // A default/virtual part on a visible slot is
+                            // internal: it never contributes to the panel.
+                            decided_bound.add_non_panel(b);
+                        }
                     }
                 }
                 BoundRoot::DecidedInternal(idx) => {
                     let item = &assembly.internal_parts[idx];
                     if let Some(b) = self.part_bounds.get(&item.part_id) {
-                        decided_bound.add_a(b);
+                        decided_bound.add_non_panel(b);
                     }
                 }
                 BoundRoot::AssumedVisible(idx) => {
@@ -1498,7 +1495,7 @@ impl<'a> Solver<'a> {
                         continue;
                     }
                     if let Some(b) = self.part_bounds.get(&item.part_id) {
-                        assumed_bound.add_optional(b);
+                        assumed_bound.add_optional_non_panel(b);
                     }
                 }
             }
@@ -1615,11 +1612,7 @@ impl<'a> Solver<'a> {
             if !decided.contains(&slot.path_key) {
                 continue;
             }
-            let Some(id) = slot
-                .selected_part_id
-                .as_ref()
-                .or(slot.internal_part_id.as_ref())
-            else {
+            let Some(id) = slot.selected_part_id.as_ref() else {
                 continue;
             };
             if !seen.insert((slot.path_key.as_str(), id.as_str())) {
@@ -1629,15 +1622,17 @@ impl<'a> Solver<'a> {
                 cost += self.dp_part_price(part);
             }
         }
-        for item in &assembly.internal_parts {
-            if !decided.contains(&item.slot_path_key) {
-                continue;
-            }
-            if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
-                continue;
-            }
-            if let Some(part) = self.payload.parts.get(&item.part_id) {
-                cost += self.dp_part_price(part);
+        if self.options.mode == "blackhawk" {
+            for item in &assembly.internal_parts {
+                if !decided.contains(&item.slot_path_key) {
+                    continue;
+                }
+                if !seen.insert((item.slot_path_key.as_str(), item.part_id.as_str())) {
+                    continue;
+                }
+                if let Some(part) = self.payload.parts.get(&item.part_id) {
+                    cost += self.dp_part_price(part);
+                }
             }
         }
         cost
@@ -1657,7 +1652,7 @@ impl<'a> Solver<'a> {
             return f64::NEG_INFINITY;
         };
         let metric = self
-            .dp_option_for_part(part, slot_name, SlotChoice::Part(id.to_string()), &[])
+            .dp_option_for_part(part, slot_name, SlotChoice::Part(id.to_string()), &[], true)
             .metric;
         self.seed_metric_score(&metric)
     }
@@ -1798,7 +1793,7 @@ impl<'a> Solver<'a> {
 
         let mut base = ExactPart::neutral_panel(self.panel_attrs.len());
         let mut base_cost = 0i64;
-        let mut base_parts: Vec<(&Part, &str)> = Vec::new();
+        let mut base_parts: Vec<(&Part, &str, bool)> = Vec::new();
         let mut seen_paths: FxHashSet<(&str, &str)> = FxHashSet::default();
         let base_assembly = self.assembler.resolve(&base_trial);
         for slot in &base_assembly.visible_slots {
@@ -1812,7 +1807,7 @@ impl<'a> Solver<'a> {
                 continue;
             }
             if let Some(part) = self.payload.parts.get(id) {
-                base_parts.push((part, &slot.slot.name));
+                base_parts.push((part, &slot.slot.name, true));
                 base_cost += self.dp_part_price(part);
             }
         }
@@ -1824,14 +1819,17 @@ impl<'a> Solver<'a> {
                 continue;
             }
             if let Some(part) = self.payload.parts.get(&item.part_id) {
-                base_parts.push((part, &item.slot.name));
-                base_cost += self.dp_part_price(part);
+                base_parts.push((part, &item.slot.name, false));
+                if self.options.mode == "blackhawk" {
+                    base_cost += self.dp_part_price(part);
+                }
             }
         }
         let mode = &self.options.mode;
-        let mut base_laser_pro: Option<LaserPro> = None;
-        for (part, slot_name) in &base_parts {
-            let is_laser = crate::metrics::has_laser(part, mode);
+        let mut base_detail_pro: Option<Rc<LaserPro>> = None;
+        let mut base_panel_pro: Option<Rc<LaserPro>> = None;
+        for (part, slot_name, visible) in &base_parts {
+            let is_laser = crate::metrics::has_laser(part);
             let m = exact_part_metric(
                 part,
                 self.evaluator.weapon_id,
@@ -1840,30 +1838,45 @@ impl<'a> Solver<'a> {
                 self.options.bipod_deployed,
                 is_laser,
                 false,
+                *visible,
                 &self.panel_attrs,
             );
             base.add(&m);
             if is_laser && self.options.laser_enabled {
                 let score = crate::metrics::laser_pro_score(part, mode);
-                if base_laser_pro
+                let pro = Rc::new(LaserPro {
+                    score,
+                    metric: exact_laser_pro(
+                        part,
+                        self.evaluator.weapon_id,
+                        mode,
+                        &self.panel_attrs,
+                    ),
+                });
+                // The detail path ranks the laser over every installed part,
+                // while the panel only sees visible selected parts.
+                if base_detail_pro
                     .as_ref()
                     .map(|cur| score > cur.score)
                     .unwrap_or(true)
                 {
-                    base_laser_pro = Some(LaserPro {
-                        score,
-                        metric: exact_laser_pro(
-                            part,
-                            self.evaluator.weapon_id,
-                            mode,
-                            &self.panel_attrs,
-                        ),
-                    });
+                    base_detail_pro = Some(pro.clone());
+                }
+                if *visible
+                    && base_panel_pro
+                        .as_ref()
+                        .map(|cur| score > cur.score)
+                        .unwrap_or(true)
+                {
+                    base_panel_pro = Some(pro);
                 }
             }
         }
-        if let Some(pro) = &base_laser_pro {
-            base.add_laser_pro(&pro.metric);
+        if let Some(pro) = &base_detail_pro {
+            base.add_laser_pro_detail(&pro.metric);
+        }
+        if let Some(pro) = &base_panel_pro {
+            base.add_laser_pro_panel(&pro.metric);
         }
 
         let mut options_per_slot: Vec<Vec<DpOption>> = Vec::new();
@@ -1876,12 +1889,19 @@ impl<'a> Solver<'a> {
                 .as_ref()
                 .and_then(|id| self.payload.parts.get(id))
             {
-                opts.push(self.dp_option_for_part(part, &slot.slot.name, SlotChoice::Unset, &opts));
+                opts.push(self.dp_option_for_part(
+                    part,
+                    &slot.slot.name,
+                    SlotChoice::Unset,
+                    &opts,
+                    false,
+                ));
             } else {
                 opts.push(DpOption {
                     cost: 0,
                     metric: ExactPart::neutral_panel(self.panel_attrs.len()),
                     laser_pro: None,
+                    visible: false,
                     choice: SlotChoice::Unset,
                 });
             }
@@ -1904,12 +1924,14 @@ impl<'a> Solver<'a> {
                         &slot.slot.name,
                         SlotChoice::Remove,
                         &opts,
+                        false,
                     ));
                 } else {
                     opts.push(DpOption {
                         cost: 0,
                         metric: ExactPart::neutral_panel(self.panel_attrs.len()),
                         laser_pro: None,
+                        visible: false,
                         choice: SlotChoice::Remove,
                     });
                 }
@@ -1927,7 +1949,13 @@ impl<'a> Solver<'a> {
                 if let Some(part) = self.payload.parts.get(id) {
                     let choice = SlotChoice::Part(id.clone());
                     if !opts.iter().any(|o| o.choice == choice) {
-                        opts.push(self.dp_option_for_part(part, &slot.slot.name, choice, &opts));
+                        opts.push(self.dp_option_for_part(
+                            part,
+                            &slot.slot.name,
+                            choice,
+                            &opts,
+                            true,
+                        ));
                     }
                 }
             }
@@ -2003,7 +2031,8 @@ impl<'a> Solver<'a> {
         let mut states: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base,
-            laser_pro: base_laser_pro,
+            detail_pro: base_detail_pro,
+            panel_pro: base_panel_pro,
             choices: Vec::new(),
         }];
         for (slot_idx, opts) in options_per_slot.iter().enumerate() {
@@ -2026,7 +2055,7 @@ impl<'a> Solver<'a> {
                     if self.best_cost < i64::MAX && total + rest_cost >= self.best_cost {
                         continue;
                     }
-                    let (metric, laser_pro) = dp_metric_advance(st, opt);
+                    let (metric, detail_pro, panel_pro) = dp_metric_advance(st, opt);
                     if let Some(max) = aim_max {
                         if let Some(best) = self.evaluator.aim_time(
                             metric.hs + suffix_hs_max[slot_idx + 1],
@@ -2043,7 +2072,8 @@ impl<'a> Solver<'a> {
                     next.push(DpState {
                         cost,
                         metric,
-                        laser_pro,
+                        detail_pro,
+                        panel_pro,
                         choices,
                     });
                 }
@@ -2183,7 +2213,8 @@ impl<'a> Solver<'a> {
         let mut beam: Vec<DpState> = vec![DpState {
             cost: base_cost,
             metric: base.clone(),
-            laser_pro: None,
+            detail_pro: None,
+            panel_pro: None,
             choices: Vec::new(),
         }];
         for opts in options_per_slot {
@@ -2220,7 +2251,8 @@ impl<'a> Solver<'a> {
                         DpState {
                             cost,
                             metric,
-                            laser_pro: None,
+                            detail_pro: None,
+                            panel_pro: None,
                             choices,
                         },
                     ));
@@ -2330,10 +2362,11 @@ impl<'a> Solver<'a> {
         slot_name: &str,
         choice: SlotChoice,
         existing: &[DpOption],
+        visible_choice: bool,
     ) -> DpOption {
         let mode = &self.options.mode;
-        let is_laser = crate::metrics::has_laser(part, mode);
-        let key = (part.id.clone(), slot_name.to_string());
+        let is_laser = crate::metrics::has_laser(part);
+        let key = (part.id.clone(), slot_name.to_string(), visible_choice);
         let metric = if let Some(m) = self.dp_metric_cache.get(&key) {
             m.clone()
         } else {
@@ -2345,6 +2378,7 @@ impl<'a> Solver<'a> {
                 self.options.bipod_deployed,
                 is_laser,
                 false,
+                visible_choice,
                 &self.panel_attrs,
             );
             self.dp_metric_cache.insert(key, m.clone());
@@ -2353,20 +2387,27 @@ impl<'a> Solver<'a> {
         // A laser part only contributes its `pro` modifiers when the evaluator
         // selects it as the single best laser of the assembly, so the option
         // carries the pro delta separately and the DP state applies it once.
+        // Internal parts compete for the detail slot as well; `visible` below
+        // keeps them out of the panel slot.
         let laser_pro = if is_laser && self.options.laser_enabled {
-            Some(LaserPro {
+            Some(Rc::new(LaserPro {
                 score: crate::metrics::laser_pro_score(part, mode),
                 metric: exact_laser_pro(part, self.evaluator.weapon_id, mode, &self.panel_attrs),
-            })
+            }))
         } else {
             None
         };
-        let cost = self.dp_part_price(part);
+        let cost = if visible_choice || self.options.mode == "blackhawk" {
+            self.dp_part_price(part)
+        } else {
+            0
+        };
         let _ = existing;
         DpOption {
             cost,
             metric,
             laser_pro,
+            visible: visible_choice,
             choice,
         }
     }
@@ -2584,7 +2625,7 @@ impl<'a> Solver<'a> {
         let mut c_k = 1.0;
         let mut laser_parts: Vec<(usize, f64)> = Vec::new();
         for (idx, part) in parts.iter().enumerate() {
-            if crate::metrics::has_laser(part, mode) {
+            if crate::metrics::has_laser(part) {
                 // Primary-laser ranking mirrors site `ct`: raw `modifiersByMode`
                 // only, never the baseline recovery list.
                 let score: f64 = part
@@ -2610,7 +2651,7 @@ impl<'a> Solver<'a> {
             .map(|(i, _)| *i);
 
         for (idx, part) in parts.iter().enumerate() {
-            let laser_part = crate::metrics::has_laser(part, mode);
+            let laser_part = crate::metrics::has_laser(part);
             let selected_laser = laser_idx == Some(idx);
             for m in part.main_mods_for(self.evaluator.weapon_id, mode) {
                 if m.condition_id.is_some() || m.modifier_type != "Addend" {
@@ -3756,10 +3797,20 @@ impl ExactPart {
 
     /// `exact_laser_pro` only fills the additive fields below; the
     /// multiplicative and tuning fields stay neutral, so applying and
-    /// removing the delta is exact.
-    fn add_laser_pro(&mut self, pro: &ExactPart) {
+    /// removing the delta is exact. The detail and panel channels keep
+    /// separate winners because the site ranks them over different part
+    /// lists.
+    fn add_laser_pro_detail(&mut self, pro: &ExactPart) {
         self.d += pro.d;
         self.hs += pro.hs;
+    }
+
+    fn remove_laser_pro_detail(&mut self, pro: &ExactPart) {
+        self.d -= pro.d;
+        self.hs -= pro.hs;
+    }
+
+    fn add_laser_pro_panel(&mut self, pro: &ExactPart) {
         if self.panel.len() < pro.panel.len() {
             self.panel.resize(pro.panel.len(), 0.0);
         }
@@ -3768,9 +3819,7 @@ impl ExactPart {
         }
     }
 
-    fn remove_laser_pro(&mut self, pro: &ExactPart) {
-        self.d -= pro.d;
-        self.hs -= pro.hs;
+    fn remove_laser_pro_panel(&mut self, pro: &ExactPart) {
         for (i, v) in pro.panel.iter().enumerate() {
             self.panel[i] -= *v;
         }
@@ -3801,7 +3850,8 @@ enum SlotChoice {
 /// Tuning-free contribution of one laser part's `pro` modifiers. The
 /// evaluator applies the modifiers of a single laser part, the one with the
 /// highest `score`, so the DP keeps the candidate deltas out of the slot
-/// metrics and applies only the winner.
+/// metrics and applies only the winner. Options and states share the deltas
+/// through `Rc` so a state only carries two pointers.
 #[derive(Debug, Clone)]
 struct LaserPro {
     score: f64,
@@ -3812,7 +3862,8 @@ struct LaserPro {
 struct DpOption {
     cost: i64,
     metric: ExactPart,
-    laser_pro: Option<LaserPro>,
+    laser_pro: Option<Rc<LaserPro>>,
+    visible: bool,
     choice: SlotChoice,
 }
 
@@ -3820,7 +3871,8 @@ struct DpOption {
 struct DpState {
     cost: i64,
     metric: ExactPart,
-    laser_pro: Option<LaserPro>,
+    detail_pro: Option<Rc<LaserPro>>,
+    panel_pro: Option<Rc<LaserPro>>,
     choices: Vec<SlotChoice>,
 }
 
@@ -3948,24 +4000,42 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
 /// Applies `opt` to the metric and laser winner of `state`. Split out from
 /// `dp_advance` so callers can evaluate bounds on the advanced metric before
 /// paying for a choices clone.
-fn dp_metric_advance(state: &DpState, opt: &DpOption) -> (ExactPart, Option<LaserPro>) {
+fn dp_metric_advance(
+    state: &DpState,
+    opt: &DpOption,
+) -> (ExactPart, Option<Rc<LaserPro>>, Option<Rc<LaserPro>>) {
     let mut metric = state.metric.clone();
     metric.add(&opt.metric);
-    let mut laser_pro = state.laser_pro.clone();
+    let mut detail_pro = state.detail_pro.clone();
+    let mut panel_pro = state.panel_pro.clone();
     if let Some(candidate) = &opt.laser_pro {
-        let better = laser_pro
+        if detail_pro
             .as_ref()
             .map(|cur| candidate.score > cur.score)
-            .unwrap_or(true);
-        if better {
-            if let Some(cur) = &laser_pro {
-                metric.remove_laser_pro(&cur.metric);
+            .unwrap_or(true)
+        {
+            if let Some(cur) = &detail_pro {
+                metric.remove_laser_pro_detail(&cur.metric);
             }
-            metric.add_laser_pro(&candidate.metric);
-            laser_pro = Some(candidate.clone());
+            metric.add_laser_pro_detail(&candidate.metric);
+            detail_pro = Some(candidate.clone());
+        }
+        // Internal parts never reach the panel, so an internal laser cannot
+        // occupy the panel's pro slot.
+        if opt.visible
+            && panel_pro
+                .as_ref()
+                .map(|cur| candidate.score > cur.score)
+                .unwrap_or(true)
+        {
+            if let Some(cur) = &panel_pro {
+                metric.remove_laser_pro_panel(&cur.metric);
+            }
+            metric.add_laser_pro_panel(&candidate.metric);
+            panel_pro = Some(candidate.clone());
         }
     }
-    (metric, laser_pro)
+    (metric, detail_pro, panel_pro)
 }
 
 /// Extends `state` with `opt`. A laser candidate replaces the current laser
@@ -3973,13 +4043,14 @@ fn dp_metric_advance(state: &DpState, opt: &DpOption) -> (ExactPart, Option<Lase
 /// which keeps the first part on a tie.
 #[cfg(test)]
 fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
-    let (metric, laser_pro) = dp_metric_advance(state, opt);
+    let (metric, detail_pro, panel_pro) = dp_metric_advance(state, opt);
     let mut choices = state.choices.clone();
     choices.push(opt.choice.clone());
     DpState {
         cost,
         metric,
-        laser_pro,
+        detail_pro,
+        panel_pro,
         choices,
     }
 }
@@ -3992,10 +4063,11 @@ fn exact_part_metric(
     bipod_deployed: bool,
     is_laser: bool,
     include_laser_pro: bool,
+    include_panel: bool,
     panel_attrs: &[String],
 ) -> ExactPart {
     let mut m = ExactPart::neutral_panel(panel_attrs.len());
-    if !panel_attrs.is_empty() {
+    if include_panel && !panel_attrs.is_empty() {
         for modif in part.display_mods_for(weapon_id, mode) {
             if modif.condition_id.is_some() || modif.modifier_type != "Addend" {
                 continue;
@@ -4631,7 +4703,21 @@ impl MetricBound {
         }
     }
 
-    fn add_optional(&mut self, other: &MetricBound) {
+    /// Adds every channel except the panel. Internal parts still feed the
+    /// detail/recoil metrics but never the panel.
+    fn add_non_panel(&mut self, other: &MetricBound) {
+        self.max_d += other.max_d;
+        self.min_a_h += other.min_a_h;
+        self.min_a_v += other.min_a_v;
+        self.min_c_h *= other.min_c_h;
+        self.min_c_v *= other.min_c_v;
+        self.min_c_k *= other.min_c_k;
+        self.min_t_h += other.min_t_h;
+        self.min_t_v += other.min_t_v;
+        self.min_t_k += other.min_t_k;
+    }
+
+    fn add_optional_non_panel(&mut self, other: &MetricBound) {
         self.max_d += other.max_d.max(0.0);
         self.min_a_h += other.min_a_h.min(0.0);
         self.min_a_v += other.min_a_v.min(0.0);
@@ -4641,10 +4727,6 @@ impl MetricBound {
         self.min_t_h += other.min_t_h.min(0.0);
         self.min_t_v += other.min_t_v.min(0.0);
         self.min_t_k += other.min_t_k.min(0.0);
-        for idx in 0..5 {
-            self.panel_max[idx] += other.panel_max[idx].max(0.0);
-            self.panel_min[idx] += other.panel_min[idx].min(0.0);
-        }
     }
 
     fn best_of(&mut self, other: &MetricBound) {
@@ -4807,7 +4889,7 @@ fn laser_delta_range(
 
 fn part_own_bound(part: &Part, weapon_id: &str, mode: &str, laser_enabled: bool) -> MetricBound {
     let mut b = MetricBound::neutral();
-    let is_laser = crate::metrics::has_laser(part, mode);
+    let is_laser = crate::metrics::has_laser(part);
     for m in part.display_mods_for(weapon_id, mode) {
         if m.condition_id.is_some() || m.modifier_type != "Addend" {
             continue;
@@ -4907,7 +4989,7 @@ fn compute_bounds(
     mode: &str,
     laser_enabled: bool,
 ) -> FxHashMap<(String, String), MetricBound> {
-    let mut part_cache: FxHashMap<String, MetricBound> = FxHashMap::default();
+    let mut part_cache: FxHashMap<(String, bool), MetricBound> = FxHashMap::default();
     let mut slot_cache: FxHashMap<(String, String), MetricBound> = FxHashMap::default();
     let mut visited: FxHashSet<String> = FxHashSet::default();
     let rules = payload
@@ -4950,18 +5032,23 @@ fn part_bound(
     mode: &str,
     laser_enabled: bool,
     id: &str,
+    include_panel: bool,
     slot_rule_parts: &FxHashMap<String, Vec<String>>,
-    part_cache: &mut FxHashMap<String, MetricBound>,
+    part_cache: &mut FxHashMap<(String, bool), MetricBound>,
     slot_cache: &mut FxHashMap<(String, String), MetricBound>,
     visited: &mut FxHashSet<String>,
 ) -> MetricBound {
-    if let Some(v) = part_cache.get(id) {
+    if let Some(v) = part_cache.get(&(id.to_string(), include_panel)) {
         return *v;
     }
     let Some(part) = payload.parts.get(id) else {
         return MetricBound::neutral();
     };
     let mut b = part_own_bound(part, weapon_id, mode, laser_enabled);
+    if !include_panel {
+        b.panel_max = [0.0; 5];
+        b.panel_min = [0.0; 5];
+    }
     if visited.contains(id) {
         return b;
     }
@@ -4984,7 +5071,7 @@ fn part_bound(
         }
     }
     visited.remove(id);
-    part_cache.insert(id.to_string(), b);
+    part_cache.insert((id.to_string(), include_panel), b);
     b
 }
 
@@ -4997,7 +5084,7 @@ fn slot_bound(
     host: &str,
     slot: &crate::model::SlotDef,
     slot_rule_parts: &FxHashMap<String, Vec<String>>,
-    part_cache: &mut FxHashMap<String, MetricBound>,
+    part_cache: &mut FxHashMap<(String, bool), MetricBound>,
     slot_cache: &mut FxHashMap<(String, String), MetricBound>,
     visited: &mut FxHashSet<String>,
 ) -> MetricBound {
@@ -5013,6 +5100,7 @@ fn slot_bound(
             mode,
             laser_enabled,
             id,
+            true,
             slot_rule_parts,
             part_cache,
             slot_cache,
@@ -5020,6 +5108,8 @@ fn slot_bound(
         );
         best.best_of(&b);
     }
+    // Virtual candidates and rule parts are installed internally, so the
+    // site panel never counts them.
     for id in &slot.virtual_candidate_ids {
         let b = part_bound(
             payload,
@@ -5027,6 +5117,7 @@ fn slot_bound(
             mode,
             laser_enabled,
             id,
+            false,
             slot_rule_parts,
             part_cache,
             slot_cache,
@@ -5042,6 +5133,7 @@ fn slot_bound(
                 mode,
                 laser_enabled,
                 id,
+                false,
                 slot_rule_parts,
                 part_cache,
                 slot_cache,
@@ -6095,7 +6187,8 @@ mod tests {
                 panel,
                 ..ExactPart::neutral()
             },
-            laser_pro: None,
+            detail_pro: None,
+            panel_pro: None,
             choices: Vec::new(),
         }
     }
@@ -6116,6 +6209,7 @@ mod tests {
             },
             choice: SlotChoice::Unset,
             laser_pro: None,
+            visible: false,
         };
         let slots = vec![
             vec![
@@ -6678,16 +6772,27 @@ mod tests {
         }))
         .unwrap();
         let mode = "operations";
-        let is_laser = crate::metrics::has_laser(&part, mode);
+        let is_laser = crate::metrics::has_laser(&part);
         assert!(is_laser);
         let panel_attrs = vec!["10008".to_string()];
         let option = DpOption {
             cost,
-            metric: exact_part_metric(&part, "w1", "X", mode, false, true, false, &panel_attrs),
-            laser_pro: Some(LaserPro {
+            metric: exact_part_metric(
+                &part,
+                "w1",
+                "X",
+                mode,
+                false,
+                true,
+                false,
+                true,
+                &panel_attrs,
+            ),
+            laser_pro: Some(Rc::new(LaserPro {
                 score: crate::metrics::laser_pro_score(&part, mode),
                 metric: exact_laser_pro(&part, "w1", mode, &panel_attrs),
-            }),
+            })),
+            visible: true,
             choice: SlotChoice::Part(id.to_string()),
         };
         (option, part)
@@ -6702,7 +6807,8 @@ mod tests {
         let start = DpState {
             cost: 0,
             metric: ExactPart::neutral_panel(1),
-            laser_pro: None,
+            detail_pro: None,
+            panel_pro: None,
             choices: Vec::new(),
         };
 
@@ -6716,6 +6822,7 @@ mod tests {
             false,
             true,
             true,
+            true,
             &panel_attrs,
         );
         once.add(&exact_part_metric(
@@ -6726,6 +6833,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             &panel_attrs,
         ));
 
@@ -6737,14 +6845,24 @@ mod tests {
         // Both lasers keep their con handling penalties; only one pro applies.
         assert!((forward.metric.hs - 9.0).abs() < 1e-9);
         assert_eq!(forward.cost, 300);
-        assert_eq!(forward.laser_pro.as_ref().unwrap().score, 12.0);
+        assert_eq!(forward.detail_pro.as_ref().unwrap().score, 12.0);
+        assert_eq!(forward.panel_pro.as_ref().unwrap().score, 12.0);
 
         // A later, higher scoring laser replaces the current winner instead of
         // stacking on top of it.
         let (best, best_part) = laser_option("laser-c", 300, 20.0, 30.0, -1.0);
         let replaced = dp_advance(&forward, &best, 600);
-        let mut expected =
-            exact_part_metric(&best_part, "w1", "X", mode, false, true, true, &panel_attrs);
+        let mut expected = exact_part_metric(
+            &best_part,
+            "w1",
+            "X",
+            mode,
+            false,
+            true,
+            true,
+            true,
+            &panel_attrs,
+        );
         expected.add(&exact_part_metric(
             &weak_part,
             "w1",
@@ -6753,6 +6871,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             &panel_attrs,
         ));
         expected.add(&exact_part_metric(
@@ -6763,6 +6882,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             &panel_attrs,
         ));
         assert!(metric_eq(&replaced.metric, &expected));
@@ -6774,6 +6894,31 @@ mod tests {
         let tied = dp_advance(&forward, &tie, 700);
         assert!((tied.metric.panel[0] - 12.0).abs() < 1e-9);
         assert!((tied.metric.hs - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn internal_laser_wins_detail_pro_but_not_panel_pro() {
+        let (strong, _) = laser_option("laser-a", 100, 12.0, 16.0, -4.0);
+        let (weak, _) = laser_option("laser-b", 200, 8.0, 10.0, -3.0);
+        let mut internal = strong;
+        internal.visible = false;
+        let start = DpState {
+            cost: 0,
+            metric: ExactPart::neutral_panel(1),
+            detail_pro: None,
+            panel_pro: None,
+            choices: Vec::new(),
+        };
+
+        let state = dp_advance(&dp_advance(&start, &weak, 200), &internal, 300);
+        // Detail ranks every installed part, so the internal laser takes the
+        // pro slot and the visible laser keeps only its con penalty.
+        assert_eq!(state.detail_pro.as_ref().unwrap().score, 12.0);
+        assert!((state.metric.hs - 9.0).abs() < 1e-9);
+        // The panel never sees internal parts, so the visible laser keeps the
+        // panel pro slot.
+        assert_eq!(state.panel_pro.as_ref().unwrap().score, 8.0);
+        assert!((state.metric.panel[0] - 8.0).abs() < 1e-9);
     }
 
     #[test]

@@ -279,12 +279,54 @@ pub struct WeaponStats {
     pub extra: Map<String, Num>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatChannel {
+    Base,
+    Display,
+}
+
+impl WeaponStats {
+    /// Mirrors the site's `st(stats, mode, channel)`: look up the mode entry,
+    /// use its `base`/`display` object when the entry is structured, use the
+    /// flat object itself when it has neither, and fall back to the weapon's
+    /// top-level stats when the mode entry is missing.
+    pub fn stat(&self, mode: &str, channel: StatChannel, id: &str) -> Option<f64> {
+        let value = match self.by_mode.get(mode) {
+            None => self.extra.get(id),
+            Some(stats) if stats.base.is_none() && stats.display.is_none() => stats.extra.get(id),
+            Some(stats) => {
+                let (primary, secondary) = match channel {
+                    StatChannel::Base => (&stats.base, &stats.display),
+                    StatChannel::Display => (&stats.display, &stats.base),
+                };
+                primary
+                    .as_ref()
+                    .or(secondary.as_ref())
+                    .and_then(|values| values.get(id))
+            }
+        };
+        value.map(|n| n.0)
+    }
+
+    pub fn base_stat(&self, mode: &str, id: &str) -> Option<f64> {
+        self.stat(mode, StatChannel::Base, id)
+    }
+
+    pub fn display_stat(&self, mode: &str, id: &str) -> Option<f64> {
+        self.stat(mode, StatChannel::Display, id)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ModeStats {
     #[serde(default)]
-    pub base: Map<String, f64>,
+    pub base: Option<Map<String, Num>>,
     #[serde(default)]
-    pub display: Map<String, f64>,
+    pub display: Option<Map<String, Num>>,
+    /// Flat mode stats (`{"10001": 27, ...}`) for modes that carry no
+    /// `base`/`display` split.
+    #[serde(flatten)]
+    pub extra: Map<String, Num>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

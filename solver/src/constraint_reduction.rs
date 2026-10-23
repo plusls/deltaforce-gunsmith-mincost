@@ -63,9 +63,10 @@ pub fn reduce_stability_constraints(
     let Some(profile) = payload.numeric_profiles.get(weapon_id) else {
         return constraints.to_vec();
     };
-    if !stability_delta_is_panel_only(payload, weapon_id, mode) {
+    let Some((internal_min, internal_max)) = stability_internal_offset(payload, weapon_id, mode)
+    else {
         return constraints.to_vec();
-    }
+    };
     let Some(base) = stability_base(payload, weapon_id, mode) else {
         return constraints.to_vec();
     };
@@ -84,8 +85,14 @@ pub fn reduce_stability_constraints(
                     Reduction::Always => continue,
                     Reduction::Never => {}
                     Reduction::Bound { min, max } => {
-                        let panel_min = min.map(|v| base + v - BOUND_EPS);
-                        let panel_max = max.map(|v| base + v + BOUND_EPS);
+                        // `dS = panel[10007] - base + internal`, so a lower
+                        // bound on `dS` only proves a lower bound on the panel
+                        // once the largest possible internal offset is
+                        // removed; a upper bound on `dS` removes the smallest
+                        // one. Both keep the mapped constraint necessary for
+                        // the original one.
+                        let panel_min = min.map(|v| base + v - internal_max - BOUND_EPS);
+                        let panel_max = max.map(|v| base + v - internal_min + BOUND_EPS);
                         merge_stability_bound(&mut out, panel_min, panel_max);
                         continue;
                     }
@@ -340,10 +347,33 @@ fn classify_direction(f: &impl Fn(f64) -> Option<f64>, points: &[f64]) -> Option
     })
 }
 
-/// `dS` must come exclusively from unconditional `10007` addends, otherwise
-/// the panel score cannot stand in for it.
-fn stability_delta_is_panel_only(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> bool {
+/// `dS` sums display stability addends over the visible parts and the
+/// internal parts, while the panel only counts visible ones. The relation is
+/// `dS = panel[10007] - base + internal`, so an exact reduction needs a
+/// bracket on `internal`.
+///
+/// Every stability addend of a part that can never be internal must be an
+/// unconditional `10007` addend, otherwise it would move `dS` without moving
+/// the panel by the same amount (returns `None`). Parts the assembler can
+/// install behind the panel keep their addends in the bracket instead.
+///
+/// The bracket is deliberately loose. A part that is internal at one socket
+/// can also be selected visibly at another, where its addends move into the
+/// panel, so each addend is counted twice: once for the internal placement and
+/// once for a possible visible one. Conditional and `pro` addends are treated
+/// as always active on the high side and as active when negative on the low
+/// side, which can only widen the bracket. Only the display channel matters;
+/// `dS` never reads the main attribute list.
+fn stability_internal_offset(
+    payload: &WeaponPayload,
+    weapon_id: &str,
+    mode: &str,
+) -> Option<(f64, f64)> {
+    let internal = internal_capable_parts(payload, weapon_id);
+    let mut lo = 0.0;
+    let mut hi = 0.0;
     for part in payload.parts.values() {
+        let can_be_internal = internal.contains(part.id.as_str());
         for modifier in part.display_mods_for(weapon_id, mode) {
             if modifier.modifier_type != "Addend" {
                 continue;
@@ -352,21 +382,52 @@ fn stability_delta_is_panel_only(payload: &WeaponPayload, weapon_id: &str, mode:
             if !STABILITY_ATTRS.contains(&attr) {
                 continue;
             }
-            if attr != STABILITY_PANEL_ATTR || modifier.condition_id.is_some() {
-                return false;
+            if can_be_internal {
+                let delta = modifier.delta.map(|v| v.0).unwrap_or(0.0);
+                lo += 2.0 * delta.min(0.0);
+                hi += 2.0 * delta.max(0.0);
+            } else if attr != STABILITY_PANEL_ATTR || modifier.condition_id.is_some() {
+                return None;
             }
         }
     }
-    true
+    Some((lo, hi))
+}
+
+/// Parts the assembler can install from the default preset or a virtual rule.
+/// They live in `internal_parts` and are not part of the visible panel.
+fn internal_capable_parts<'a>(
+    payload: &'a WeaponPayload,
+    weapon_id: &str,
+) -> rustc_hash::FxHashSet<&'a str> {
+    let mut out = rustc_hash::FxHashSet::default();
+    if let Some(preset) = payload.default_presets.get(weapon_id) {
+        for node in &preset.nodes {
+            if node.is_root || node.is_virtual {
+                continue;
+            }
+            if !payload.parts.contains_key(&node.part_id) {
+                continue;
+            }
+            out.insert(node.part_id.as_str());
+        }
+    }
+    if let Some(rules) = payload.virtual_rules.get(weapon_id) {
+        for rule in rules {
+            if !payload.parts.contains_key(&rule.virtual_part_id) {
+                continue;
+            }
+            out.insert(rule.virtual_part_id.as_str());
+        }
+    }
+    out
 }
 
 fn stability_base(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> Option<f64> {
-    let stats = payload.weapon_stats.get(weapon_id)?.by_mode.get(mode)?;
-    stats
-        .display
-        .get(STABILITY_PANEL_ATTR)
-        .copied()
-        .or_else(|| stats.base.get(STABILITY_PANEL_ATTR).copied())
+    payload
+        .weapon_stats
+        .get(weapon_id)?
+        .display_stat(mode, STABILITY_PANEL_ATTR)
 }
 
 fn stability_curve_domain(profile: &crate::model::NumericProfile) -> Option<(f64, f64)> {

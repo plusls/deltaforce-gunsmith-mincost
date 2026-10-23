@@ -135,6 +135,7 @@ impl<'a> Evaluator<'a> {
         tuning_state: &TuningState,
     ) -> Option<BuildMetrics> {
         let parts = self.installed_parts(assembly);
+        let visible_parts = self.visible_selected_parts(assembly);
         let recoil = self.recoil(assembler, &parts, assembly, tuning_state);
         let (effects, runtime) = match &recoil {
             Some(r) => (r.tuning_effects.clone(), r.tuning_runtime.clone()),
@@ -145,7 +146,9 @@ impl<'a> Evaluator<'a> {
             }
         };
         let detail = self.detail(&parts, &effects, &runtime);
-        let panel = self.panel(&parts);
+        // The site panel only sums `selectedPart` of visible slots; default and
+        // virtual parts that the assembler installs internally are excluded.
+        let panel = self.panel(&visible_parts);
         let (attachment_price, total_price, missing) = self.price(assembly);
         Some(BuildMetrics {
             recoil: recoil.unwrap_or_default(),
@@ -169,6 +172,21 @@ impl<'a> Evaluator<'a> {
         for item in &assembly.internal_parts {
             if let Some(part) = self.payload.parts.get(&item.part_id) {
                 out.push(part);
+            }
+        }
+        out
+    }
+
+    /// Parts the site treats as explicitly selected in the UI. Default and
+    /// virtual parts installed by the assembler live in `internal_parts` and
+    /// are not part of this list even when they belong to a visible slot.
+    pub fn visible_selected_parts<'b>(&'b self, assembly: &'b Assembly) -> Vec<&'a Part> {
+        let mut out = Vec::new();
+        for slot in &assembly.visible_slots {
+            if let Some(id) = &slot.selected_part_id {
+                if let Some(part) = self.payload.parts.get(id) {
+                    out.push(part);
+                }
             }
         }
         out
@@ -252,7 +270,7 @@ impl<'a> Evaluator<'a> {
         let mut spring_c = 1.0;
 
         for (idx, part) in parts.iter().enumerate() {
-            let laser_part = has_laser(part, mode);
+            let laser_part = has_laser(part);
             for m in part.main_mods_for(self.weapon_id, mode) {
                 if !is_addend(m) {
                     continue;
@@ -439,21 +457,13 @@ impl<'a> Evaluator<'a> {
         let Some(stats) = self.payload.weapon_stats.get(self.weapon_id) else {
             return out;
         };
-        let Some(mode_stats) = stats.by_mode.get(self.mode) else {
-            return out;
-        };
         for id in ["10005", "10006", "10007", "10008"] {
-            let base = mode_stats
-                .display
-                .get(id)
-                .copied()
-                .or_else(|| mode_stats.base.get(id).copied())
-                .unwrap_or(0.0);
+            let base = stats.display_stat(self.mode, id).unwrap_or(0.0);
             out.insert(id.to_string(), base);
         }
         let laser_index = laser_pro_index(parts, self.mode);
         for (idx, part) in parts.iter().enumerate() {
-            let laser_part = has_laser(part, self.mode);
+            let laser_part = has_laser(part);
             for m in part.display_mods_for(self.weapon_id, self.mode) {
                 if !is_addend(m) {
                     continue;
@@ -468,19 +478,40 @@ impl<'a> Evaluator<'a> {
             }
         }
         // 10001 uses Initial / Addend / Mult_A
-        if let Some(base) = mode_stats
-            .display
-            .get("10001")
-            .copied()
-            .or_else(|| mode_stats.base.get("10001").copied())
-        {
+        if let Some(base) = stats.display_stat(self.mode, "10001") {
             let mut initial: Option<f64> = None;
             let mut addend = 0.0;
             let mut mult_a = 0.0;
             for (idx, part) in parts.iter().enumerate() {
-                let laser_part = has_laser(part, self.mode);
+                let laser_part = has_laser(part);
+                // Addends use the normal-then-baseline list (`kt` on the site),
+                // but `Initial` and `Mult_A` read only the part's own mode list.
                 for m in part.display_mods_for(self.weapon_id, self.mode) {
+                    if !is_addend(m) {
+                        continue;
+                    }
                     if !modifier_included(m, laser_part, self.laser_enabled, idx == laser_index) {
+                        continue;
+                    }
+                    if normalize_attr(m.attribute_id.as_deref()) != "10001" {
+                        continue;
+                    }
+                    if let Some(d) = m.delta {
+                        addend += d.0;
+                    }
+                }
+                let own = part
+                    .display_mods
+                    .get(self.mode)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                for m in own {
+                    // The site's `cr`/`or` read the part's own list instead of
+                    // the normal-plus-baseline list, but they still apply the
+                    // laser inclusion rule.
+                    if m.condition_id.is_some()
+                        || !modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
+                    {
                         continue;
                     }
                     if normalize_attr(m.attribute_id.as_deref()) != "10001" {
@@ -488,17 +519,12 @@ impl<'a> Evaluator<'a> {
                     }
                     match m.modifier_type.as_str() {
                         "Initial" => {
-                            if let Some(p) = m.param1 {
+                            if let Some(p) = m.param1.filter(|p| p.0.is_finite()) {
                                 initial = Some(p.0);
                             }
                         }
-                        "Addend" => {
-                            if let Some(d) = m.delta {
-                                addend += d.0;
-                            }
-                        }
                         "Mult_A" => {
-                            if let Some(p) = m.param1 {
+                            if let Some(p) = m.param1.filter(|p| p.0.is_finite()) {
                                 mult_a += p.0;
                             }
                         }
@@ -531,12 +557,7 @@ impl<'a> Evaluator<'a> {
     pub fn aim_time(&self, handling_add: f64, ads_time_mult: f64, open_speed: f64) -> Option<f64> {
         let profile = self.payload.numeric_profiles.get(self.weapon_id)?;
         let stats = self.payload.weapon_stats.get(self.weapon_id)?;
-        let mode_stats = stats.by_mode.get(self.mode)?;
-        let base_handling = mode_stats
-            .base
-            .get("10006")
-            .copied()
-            .or_else(|| mode_stats.display.get("10006").copied())?;
+        let base_handling = stats.base_stat(self.mode, "10006")?;
         let handling_score = base_handling + handling_add;
         let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
         let curves = &profile.linked_tables.handling_curves;
@@ -564,7 +585,7 @@ impl<'a> Evaluator<'a> {
         let mut ads_time_mult = 0.0;
         let mut seen_raw: FxHashSet<(String, String, String, u64, String)> = FxHashSet::default();
         for (idx, part) in parts.iter().enumerate() {
-            let laser_part = has_laser(part, mode);
+            let laser_part = has_laser(part);
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
@@ -625,7 +646,7 @@ impl<'a> Evaluator<'a> {
         );
 
         for (idx, part) in parts.iter().enumerate() {
-            let laser_part = has_laser(part, mode);
+            let laser_part = has_laser(part);
             let include = |m: &Modifier| {
                 modifier_included(m, laser_part, self.laser_enabled, idx == laser_index)
             };
@@ -739,20 +760,8 @@ impl<'a> Evaluator<'a> {
         let Some(stats) = self.payload.weapon_stats.get(self.weapon_id) else {
             return out;
         };
-        let Some(mode_stats) = stats.by_mode.get(mode) else {
-            return out;
-        };
-        let base_stat = |id: &str| {
-            mode_stats
-                .base
-                .get(id)
-                .copied()
-                .or_else(|| mode_stats.display.get(id).copied())
-        };
-        let ops_base_10006 = stats
-            .by_mode
-            .get("operations")
-            .and_then(|m| m.base.get("10006").copied());
+        let base_stat = |id: &str| stats.base_stat(mode, id);
+        let ops_base_10006 = stats.base_stat("operations", "10006");
 
         let open_speed = sums.open_speed;
         let move_speed = sums.move_speed;
@@ -951,16 +960,21 @@ impl<'a> Evaluator<'a> {
                 None => missing += 1,
             }
         }
-        for item in &assembly.internal_parts {
-            let Some(part) = self.payload.parts.get(&item.part_id) else {
-                continue;
-            };
-            if part.is_virtual {
-                continue;
-            }
-            match self.prices.get(part.price_id()) {
-                Some(p) => attachment += *p,
-                None => missing += 1,
+        // The site's ordinary price walks `installedParts` (visible selected
+        // parts only), while blackhawk prices come from `sn()` which also
+        // includes the non-virtual internal parts.
+        if self.mode == "blackhawk" {
+            for item in &assembly.internal_parts {
+                let Some(part) = self.payload.parts.get(&item.part_id) else {
+                    continue;
+                };
+                if part.is_virtual {
+                    continue;
+                }
+                match self.prices.get(part.price_id()) {
+                    Some(p) => attachment += *p,
+                    None => missing += 1,
+                }
             }
         }
         let weapon_price = self
@@ -968,8 +982,13 @@ impl<'a> Evaluator<'a> {
             .parts
             .get(self.weapon_id)
             .and_then(|p| self.prices.get(p.price_id()))
-            .copied()
-            .unwrap_or(0);
+            .copied();
+        // The site seeds `missing` with 1 when the weapon itself has no price
+        // (ordinary `Ri` and blackhawk `sn()` behave the same way).
+        if weapon_price.is_none() {
+            missing += 1;
+        }
+        let weapon_price = weapon_price.unwrap_or(0);
         (attachment, attachment + weapon_price, missing)
     }
 }
@@ -1052,11 +1071,12 @@ fn modifier_included(
     laser_enabled && is_selected_laser
 }
 
-pub fn has_laser(part: &Part, mode: &str) -> bool {
+/// The site's `Ce` scans every mode's `uiEffectsByMode`, so a part that is a
+/// laser in any mode is treated as one for the current evaluation.
+pub fn has_laser(part: &Part) -> bool {
     part.ui_effects
-        .get(mode)
-        .map(|list| list.iter().any(|e| condition_is(&e.condition_id, "10038")))
-        .unwrap_or(false)
+        .values()
+        .any(|list| list.iter().any(|e| condition_is(&e.condition_id, "10038")))
 }
 
 pub fn has_bipod_ui(part: &Part, mode: &str) -> bool {
@@ -1090,7 +1110,7 @@ fn laser_pro_index(parts: &[&Part], mode: &str) -> usize {
     let mut best = usize::MAX;
     let mut best_score = f64::NEG_INFINITY;
     for (idx, part) in parts.iter().enumerate() {
-        if !has_laser(part, mode) {
+        if !has_laser(part) {
             continue;
         }
         let score = laser_pro_score(part, mode);

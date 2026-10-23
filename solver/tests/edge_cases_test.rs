@@ -24,7 +24,9 @@ fn structural_default_keeps_non_structural_alternatives_reachable() {
 
 #[test]
 fn negative_recoil_bound_does_not_prune_feasible_states() {
-    run_case("negative_recoil_bound.json", 1429);
+    // The only installed part is the default internal `s0c0`; the site's
+    // ordinary price excludes internal parts, so only the weapon price counts.
+    run_case("negative_recoil_bound.json", 1354);
 }
 
 #[test]
