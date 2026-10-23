@@ -369,6 +369,22 @@ impl<'a> Evaluator<'a> {
         let s = p * (1.0 + t_k) * spring_c / p0;
 
         let base_aim = &profile.linked_tables.aim_recoil;
+        // The site's `Ye` returns null when the base scale is missing (or
+        // rounds to 0) and `_r` drops the whole recoil object unless all five
+        // entries are non-null, so these inputs must be present.
+        let base_scales = [
+            base_aim.continue_shoot.horizontal_scale,
+            base_aim.continue_shoot.vertical_scale,
+            base_aim.single_or_burst.horizontal_scale,
+            base_aim.single_or_burst.vertical_scale,
+        ];
+        if base_scales
+            .iter()
+            .any(|v| v.map_or(true, |v| !v.is_finite() || round2(v) == 0.0))
+            || round2(p0) == 0.0
+        {
+            return None;
+        }
         let mut aim: &AimRecoil = base_aim;
         for part in parts {
             if let Some(over) = part.aim_recoil_profiles.get(mode) {
@@ -1605,6 +1621,112 @@ mod tests {
             prices: &prices,
         };
         assert_eq!(ev.price(&price_assembly("p1")), (0, 1000, 0));
+    }
+
+    fn recoil_payload_json(aim_recoil: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "parts": {
+                "w1": { "id": "w1", "name": "Gun" }
+            },
+            "weaponNumericProfilesById": {
+                "w1": {
+                    "linkedTables": {
+                        "aimRecoil": aim_recoil,
+                        "recoilCurves": {
+                            "recoilControl": {
+                                "keys": [
+                                    { "Time": 0, "Value": 1.0 },
+                                    { "Time": 100, "Value": 0.5 }
+                                ]
+                            },
+                            "gunkick": {
+                                "keys": [
+                                    { "Time": 0, "Value": 1.0 },
+                                    { "Time": 100, "Value": 0.5 }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn recoil_payload(aim_recoil: serde_json::Value) -> WeaponPayload {
+        serde_json::from_value(recoil_payload_json(aim_recoil)).unwrap()
+    }
+
+    fn recoil_of(aim_recoil: serde_json::Value) -> Option<RecoilResult> {
+        let payload = recoil_payload(aim_recoil);
+        let assembler = Assembler::new(&payload, "w1");
+        let prices: FxHashMap<String, i64> = FxHashMap::default();
+        let ev = Evaluator {
+            payload: &payload,
+            weapon_id: "w1",
+            mode: "operations",
+            laser_enabled: false,
+            bipod_deployed: false,
+            prices: &prices,
+        };
+        ev.recoil(
+            &assembler,
+            &[],
+            &Assembly::default(),
+            &TuningState::default(),
+        )
+    }
+
+    #[test]
+    fn missing_aim_scale_makes_recoil_unavailable() {
+        // The site's `Ye` returns null when the base scale is missing and
+        // `_r` drops the whole recoil object unless all five entries are
+        // non-null.
+        assert!(recoil_of(serde_json::json!({})).is_none());
+        assert!(recoil_of(serde_json::json!({
+            "ContinueShootRecoil": { "HorizontalScale": 1.0, "VerticalScale": 1.0 },
+            "SingleOrBurstShootRecoil": { "HorizontalScale": 1.0 }
+        }))
+        .is_none());
+        // `Ye` also returns null when round2(base) is zero.
+        assert!(recoil_of(serde_json::json!({
+            "ContinueShootRecoil": { "HorizontalScale": 0.001, "VerticalScale": 1.0 },
+            "SingleOrBurstShootRecoil": { "HorizontalScale": 1.0, "VerticalScale": 1.0 }
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn complete_aim_scale_still_yields_recoil() {
+        let r = recoil_of(serde_json::json!({
+            "ContinueShootRecoil": { "HorizontalScale": 1.0, "VerticalScale": 2.0 },
+            "SingleOrBurstShootRecoil": { "HorizontalScale": 4.0, "VerticalScale": 1.0 }
+        }))
+        .expect("all scales present");
+        assert!((r.continuous_h - 1.0).abs() < 1e-9);
+        assert!((r.continuous_v - 1.0).abs() < 1e-9);
+        assert!((r.single_h - 1.0).abs() < 1e-9);
+        assert!((r.single_v - 1.0).abs() < 1e-9);
+        assert!((r.fire_stability - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recoil_constraint_is_unavailable_without_aim_scale() {
+        let payload = recoil_payload_json(serde_json::json!({}));
+        let request = serde_json::json!({
+            "weaponId": "w1",
+            "mode": "operations",
+            "prices": { "w1": 100 },
+            "constraints": [
+                { "id": "recoil-continuous-horizontal", "max": 0.85 }
+            ]
+        });
+        let out = crate::solve_slices(
+            &serde_json::to_vec(&payload).unwrap(),
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(out["optimal"], false, "no recoil value can satisfy the bound");
     }
 
     #[test]

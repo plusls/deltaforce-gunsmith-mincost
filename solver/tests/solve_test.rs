@@ -55,7 +55,16 @@ fn payload() -> serde_json::Value {
         "weaponNumericProfilesById": {
             "w1": {
                 "linkedTables": {
-                    "aimRecoil": {},
+                    "aimRecoil": {
+                        "ContinueShootRecoil": {
+                            "HorizontalScale": 1.0,
+                            "VerticalScale": 1.0
+                        },
+                        "SingleOrBurstShootRecoil": {
+                            "HorizontalScale": 1.0,
+                            "VerticalScale": 1.0
+                        }
+                    },
                     "recoilCurves": {
                         "recoilControl": {
                             "keys": [
@@ -120,7 +129,9 @@ fn first_solution_returns_a_feasible_build_without_optimality_claim() {
     let out = run(request);
     assert_eq!(out["optimal"], false);
     assert!(out["best"]["total_price"].as_i64().is_some());
-    assert_eq!(out["best"]["recoil"]["continuous_h"], 0.375);
+    // 0.75 (control at d=50) * (1 - 0.5), reported through the site's
+    // two-decimal scale ratio.
+    assert_eq!(out["best"]["recoil"]["continuous_h"], 0.38);
 }
 
 #[test]
