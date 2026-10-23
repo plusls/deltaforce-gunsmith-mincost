@@ -1052,17 +1052,37 @@ fn quantize_with_decimals(value: f64, min: f64, max: f64, step: f64, decimals: u
     round_to(clamped, decimals)
 }
 
-fn decimals(value: f64) -> u32 {
+/// Maximum decimal places used when quantizing tuning values. Anything that
+/// needs more cannot be represented exactly and is reported as truncated.
+const MAX_DECIMALS: u32 = 15;
+
+/// Decimal places needed to write `value` (up to float noise), or `None` when
+/// it needs more than [`MAX_DECIMALS`].
+fn decimals_opt(value: f64) -> Option<u32> {
     if !value.is_finite() {
-        return 0;
+        return Some(0);
     }
     let mut v = value.abs();
-    let mut digits = 0u32;
-    while digits < 15 && (v - v.round()).abs() > 1e-9 * v.abs().max(1.0) {
-        v *= 10.0;
-        digits += 1;
+    if v == 0.0 {
+        return Some(0);
     }
-    digits
+    for digits in 0..MAX_DECIMALS {
+        // The tolerance is relative to `v`, so tiny values such as 1e-9 keep
+        // their own scale instead of being treated as integers.
+        if (v - v.round()).abs() <= 32.0 * f64::EPSILON * v {
+            return Some(digits);
+        }
+        v *= 10.0;
+    }
+    if (v - v.round()).abs() <= 32.0 * f64::EPSILON * v {
+        Some(MAX_DECIMALS)
+    } else {
+        None
+    }
+}
+
+fn decimals(value: f64) -> u32 {
+    decimals_opt(value).unwrap_or(MAX_DECIMALS)
 }
 
 fn round_to(value: f64, decimals: u32) -> f64 {
@@ -1491,8 +1511,9 @@ const TUNE_GRID_LIMIT: usize = 65_536;
 /// `step > 0` enumerates the full `[min, max]` grid; `step <= 0` (free tuning)
 /// uses `{min, max, default} ∪ {curve key Time}`, clamped to `[min, max]` and
 /// deduped. The site optimizer only tries `default` for free tuning, so this
-/// set is a superset of the site's. It does not change the `truncated` flag,
-/// which still reports only sampling of an oversized step grid.
+/// set is a superset of the site's. `truncated` covers every case where the
+/// grid cannot be enumerated completely: an oversized grid, an unrepresentable
+/// precision, or a step absorbed by floating point.
 pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
     let mut values = vec![tune.min_value, tune.max_value, tune.default_value];
     for effect in &tune.display_effects {
@@ -1535,9 +1556,17 @@ pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
             truncated = true;
         }
     }
+    let precision_representable = decimals_opt(tune.min_value).is_some()
+        && decimals_opt(tune.max_value).is_some()
+        && decimals_opt(tune.step_value).is_some();
     let decimals = decimals(tune.min_value)
         .max(decimals(tune.max_value))
         .max(decimals(tune.step_value));
+    if !precision_representable {
+        // The grid cannot be represented at 15 decimal places, so its
+        // quantization would silently merge or move candidates.
+        truncated = true;
+    }
     let mut out: Vec<f64> = values
         .into_iter()
         .map(|v| {
@@ -1545,7 +1574,14 @@ pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
         })
         .collect();
     out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    // Keep the dedup tolerance strictly below the effective step, otherwise
+    // adjacent grid values are merged away.
+    let dedup_tolerance = if step > 0.0 && step.is_finite() {
+        step * 1e-6
+    } else {
+        1e-12
+    };
+    out.dedup_by(|a, b| (*a - *b).abs() < dedup_tolerance);
     (out, truncated)
 }
 
@@ -1981,6 +2017,37 @@ mod tests {
             .expect("tune_offer_values must terminate when v + step == v");
         assert!(truncated, "an absorbed step cannot claim a complete grid");
         assert!(values.len() < 10, "unexpected values: {values:?}");
+    }
+
+    #[test]
+    fn tiny_step_grid_keeps_every_candidate() {
+        // decimals(1e-9) used to be 0, which quantized the whole grid to
+        // integers, and the 1e-9 dedup tolerance merged adjacent steps.
+        let tune = TuningOption {
+            min_value: 0.0,
+            max_value: 6e-5,
+            default_value: 0.0,
+            step_value: 1e-9,
+            ..Default::default()
+        };
+        let (values, truncated) = tune_offer_values(&tune);
+        assert!(!truncated);
+        assert_eq!(values.len(), 60_001);
+        assert!(values.windows(2).all(|w| w[1] - w[0] >= 0.999e-9));
+    }
+
+    #[test]
+    fn unrepresentable_precision_marks_the_grid_truncated() {
+        // 1e-20 needs 20 decimal places, beyond the 15 supported.
+        let tune = TuningOption {
+            min_value: 0.0,
+            max_value: 1e-19,
+            default_value: 0.0,
+            step_value: 1e-20,
+            ..Default::default()
+        };
+        let (_, truncated) = tune_offer_values(&tune);
+        assert!(truncated);
     }
 
     #[test]
