@@ -264,6 +264,12 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 
 `laserEnabled` 缺省为 `false`, 与站点 optimizer 的 `!!laserEnabled` 一致.
 
+锁定项在请求入口校验, 失败时 `solve_request`/`solve_slices` 返回 `Err` (WASM 为 `{ "error": ... }`):
+
+- 锁定配件同时出现在 `excludedPartIds`: 报 "当前配装与锁定条件不一致" (对应站点 C2).
+- `lockedPathKeys` 的路径无法在 payload 的槽位图中解析: 报 "锁定槽位已失效" (C3).
+- `lockedTuningKeys` 的 key 不是 `slotPath\0partId\0tuneId`、对应槽位实际安装的不是该配件、或该配件没有此调校: 报 "锁定精校已失效" (C4). 与站点一致, 每个 `lockedTuningKey` 会隐式锁定其槽位到该配件.
+
 ### 6.2 输出
 
 ```json

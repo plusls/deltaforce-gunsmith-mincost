@@ -110,6 +110,8 @@ target/release/solve --payload weapon.json --prices prices.json \
 
 `laserEnabled` 缺省为 `false`，与站点 optimizer 的 `!!laserEnabled` 一致。
 
+锁定项在请求入口校验：锁定配件不得同时在 `excludedPartIds` 中，`lockedPathKeys` 的路径必须能在 payload 中解析，`lockedTuningKeys` 必须属于对应槽位实际安装的配件；否则直接返回错误（WASM 侧为 `{ "error": "..." }`），不会进入搜索。
+
 ### WASM
 
 ```bash
