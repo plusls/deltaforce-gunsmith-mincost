@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const defaults = {
   solve: "target/release/solve",
@@ -70,10 +71,11 @@ function metricDiffs(solve, recheck) {
   return diffs;
 }
 
-function compare(solve, brute) {
+export function compare(solve, brute) {
   const best = solve.best ?? null;
   const brutePrice = brute.brute.minTotalPrice;
   const recheck = brute.recheckSolution ?? null;
+  const witnessLock = brute.brute.witnessLock ?? null;
   const truncated =
     brute.brute.assembliesTruncated ||
     brute.brute.evalsTruncated ||
@@ -88,10 +90,16 @@ function compare(solve, brute) {
     assemblies: brute.brute.assemblies,
     tuningEvals: brute.brute.tuningEvals,
     feasible: brute.brute.feasibleCount,
+    lockRejectedAssemblies: brute.brute.lockRejectedAssemblies ?? null,
+    witnessLockValid: witnessLock?.valid ?? null,
     recheckFeasible: recheck?.feasible ?? null,
     diffs: [],
   };
 
+  if (witnessLock?.valid === false) {
+    result.verdict = "DIFF-brute-invalid-lock";
+    return result;
+  }
   if (truncated) {
     result.verdict = "BRUTE-TRUNCATED";
     return result;
@@ -175,4 +183,10 @@ function main() {
   }
 }
 
-main();
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main();
+}

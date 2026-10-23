@@ -109,6 +109,7 @@ struct Bf<'a> {
     evals: usize,
     feasible: usize,
     skipped_tuning: usize,
+    lock_rejected: usize,
     evals_truncated: bool,
     asm_truncated: bool,
     best_cost: Option<i64>,
@@ -162,7 +163,69 @@ impl<'a> Bf<'a> {
         }
     }
 
+    /// Verifies the resolved assembly still honours every lockedPathKeys entry.
+    /// The resolver silently drops a locked part when an earlier slot claims its
+    /// socket through extraOccupySocketIds, so the raw selection map alone is not
+    /// evidence that the lock was installed.
+    fn locks_ok(&self, asm: &Assembly) -> bool {
+        self.locks.iter().all(|(path, expected)| {
+            match asm.visible_slots.iter().find(|s| &s.path_key == path) {
+                None => false,
+                Some(slot) => {
+                    let actual = slot
+                        .selected_part_id
+                        .clone()
+                        .or_else(|| slot.internal_part_id.clone());
+                    actual == *expected
+                }
+            }
+        })
+    }
+
+    fn lock_report(&self, asm: &Assembly) -> Value {
+        let mut valid = true;
+        let mut checked = Vec::new();
+        let mut paths: Vec<&String> = self.locks.keys().collect();
+        paths.sort();
+        for path in paths {
+            let expected = self.locks.get(path).cloned().flatten();
+            let entry = match asm.visible_slots.iter().find(|s| &s.path_key == path) {
+                None => {
+                    valid = false;
+                    json!({
+                        "path": path,
+                        "expected": expected,
+                        "actual": Value::Null,
+                        "slotFound": false,
+                        "ok": false,
+                    })
+                }
+                Some(slot) => {
+                    let actual = slot
+                        .selected_part_id
+                        .clone()
+                        .or_else(|| slot.internal_part_id.clone());
+                    let ok = actual == expected;
+                    valid &= ok;
+                    json!({
+                        "path": path,
+                        "expected": expected,
+                        "actual": actual,
+                        "slotFound": true,
+                        "ok": ok,
+                    })
+                }
+            };
+            checked.push(entry);
+        }
+        json!({"valid": valid, "checked": checked})
+    }
+
     fn eval_assembly(&mut self, sel: &Map<String, Option<String>>, asm: &Assembly) {
+        if !self.locks_ok(asm) {
+            self.lock_rejected += 1;
+            return;
+        }
         let instances = self.evaluator.tunable_instances(asm);
         let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
         let mut skip = false;
@@ -242,6 +305,7 @@ impl<'a> Bf<'a> {
                     "selections": selections,
                     "tuning": tuning,
                     "constraints": results,
+                    "lockCheck": self.lock_report(asm),
                     "panel": metrics.panel,
                     "recoil": {
                         "continuousH": metrics.recoil.continuous_h,
@@ -371,6 +435,7 @@ fn main() {
         evals: 0,
         feasible: 0,
         skipped_tuning: 0,
+        lock_rejected: 0,
         evals_truncated: false,
         asm_truncated: false,
         best_cost: None,
@@ -425,6 +490,11 @@ fn main() {
     let solved = gunsmith_mincost::solve_slices(&payload_bytes, &request_bytes);
     let solve_elapsed = solve_started.elapsed().as_secs_f64();
 
+    let witness_lock = bf
+        .best
+        .as_ref()
+        .and_then(|w| w.get("lockCheck").cloned())
+        .unwrap_or(Value::Null);
     let mut out = json!({
         "brute": {
             "minTotalPrice": bf.best_cost,
@@ -432,10 +502,12 @@ fn main() {
             "assemblies": bf.assemblies,
             "tuningEvals": bf.evals,
             "skippedTuningGroups": bf.skipped_tuning,
+            "lockRejectedAssemblies": bf.lock_rejected,
             "assembliesTruncated": bf.asm_truncated,
             "evalsTruncated": bf.evals_truncated,
             "elapsedS": elapsed,
             "witness": bf.best,
+            "witnessLock": witness_lock,
         },
         "solve": match &solved {
             Ok(bytes) => {

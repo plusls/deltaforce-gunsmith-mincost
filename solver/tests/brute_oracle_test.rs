@@ -83,3 +83,104 @@ fn brute_oracle_agrees_on_a_wide_tuning_grid() {
     let result = run_bf(payload, request(0.9), 1024, "wide");
     assert_matches(&result, 1050);
 }
+
+fn lock_conflict_payload() -> Value {
+    json!({
+        "dataVersion": "lock-conflict",
+        "parts": {
+            "w1": {"id": "w1", "name": "gun"},
+            "p1": {
+                "id": "p1",
+                "name": "conflicting-kit",
+                "extraOccupySocketIds": ["3"]
+            },
+            "p2": {"id": "p2", "name": "locked-mag"}
+        },
+        "slotsByHost": {
+            "w1": [
+                {"id": "2", "name": "S2", "candidateIds": ["p1"]},
+                {"id": "3", "name": "S3", "candidateIds": ["p2"]}
+            ]
+        },
+        "weaponStatsById": {
+            "w1": {
+                "byMode": {
+                    "operations": {
+                        "base": {"10001": 55},
+                        "display": {"10001": 55}
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn lock_conflict_request() -> Value {
+    json!({
+        "weaponId": "w1",
+        "mode": "operations",
+        "laserEnabled": false,
+        "bipodDeployed": false,
+        "prices": {"w1": 1000, "p1": 0, "p2": 200},
+        "constraints": [{"id": "10001", "min": 50, "max": 60}],
+        "lockedPathKeys": {"weapon:w1/slot:3:S3": "p2"}
+    })
+}
+
+#[test]
+fn brute_rejects_a_witness_whose_lock_was_displaced() {
+    let result = run_bf(
+        lock_conflict_payload(),
+        lock_conflict_request(),
+        64,
+        "lock-conflict",
+    );
+    let brute = &result["brute"];
+    // Without the lock check the cheaper p1 branch would report 1000 while the
+    // resolver had already dropped the locked p2.
+    assert_eq!(brute["minTotalPrice"], json!(1200));
+    assert_eq!(brute["assemblies"], json!(2));
+    assert_eq!(brute["feasibleCount"], json!(1));
+    assert_eq!(brute["lockRejectedAssemblies"], json!(1));
+    assert_eq!(brute["witness"]["totalPrice"], json!(1200));
+    assert_eq!(
+        brute["witness"]["selections"]["weapon:w1/slot:2:S2"],
+        Value::Null
+    );
+    assert_eq!(
+        brute["witness"]["selections"]["weapon:w1/slot:3:S3"],
+        json!("p2")
+    );
+    assert_eq!(brute["witnessLock"]["valid"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"][0]["ok"], json!(true));
+}
+
+#[test]
+fn brute_accepts_an_explicit_empty_lock() {
+    let mut request = lock_conflict_request();
+    request["lockedPathKeys"] = json!({
+        "weapon:w1/slot:2:S2": null,
+        "weapon:w1/slot:3:S3": "p2"
+    });
+    let result = run_bf(lock_conflict_payload(), request, 64, "lock-null");
+    let brute = &result["brute"];
+    assert_eq!(brute["minTotalPrice"], json!(1200));
+    assert_eq!(brute["lockRejectedAssemblies"], json!(0));
+    assert_eq!(brute["witnessLock"]["valid"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"].as_array().unwrap().len(), 2);
+    assert_eq!(brute["witnessLock"]["checked"][0]["ok"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"][1]["ok"], json!(true));
+}
+
+#[test]
+fn brute_without_locks_keeps_using_the_conflicting_part() {
+    let mut request = lock_conflict_request();
+    request.as_object_mut().unwrap().remove("lockedPathKeys");
+    let result = run_bf(lock_conflict_payload(), request, 64, "no-lock");
+    let brute = &result["brute"];
+    assert_eq!(brute["minTotalPrice"], json!(1000));
+    assert_eq!(brute["feasibleCount"], json!(3));
+    assert_eq!(brute["lockRejectedAssemblies"], json!(0));
+    assert_eq!(brute["witnessLock"]["valid"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"].as_array().unwrap().len(), 0);
+}
