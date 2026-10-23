@@ -326,6 +326,26 @@ function blackhawkPrices(ctx, excluded) {
   return prices;
 }
 
+// Rust keys prices by `official_object_id ?? part.id` but filters the search
+// with `excludedPartIds`, which it matches against `part.id`. These differ for
+// parts whose official object id is not the part id, so exclusions have to be
+// translated back before they reach the solver.
+function partIdByPriceId(data) {
+  const map = new Map();
+  const parts = asObject(asObject(data).parts);
+  for (const [partId, raw] of Object.entries(parts)) {
+    const part = asObject(raw);
+    const priceId =
+      typeof part.officialObjectId === "string" && part.officialObjectId !== ""
+        ? part.officialObjectId
+        : typeof part.id === "string" && part.id !== ""
+          ? part.id
+          : partId;
+    if (!map.has(priceId)) map.set(priceId, partId);
+  }
+  return map;
+}
+
 export function toSolveRequest(context, options) {
   const ctx = asObject(context);
   const opts = asObject(options);
@@ -337,6 +357,7 @@ export function toSolveRequest(context, options) {
     prices = blackhawkPrices(ctx, excluded);
   } else {
     const pricesByObjectId = asObject(ctx.pricesByObjectId);
+    const partIdByObject = partIdByPriceId(ctx.data);
 
     for (const [officialObjectId, rawPair] of Object.entries(pricesByObjectId)) {
       const pair = asObject(rawPair);
@@ -357,7 +378,10 @@ export function toSolveRequest(context, options) {
         continue;
       }
 
-      excluded.add(officialObjectId);
+      // Price maps may also contain objects from other weapons. Those have no
+      // part whose price id matches, so there is nothing to exclude and no
+      // selectable part can pick up their missing price; keep the original id.
+      excluded.add(partIdByObject.get(officialObjectId) ?? officialObjectId);
     }
   }
 

@@ -566,6 +566,64 @@ test("missing current prices are excluded by default and fallback uses system pr
   assert.deepEqual(system.excludedPartIds, ["pre", "noPrice", "negative"]);
 });
 
+test("missing prices exclude the part id, not the official object id", () => {
+  const context = makeContext({
+    data: {
+      ...WEAPON_DATA,
+      parts: {
+        p1: { id: "p1", officialObjectId: "official-1" },
+        p2: { id: "p2", officialObjectId: "official-2" },
+        p3: { id: "p3" },
+      },
+    },
+    pricesByObjectId: {
+      "official-1": { currentPrice: 100, systemPrice: 90 },
+      "official-2": { currentPrice: 0, systemPrice: 0 },
+      p3: { currentPrice: null, systemPrice: 0 },
+      stray: { currentPrice: 0, systemPrice: 0 },
+    },
+  });
+
+  const request = toSolveRequest(context, {
+    priceSource: "current",
+    lockMode: "locked",
+    missingPricePolicy: "reject",
+  });
+
+  assert.deepEqual(request.prices, { "official-1": 100 });
+  assert.deepEqual(request.excludedPartIds, ["p2", "p3", "stray"]);
+});
+
+test("missing prices never leave an unpriced selectable part", () => {
+  const parts = {
+    p1: { id: "p1", officialObjectId: "official-1" },
+    p2: { id: "p2", officialObjectId: "official-2" },
+  };
+  const context = makeContext({
+    data: { ...WEAPON_DATA, parts },
+    pricesByObjectId: {
+      "official-1": { currentPrice: 0, systemPrice: 0 },
+      "official-2": { currentPrice: 10, systemPrice: 10 },
+    },
+  });
+
+  const request = toSolveRequest(context, {
+    priceSource: "current",
+    lockMode: "locked",
+    missingPricePolicy: "reject",
+  });
+
+  const pricedPartIds = new Set(request.excludedPartIds);
+  for (const part of Object.values(parts)) {
+    const priceId = part.officialObjectId ?? part.id;
+    if (priceId in request.prices) continue;
+    assert.ok(
+      pricedPartIds.has(part.id),
+      `part ${part.id} has no price and is not excluded`,
+    );
+  }
+});
+
 test("locked paths and tuning map to solver objects", () => {
   const context = makeContext({
     currentSelections: { s1: "p1", s2: "p2", s3: "" },
