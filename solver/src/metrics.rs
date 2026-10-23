@@ -1331,21 +1331,9 @@ fn eval_sorted_curve_points(points: &[CurveKey], x: f64) -> Option<f64> {
             return Some(b.value);
         }
         let t = (x - a.time) / (b.time - a.time);
-        return match a.interp_mode.as_str() {
-            "RCIM_Constant" => Some(a.value),
-            "RCIM_Cubic" => {
-                let dt = b.time - a.time;
-                let t2 = t * t;
-                let t3 = t2 * t;
-                Some(
-                    (2.0 * t3 - 3.0 * t2 + 1.0) * a.value
-                        + (t3 - 2.0 * t2 + t) * dt * a.leave_tangent
-                        + (-2.0 * t3 + 3.0 * t2) * b.value
-                        + (t3 - t2) * dt * b.arrive_tangent,
-                )
-            }
-            _ => Some(a.value + (b.value - a.value) * t),
-        };
+        // The site's tuning evaluator (`mr`) ignores InterpMode entirely and
+        // always interpolates linearly.
+        return Some(a.value + (b.value - a.value) * t);
     }
     Some(last.value)
 }
@@ -1382,21 +1370,9 @@ pub fn eval_curve_points(points: &[CurveKey], x: f64) -> Option<f64> {
             return Some(b.value);
         }
         let t = (x - a.time) / (b.time - a.time);
-        return match a.interp_mode.as_str() {
-            "RCIM_Constant" => Some(a.value),
-            "RCIM_Cubic" => {
-                let dt = b.time - a.time;
-                let t2 = t * t;
-                let t3 = t2 * t;
-                Some(
-                    (2.0 * t3 - 3.0 * t2 + 1.0) * a.value
-                        + (t3 - 2.0 * t2 + t) * dt * a.leave_tangent
-                        + (-2.0 * t3 + 3.0 * t2) * b.value
-                        + (t3 - t2) * dt * b.arrive_tangent,
-                )
-            }
-            _ => Some(a.value + (b.value - a.value) * t),
-        };
+        // The site's tuning evaluator (`mr`) ignores InterpMode entirely and
+        // always interpolates linearly.
+        return Some(a.value + (b.value - a.value) * t);
     }
     Some(last.value)
 }
@@ -1867,6 +1843,35 @@ mod tests {
                 .expect("recoil");
             assert_eq!(r.continuous_h, 13.13, "mode {mode:?}");
             assert_eq!(r.continuous_v, 13.13, "mode {mode:?}");
+        }
+    }
+
+    #[test]
+    fn tuning_curves_are_always_linear() {
+        // The site's tuning evaluator (`mr`) never reads InterpMode.
+        for mode in ["RCIM_Cubic", "RCIM_Constant", "RCIM_Bogus", ""] {
+            let mut first = key(0.0, 0.0);
+            first.interp_mode = mode.to_string();
+            first.leave_tangent = 10.0;
+            let points = vec![first, key(10.0, 10.0)];
+            assert_eq!(
+                eval_curve_points(&points, 5.0),
+                Some(5.0),
+                "mode {mode:?}"
+            );
+            let tune = TuningOption {
+                min_value: 0.0,
+                max_value: 10.0,
+                step_value: 1.0,
+                default_value: 0.0,
+                display_effects: vec![TuningEffect {
+                    attribute_name_snapshot: "开镜速度".to_string(),
+                    curve_points: points,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            assert_eq!(tune_channels(&tune, 5.0).open, 5.0, "mode {mode:?}");
         }
     }
 
