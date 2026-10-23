@@ -17,6 +17,15 @@ export class UnsupportedFeatureError extends Error {
   }
 }
 
+export class UnsupportedConstraintOperatorError extends Error {
+  constructor(id, operator) {
+    super(`unsupported constraint operator: ${String(operator)} for ${id}`);
+    this.name = "UnsupportedConstraintOperatorError";
+    this.constraint = id;
+    this.operator = operator;
+  }
+}
+
 export const SUPPORTED_CONSTRAINT_IDS = new Set([
   "recoil-continuous-horizontal",
   "recoil-continuous-vertical",
@@ -142,7 +151,24 @@ function constraintFor(id, operator, value) {
   if (operator === "gte") return { id, min: value };
   if (operator === "lte") return { id, max: value };
   if (operator === "eq") return { id, min: value, max: value };
-  return null;
+  // Dropping an unparseable operator would silently turn a hard constraint
+  // into an unconstrained run that still reports `optimal`.
+  throw new UnsupportedConstraintOperatorError(id, operator);
+}
+
+// Site metric directions: only these improve as the value grows.
+const HIGHER_IS_BETTER = new Set([
+  "10001",
+  "10005",
+  "10006",
+  "10007",
+  "10008",
+  "handling-aim-move-speed",
+  "stability-breath-duration",
+]);
+
+function defaultOperatorFor(id) {
+  return HIGHER_IS_BETTER.has(id) ? "gte" : "lte";
 }
 
 function readLegacyAdvanced(smartOptions, targets) {
@@ -152,6 +178,9 @@ function readLegacyAdvanced(smartOptions, targets) {
 
   for (const [id, raw] of Object.entries(values)) {
     if (targets.has(id)) continue;
+    // Only the custom level carries a hard bound; low/medium/high are soft
+    // preferences handled by the site's own scoring.
+    if (prefs[id] !== "custom") continue;
     let value = raw;
     let operator = operators[id];
     if (raw !== null && typeof raw === "object") {
@@ -159,8 +188,7 @@ function readLegacyAdvanced(smartOptions, targets) {
       operator = raw.operator ?? operator;
     }
     if (!Number.isFinite(value)) continue;
-    if (prefs[id] === "none") continue;
-    targets.set(id, { operator: operator ?? "gte", value });
+    targets.set(id, { operator: operator ?? defaultOperatorFor(id), value });
   }
 
   for (const [id, raw] of Object.entries(prefs)) {
@@ -168,7 +196,7 @@ function readLegacyAdvanced(smartOptions, targets) {
     if (raw === null || typeof raw !== "object") continue;
     const value = raw.value;
     if (!Number.isFinite(value)) continue;
-    const operator = raw.operator ?? operators[id] ?? "gte";
+    const operator = raw.operator ?? operators[id] ?? defaultOperatorFor(id);
     targets.set(id, { operator, value });
   }
 }

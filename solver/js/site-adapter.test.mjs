@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   UnsupportedConstraintError,
+  UnsupportedConstraintOperatorError,
   UnsupportedFeatureError,
   SUPPORTED_CONSTRAINT_IDS,
   PRIMARY_ATTR_BY_GROUP,
@@ -219,6 +220,93 @@ test("legacy advancedPreferences shape is honored", () => {
     { id: "recoil-single-horizontal", max: 0.5 },
     { id: "handling-aim-time", max: 250 },
   ]);
+});
+
+test("legacy values only bind at the custom level and default by direction", () => {
+  const options = optionsFromSiteRequest(
+    {
+      targets: {},
+      smartOptions: {
+        advancedPreferences: {
+          "handling-aim-time": "custom",
+          "handling-aim-move-speed": "custom",
+          "recoil-continuous-horizontal": "custom",
+          "stability-breath-duration": "custom",
+          "hipfire-standing-spread": "high",
+          "handling-reload-time": "low",
+          "recoil-fire-stability": { value: 0.7 },
+        },
+        advancedPreferenceValues: {
+          "handling-aim-time": 300,
+          "handling-aim-move-speed": 3.5,
+          "recoil-continuous-horizontal": 0.5,
+          "stability-breath-duration": 4,
+          "hipfire-standing-spread": 2,
+          "handling-reload-time": 1.8,
+        },
+      },
+    },
+    { ignoreUnsupported: true },
+  );
+
+  assert.deepEqual(options.constraints, [
+    { id: "handling-aim-time", max: 300 },
+    { id: "handling-aim-move-speed", min: 3.5 },
+    { id: "recoil-continuous-horizontal", max: 0.5 },
+    { id: "stability-breath-duration", min: 4 },
+    { id: "recoil-fire-stability", max: 0.7 },
+  ]);
+});
+
+test("unknown or missing constraint operators are rejected", () => {
+  const throwsOperator = (request) =>
+    assert.throws(
+      () => optionsFromSiteRequest(request),
+      UnsupportedConstraintOperatorError,
+    );
+
+  throwsOperator({
+    targets: {},
+    smartOptions: {
+      preferenceConditions: { recoil: { operator: "gt", value: 48 } },
+    },
+  });
+  throwsOperator({
+    targets: {},
+    smartOptions: { preferenceConditions: { recoil: { value: 48 } } },
+  });
+  throwsOperator({
+    targets: {},
+    smartOptions: {
+      advancedPreferenceTargets: {
+        "handling-aim-time": { value: 300 },
+      },
+    },
+  });
+  throwsOperator({
+    targets: {},
+    smartOptions: {
+      advancedPreferenceTargets: {
+        "recoil-continuous-vertical": { operator: "between", value: 0.4 },
+      },
+    },
+  });
+
+  assert.throws(
+    () =>
+      optionsFromSiteRequest({
+        targets: {},
+        smartOptions: {
+          preferenceConditions: { recoil: { operator: "gt", value: 48 } },
+        },
+      }),
+    (error) => {
+      assert.equal(error.constraint, "10005");
+      assert.equal(error.operator, "gt");
+      assert.match(error.message, /10005/);
+      return true;
+    },
+  );
 });
 
 test("preparednessEnabled throws UnsupportedFeatureError", () => {
