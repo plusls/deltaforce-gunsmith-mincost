@@ -449,6 +449,18 @@ struct Offer {
     deviation: f64,
 }
 
+/// True when the offer sets every tuning in `assignment`. Key order is not
+/// assumed: the exact pass can report a different key order than the frontier.
+fn offer_matches_assignment(offer: &Offer, keys: &[String], assignment: &[(String, f64)]) -> bool {
+    !assignment.is_empty()
+        && assignment.iter().all(|(key, value)| {
+            keys.iter()
+                .position(|candidate| candidate == key)
+                .and_then(|idx| offer.values.get(idx))
+                .is_some_and(|current| (current - value).abs() <= 1e-12)
+        })
+}
+
 #[derive(Clone)]
 struct CachedFrontier {
     offers: Rc<Vec<Offer>>,
@@ -2468,38 +2480,52 @@ impl<'a> Solver<'a> {
             },
             None => TuneReq::unconstrained(),
         };
-        let Some((tuning_state, chosen)) = self.pick_tuning(&instances, &req, &installed) else {
-            return;
-        };
-
-        let Some(metrics) = self
-            .evaluator
-            .evaluate(&self.assembler, &assembly, &tuning_state)
-        else {
-            return;
-        };
-
-        let mut constraint_results = Vec::new();
-        let mut ok = true;
-        for c in &self.options.constraints {
-            let Some(value) = metric_value(c.id.as_str(), &metrics) else {
+        let mut excluded: Vec<Vec<(String, f64)>> = Vec::new();
+        let (chosen, metrics, constraint_results) = loop {
+            let Some((tuning_state, chosen)) =
+                self.pick_tuning(&instances, &req, &installed, &excluded)
+            else {
                 return;
             };
-            let min_ok = c.min.map(|m| value >= m - 1e-9).unwrap_or(true);
-            let max_ok = c.max.map(|m| value <= m + 1e-9).unwrap_or(true);
-            let ok_this = min_ok && max_ok;
-            ok &= ok_this;
-            constraint_results.push(ConstraintResult {
-                id: c.id.clone(),
-                value,
-                min: c.min,
-                max: c.max,
-                ok: ok_this,
-            });
-        }
-        if !ok {
-            return;
-        }
+
+            let mut constraint_results = Vec::new();
+            let mut ok = true;
+            let metrics = self
+                .evaluator
+                .evaluate(&self.assembler, &assembly, &tuning_state);
+            if let Some(metrics) = metrics {
+                for c in &self.options.constraints {
+                    let Some(value) = metric_value(c.id.as_str(), &metrics) else {
+                        return;
+                    };
+                    let min_ok = c.min.map(|m| value >= m - 1e-9).unwrap_or(true);
+                    let max_ok = c.max.map(|m| value <= m + 1e-9).unwrap_or(true);
+                    let ok_this = min_ok && max_ok;
+                    ok &= ok_this;
+                    constraint_results.push(ConstraintResult {
+                        id: c.id.clone(),
+                        value,
+                        min: c.min,
+                        max: c.max,
+                        ok: ok_this,
+                    });
+                }
+                if ok {
+                    break (chosen, metrics, constraint_results);
+                }
+            }
+            // The frontier can rank a grid value that sits exactly on the open
+            // edge of a rounded requirement band. The exact evaluation above is
+            // authoritative, so try the next candidate before discarding the
+            // whole assembly.
+            if chosen.is_empty() {
+                return;
+            }
+            excluded.push(chosen);
+            if excluded.len() >= TUNE_PICK_ATTEMPTS {
+                return;
+            }
+        };
 
         let tuning = chosen
             .iter()
@@ -2882,11 +2908,18 @@ impl<'a> Solver<'a> {
         instances: &[TuningInstance<'a>],
         req: &TuneReq,
         parts: &[&Part],
+        excluded: &[Vec<(String, f64)>],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
+        if !excluded.is_empty() {
+            // The exact pass only produces its single best combination. Once
+            // that one fails the caller needs the full frontier to offer
+            // alternatives.
+            return self.pick_tuning_frontier(instances, req, parts, excluded);
+        }
         match self.pick_tuning_exact(instances, req, parts) {
             ExactTune::Found(state, values) => Some((state, values)),
             ExactTune::Infeasible => None,
-            ExactTune::Unsupported => self.pick_tuning_frontier(instances, req, parts),
+            ExactTune::Unsupported => self.pick_tuning_frontier(instances, req, parts, excluded),
         }
     }
 
@@ -3107,6 +3140,7 @@ impl<'a> Solver<'a> {
         instances: &[TuningInstance<'a>],
         req: &TuneReq,
         parts: &[&Part],
+        excluded: &[Vec<(String, f64)>],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
         let cache_key = tune_cache_key(instances);
         let (frontier, keys, capped) =
@@ -3133,7 +3167,15 @@ impl<'a> Solver<'a> {
             self.heuristic_incomplete = true;
             self.tune_incomplete = true;
         }
-        Self::pick_from_frontier(&frontier, &keys, req, parts, self.options, &self.evaluator)
+        Self::pick_from_frontier(
+            &frontier,
+            &keys,
+            req,
+            parts,
+            self.options,
+            &self.evaluator,
+            excluded,
+        )
     }
 
     fn stage2_time_ok(&self) -> bool {
@@ -3294,6 +3336,7 @@ impl<'a> Solver<'a> {
         parts: &[&Part],
         options: &SolveOptions,
         evaluator: &Evaluator<'a>,
+        excluded: &[Vec<(String, f64)>],
     ) -> Option<(TuningState, Vec<(String, f64)>)> {
         assert!(
             frontier.iter().all(|o| o.values.len() == keys.len()),
@@ -3333,6 +3376,12 @@ impl<'a> Solver<'a> {
         let mut best: Option<&Offer> = None;
         let mut best_score = f64::NEG_INFINITY;
         for o in frontier {
+            if excluded
+                .iter()
+                .any(|assignment| offer_matches_assignment(o, keys, assignment))
+            {
+                continue;
+            }
             if o.e_h < req.lower_h - 1e-9
                 || o.e_h > req.upper_h + 1e-9
                 || o.e_v < req.lower_v - 1e-9
@@ -3413,7 +3462,11 @@ impl<'a> Solver<'a> {
                 })
                 .collect();
         }
-        let values = tune_offer_values(tune);
+        let (values, truncated) = tune_offer_values(tune);
+        if truncated {
+            self.heuristic_incomplete = true;
+            self.tune_incomplete = true;
+        }
         let deviation = |v: f64| (v - tune.default_value).abs();
         let mut offers: Vec<LocalOffer> = values
             .into_iter()
@@ -4167,7 +4220,7 @@ fn exact_part_metric(
         let mut min_k = f64::INFINITY;
         let mut min_open = f64::INFINITY;
         let mut points: Vec<CapPoint> = Vec::new();
-        for v in tune_offer_values(tune) {
+        for v in tune_offer_values(tune).0 {
             let channels = tune_channels(tune, v);
             max_h = max_h.max(channels.h);
             max_v = max_v.max(channels.v);
@@ -4964,7 +5017,7 @@ fn part_own_bound(part: &Part, weapon_id: &str, mode: &str, laser_enabled: bool)
         let mut max_h = f64::NEG_INFINITY;
         let mut max_v = f64::NEG_INFINITY;
         let mut max_k = f64::NEG_INFINITY;
-        for v in tune_offer_values(tune) {
+        for v in tune_offer_values(tune).0 {
             let (h, vv, k) = tune_offer(tune, v);
             max_h = max_h.max(h);
             max_v = max_v.max(vv);
@@ -5254,6 +5307,12 @@ const TUNE_NEXT_LIMIT: usize = 16_384;
 const TUNE_STAGE2_CAP: usize = 65_536;
 const TUNE_STAGE2_NEXT: usize = 65_536;
 const TUNE_STAGE2_MIN_MS: u64 = 1_000;
+
+/// A tuning candidate can still miss the exact metric after the frontier
+/// picked it, because the requirement bounds are the open edges of a rounded
+/// band and a discrete grid value can sit exactly on such an edge. Retry with
+/// the next candidate instead of dropping the whole assembly.
+const TUNE_PICK_ATTEMPTS: usize = 8;
 /// Upper bound on cached tuning frontiers. Entries are a few hundred KB at most;
 /// the cap keeps pathological payloads from growing the solver without bound.
 const TUNE_FRONTIER_CACHE_LIMIT: usize = 512;

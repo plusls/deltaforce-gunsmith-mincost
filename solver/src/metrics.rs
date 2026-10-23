@@ -1452,7 +1452,16 @@ pub fn tune_offer(tune: &TuningOption, value: f64) -> (f64, f64, f64) {
     (channels.h, channels.v, channels.k)
 }
 
-pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
+/// Upper bound on the number of evenly spaced tuning values. A grid above
+/// this only happens for payloads far outside the site's range; it is sampled
+/// and reported as truncated so the search cannot claim completeness.
+const TUNE_GRID_LIMIT: usize = 65_536;
+
+/// Returns the tuning values worth evaluating and whether the step grid had to
+/// be sampled. Every grid value matters: a constraint can have a feasible band
+/// narrower than one step, so dropping interior values silently turns a
+/// feasible build into "no build".
+pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
     let mut values = vec![tune.min_value, tune.max_value, tune.default_value];
     for effect in &tune.display_effects {
         for key in &effect.curve_points {
@@ -1460,14 +1469,30 @@ pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
         }
     }
     let step = tune.step_value;
+    let mut truncated = false;
     if step > 0.0 {
         let count = ((tune.max_value - tune.min_value) / step).floor() + 1.0;
-        if count <= 128.0 && count > 0.0 {
-            let mut v = tune.min_value;
-            while v <= tune.max_value + step * 0.5 {
-                values.push(v);
-                v += step;
+        if count.is_finite() && count > 0.0 {
+            if count <= TUNE_GRID_LIMIT as f64 {
+                let mut v = tune.min_value;
+                while v <= tune.max_value + step * 0.5 {
+                    values.push(v);
+                    v += step;
+                }
+            } else {
+                truncated = true;
+                let count = count.min(usize::MAX as f64) as usize;
+                let stride = count.div_ceil(TUNE_GRID_LIMIT);
+                for i in (0..count).step_by(stride) {
+                    let v = tune.min_value + i as f64 * step;
+                    if v <= tune.max_value {
+                        values.push(v);
+                    }
+                }
+                values.push(tune.max_value);
             }
+        } else if !count.is_finite() {
+            truncated = true;
         }
     }
     let decimals = decimals(tune.min_value)
@@ -1481,7 +1506,7 @@ pub fn tune_offer_values(tune: &TuningOption) -> Vec<f64> {
         .collect();
     out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     out.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    out
+    (out, truncated)
 }
 
 fn runtime_target_allowed(tune: &TuningOption, target: &str) -> bool {
