@@ -39,6 +39,9 @@ export function buildBundle({
   const workerSource = `${core}\n${readModule(repoDir, "userscript/src/worker-main.mjs")}\n`;
   const mainSource = `${readModule(repoDir, "userscript/src/status.mjs")}\n${readModule(
     repoDir,
+    "userscript/src/constraint-sync.mjs",
+  )}\n${readModule(repoDir, "userscript/src/sync-ui.mjs")}\n${readModule(
+    repoDir,
     "userscript/src/main.mjs",
   )}`;
   const wasmBase64 = (wasmBytes ?? readFileSync(wasmPath)).toString("base64");

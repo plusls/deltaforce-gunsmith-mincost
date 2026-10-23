@@ -33,6 +33,7 @@ import {
   setStatusEl,
   statusColor,
 } from "./status.mjs";
+import { installSyncUi } from "./sync-ui.mjs";
 
 const MINCOST_WASM_BASE64 = "__WASM_BASE64__";
 const MINCOST_WORKER_SOURCE = "__WORKER_SOURCE__";
@@ -519,7 +520,13 @@ function makeNumberField(text, value, title, onChange) {
 function injectButton(trigger) {
   if (!document.body) return;
   const siteButton = document.querySelector(".gunsmith-optimizer-generate");
-  if (!siteButton || document.querySelector(".gunsmith-mincost-bar")) return;
+  const existing = document.querySelector(".gunsmith-mincost-bar");
+  if (existing) {
+    const existingStatus = existing.querySelector(".gunsmith-mincost-status");
+    if (existingStatus) setStatusEl(existingStatus);
+    return;
+  }
+  if (!siteButton) return;
 
   const bar = document.createElement("div");
   bar.className = "gunsmith-mincost-bar";
@@ -626,7 +633,18 @@ function injectButton(trigger) {
 }
 
 const hook = installWorkerHook();
-const boot = () => injectButton(hook.trigger);
+
+function injectSyncUi() {
+  installSyncUi({
+    doc: document,
+    onStatus: (text, tone) => reportStatus(text, tone),
+  });
+}
+
+const boot = () => {
+  injectButton(hook.trigger);
+  injectSyncUi();
+};
 
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", boot, { once: true });

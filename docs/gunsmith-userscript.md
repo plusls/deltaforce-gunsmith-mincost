@@ -466,6 +466,40 @@ minSystemPrice: number | null;
 - 脚本按钮触发生成前, 用户可以继续在站点面板里设置阈值. 脚本读取的就是这次请求里的 `targets` 和 `smartOptions`.
 - 如果没有任何硬阈值, 最小开销就是裸枪. UI 应提示用户至少设置一个后坐力/稳定性/面板阈值.
 
+### 7.1 约束同步
+
+属性展示页每个支持的指标行有一个"同步"按钮; "最低开销" bar 里有一个"一键同步"按钮. 同步把当前显示值写进站点智能配装面板的硬条件, 后续仍走第 5 节的请求映射, 不需要额外转换.
+
+一键预设 7 项:
+
+| 显示指标 | 约束 id | 方向 |
+|---|---|---|
+| 全自动垂直后坐力 | `recoil-continuous-vertical` | lte |
+| 全自动水平后坐力 | `recoil-continuous-horizontal` | lte |
+| 开火时武器稳定性 | `recoil-fire-stability` | lte |
+| 举镜时间 | `handling-aim-time` | lte |
+| 跑射延迟 | `handling-sprint-fire-delay` | lte |
+| 开火时镜头稳定性 | `stability-fire-camera` | lte |
+| 腰射精度面板值 | `10008` | gte |
+
+腰射使用基础组 `10008`. 配件不能只改腰射的单个子指标, `hipfire-standing-spread` 和 `hipfire-maximum-spread` 共用同一个腰射倍率, 底数是枪械级.
+
+站点显示值是舍入后的, 而求解器按 1e-9 比较. 同步按显示精度在可行方向加半个最小单位, 避免当前配装被自己的约束排除:
+
+```text
+0.57 (lte)   -> 0.575
+411ms (lte)  -> 411.5
+266.3ms (lte)-> 266.35
+54 (gte)     -> 53.995
+```
+
+写入使用站点原生 setter 加 `input`/`change` 事件, 不直接改 React fiber. 同步会临时切换优化器 tab 和 lab tab, 完成后恢复原 tab 和分组. 高级行显示"不可计算"时跳过并返回失败原因.
+
+当前不同步: 屏息状态水平/垂直后坐力、屏息水平/垂直后坐力减免 (求解器缺少独立字段), 基础伤害、有效射程分、行走/冲刺速度、散布倍率.
+
+镭指或脚架开启时, 展示值口径与站点求解口径不同 (站点请求强制 `laserEnabled=false`, 脚架按收起处理), 同步阈值可能偏严.
+
+
 ## 8. WASM 加载与线程
 
 WASM 产物约 773 KB, gzip 后约 225 KB.
@@ -565,6 +599,7 @@ Rust 侧通过 `env.dws_now_ms` 读取墙钟, 在 DFS 节点, 叶节点, DP 状�
 5. 真实页面验证 (RM277, 数据版本 `8629d01bf694f212aad051c5`).
 6. 细分指标真实页面验证 (RM277, 2026-10-21): `handling-aim-time` 约束由脚本求解, 站点接受 "应用方案" 并用站点自身模型重算.
 7. 可配置时限 (2026-10-21): 站点搜索时长控件和 worker 字段已核对; 脚本新增"时限"输入, 自动跟随站点, 支持 1-300 秒覆盖. `solver/js/deadline.mjs` 集中放常量与解析, 新增 deadline 单元测试和 1 个 adapter 测试, Node 测试全部通过.
+8. 约束同步 (2026-10-23): 属性页每指标同步按钮和"一键同步"预设. `userscript/src/constraint-sync.mjs` 负责显示值解析、精度容差、站点约束写入与 tab 恢复; `userscript/src/sync-ui.mjs` 负责按钮注入和状态提示. 新增 Node 测试, 构建产物内联新模块.
 
 验证结果:
 
@@ -612,6 +647,18 @@ laserEnabled: false
 
 用同样的 context / options 在 Node 里重跑, 节点数, 叶节点数, selections 和总价与浏览器完全一致, 说明 adapter 映射没有偏差.
 
+约束同步验证 (真实页面, 武器 18010000018, 2026-10-23):
+
+```text
+显示值: 连发垂直 0.57x, 连发水平 0.57x, 开火稳定性 0.8x,
+        举镜时间 411ms, 跑射延迟 266.3ms, 开火镜头稳定性 0.3x, 腰射精度 54
+写入:   0.575, 0.575, 0.85, 411.5, 266.35, 0.35, 53.995 (hipfire gte)
+请求:   purpose=solve 的 smartOptions 恰好包含这 7 项, operator 与方向一致
+还原:   optimizer inputs 与测试前快照扁平 diff 0 处差异
+```
+
+单指标同步 `handling-reload-time` 只修改目标键, 其他约束不变. 测试环境同时驻留旧版 userscript, 新构建追加的一键按钮可正常写入, 但旧 bar 的 state 未接线导致状态文本不可见; 已加固为复用已有 bar 的状态元素.
+
 站点自带的"生成智能配件方案"在同一组约束下返回无解, 说明 beam search 的 128 状态 / 24 轮限制确实会漏解.
 
 安装: Tampermonkey 新建脚本, 粘贴 `userscript/dist/gunsmith-mincost.user.js`. 打开改枪页, 在站点生成按钮下方会出现"最低开销"按钮, 以及"完整模式", "市场价", "缺价排除"三个开关和"时限"输入. 开关样式沿用站点面板的深色风格; 取消"市场价"时"缺价排除"自动置灰. "时限"留空表示跟随站点"搜索"输入框, 填 1-300 表示覆盖. 按钮下方的状态栏显示本次实际时限和结果.
@@ -624,6 +671,8 @@ laserEnabled: false
 - 站点没有"无限"时限, 60 秒是站点上限; 脚本自定义上限 300 秒是人为风险边界, 不是站点能力.
 - 战备下限 (`preparednessEnabled`) 暂不支持, 会明确报错而不是静默忽略.
 - 站点更新导致 worker URL, payload 字段或 class 名变化时脚本会失效. hook 只匹配 `/optimizer\.worker/`, 不影响其他 worker.
+- 约束同步不支持屏息状态水平/垂直后坐力及其减免: 求解器目前只有 `stability-hold-breath-recoil` 曲线值, 没有 `RecoilScale.X/Y` 缩放后的独立字段.
+- 约束同步写入的是显示值的半个显示单位向外容差. 需要严格等于未舍入值时只能手动改约束.
 - 浏览器 CSP 禁止 `blob:` worker 时自动退回主线程, 大枪械会卡住页面约 1 到 2 秒.
 - 内置 wasm 使脚本约 1.17 MiB, gzip 后约 370 KB.
 

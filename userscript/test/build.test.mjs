@@ -152,6 +152,9 @@ test("bundle replaces placeholders and parses as a userscript", { skip }, () => 
   assert.ok(!/^\s*export\s/m.test(workerSource));
   assert.match(mainSource, /installWorkerHook/);
   assert.match(mainSource, /resolveDeadlineMs/);
+  assert.match(mainSource, /installSyncUi/);
+  assert.match(mainSource, /LAB_SYNC_METRICS/);
+  assert.ok(mainSource.indexOf("LAB_SYNC_METRICS") < mainSource.indexOf("installSyncUi"));
   assert.match(workerSource, /resolveDeadlineMs/);
   assert.match(bundle, /SITE_SEARCH_INPUT_SELECTOR/);
 });
@@ -178,6 +181,14 @@ test("bundle replacement treats $ sequences in worker source literally", () => {
       );
     }
     writeFileSync(resolve(dir, "userscript/src/status.mjs"), "");
+    writeFileSync(
+      resolve(dir, "userscript/src/constraint-sync.mjs"),
+      "const LAB_SYNC_METRICS = 1;\n",
+    );
+    writeFileSync(
+      resolve(dir, "userscript/src/sync-ui.mjs"),
+      "const installSyncUi = 1;\n",
+    );
     const workerBody = `const SPECIAL_PATTERNS = "$$ $& $' $\`";\n`;
     writeFileSync(resolve(dir, "userscript/src/worker-main.mjs"), workerBody);
     writeFileSync(
@@ -192,6 +203,11 @@ test("bundle replacement treats $ sequences in worker source literally", () => {
     });
 
     assert.ok(workerSource.includes(workerBody.trim()));
+    assert.ok(bundle.includes("const LAB_SYNC_METRICS = 1;"));
+    assert.ok(
+      bundle.indexOf("const LAB_SYNC_METRICS = 1;") <
+        bundle.indexOf("const installSyncUi = 1;"),
+    );
     assert.ok(bundle.includes("$$ $& $' $`"));
     assert.ok(bundle.includes(JSON.stringify(workerSource)));
     assert.ok(bundle.includes(JSON.stringify(Buffer.from("fake-wasm").toString("base64"))));
