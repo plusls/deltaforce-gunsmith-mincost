@@ -282,19 +282,43 @@ function installWorkerHook() {
   const sitePayloadCache = new Map();
   let pendingMinCost = null;
   let pendingToken = 0;
+  let hookFailed = false;
 
   function trigger(mode) {
     pendingToken += 1;
     const token = pendingToken;
-    pendingMinCost = { mode };
+    pendingMinCost = { mode, warned: false };
+    if (hookFailed) {
+      pendingMinCost = null;
+      pendingToken += 1;
+      reportStatus("未接管 · 无法替换站点 Worker, 本次显示站点原方案", "warn");
+      console.warn("[gunsmith-mincost] worker hook was not installed; site solver result used");
+      return;
+    }
     setTimeout(() => {
-      if (token === pendingToken && pendingMinCost) pendingMinCost = null;
+      if (token !== pendingToken || !pendingMinCost) return;
+      pendingMinCost = null;
+      reportStatus("未接管 · 3 秒内未收到站点求解请求, 本次显示站点原方案", "warn");
+      console.warn(
+        "[gunsmith-mincost] no site solve request captured within 3s; site solver result used",
+      );
     }, 3_000);
+  }
+
+  function noteWorkerMismatch(url) {
+    if (!pendingMinCost || pendingMinCost.warned) return;
+    if (!/optimizer|solver/i.test(String(url))) return;
+    pendingMinCost.warned = true;
+    reportStatus("未接管 · 站点求解 Worker 地址不匹配, 本次显示站点原方案", "warn");
+    console.warn("[gunsmith-mincost] site worker URL did not match:", String(url));
   }
 
   function PatchedWorker(url, options) {
     const real = new RealPageWorker(url, options);
-    if (!/optimizer\.worker/.test(String(url))) return real;
+    if (!/optimizer\.worker/.test(String(url))) {
+      noteWorkerMismatch(url);
+      return real;
+    }
 
     let onmessage = null;
     let onerror = null;
@@ -439,7 +463,11 @@ function installWorkerHook() {
   PatchedWorker.prototype = RealPageWorker.prototype;
   try {
     page.Worker = PatchedWorker;
+    if (page.Worker !== PatchedWorker) {
+      throw new Error("Worker assignment did not take effect");
+    }
   } catch (error) {
+    hookFailed = true;
     console.warn("[gunsmith-mincost] failed to hook Worker", error);
   }
 

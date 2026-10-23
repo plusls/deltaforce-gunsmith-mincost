@@ -7,6 +7,7 @@ const hostClearTimeout = clearTimeout;
 const TEST_MARKER = "const hook = installWorkerHook();";
 const TEST_HOOK = `${TEST_MARKER}
 globalThis.__mincostTest = {
+  hook,
   solveContext,
   getBackend,
   installWorkerHook,
@@ -46,21 +47,31 @@ function fakeDocument() {
   };
 }
 
-export function createSandbox({ autoAnswer = true, failInit = false } = {}) {
+export function createSandbox({
+  autoAnswer = true,
+  failInit = false,
+  solverResult = { kind: "ok" },
+} = {}) {
   const workers = [];
   const warnings = [];
   const errors = [];
-  const queuedTimers = [];
+  const queuedTimers = new Map();
   const solveRequests = [];
-  const state = { autoAnswer, failInit };
+  const state = { autoAnswer, failInit, solverResult };
   const counters = { postToTerminated: 0 };
+  let nextTimerId = 0;
 
   function schedule(fn, ms, ...args) {
+    nextTimerId += 1;
     if (ms >= 3_000) {
-      queuedTimers.push(() => fn(...args));
-      return queuedTimers.length;
+      queuedTimers.set(nextTimerId, () => fn(...args));
+      return nextTimerId;
     }
     return hostSetTimeout(fn, ms, ...args);
+  }
+
+  function cancelTimer(id) {
+    if (!queuedTimers.delete(id)) hostClearTimeout(id);
   }
 
   class FakeWorker {
@@ -105,7 +116,7 @@ export function createSandbox({ autoAnswer = true, failInit = false } = {}) {
               this.deliver({
                 type: "result",
                 id: message.id,
-                result: { kind: "ok", tag: this.url },
+                result: { ...state.solverResult, tag: this.url },
               }),
             1,
           );
@@ -155,7 +166,7 @@ export function createSandbox({ autoAnswer = true, failInit = false } = {}) {
       error: (...args) => errors.push(args),
     },
     setTimeout: schedule,
-    clearTimeout: (id) => hostClearTimeout(id),
+    clearTimeout: cancelTimer,
     performance: { now: () => Date.now() },
     WebAssembly,
     TextEncoder,
@@ -182,7 +193,9 @@ export function createSandbox({ autoAnswer = true, failInit = false } = {}) {
     solverWorker: () => workers.find((worker) => worker.url.startsWith("blob:")),
     solverWorkers: () => workers.filter((worker) => worker.url.startsWith("blob:")),
     runQueuedTimers() {
-      for (const timer of queuedTimers.splice(0)) timer();
+      const pending = [...queuedTimers.values()];
+      queuedTimers.clear();
+      for (const timer of pending) timer();
     },
   };
 }
@@ -227,4 +240,12 @@ export async function settle(promise, ms = 1_000) {
 
 export function tick(ms = 10) {
   return new Promise((resolvePromise) => hostSetTimeout(resolvePromise, ms));
+}
+
+export async function waitFor(predicate, ms = 2_000) {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await tick(5);
+  }
 }
