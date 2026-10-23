@@ -302,6 +302,12 @@ async function runMinCost(context, mode, options, requestDeadlineMs) {
   return { ...result, deadlineMs, deadlineSource: source, bipodDeployed };
 }
 
+function requestWithCachedData(message, cache) {
+  if (message.data != null) return message;
+  if (message.dataKey == null || !cache.has(message.dataKey)) return message;
+  return { ...message, data: cache.get(message.dataKey) };
+}
+
 function installWorkerHook() {
   const sitePayloadCache = new BoundedPayloadCache(PAYLOAD_CACHE_LIMIT);
   let pendingMinCost = null;
@@ -391,9 +397,10 @@ function installWorkerHook() {
             }
           };
 
+          const request = requestWithCachedData(message, sitePayloadCache);
           let context;
           try {
-            context = captureWorkerRequest(message, sitePayloadCache);
+            context = captureWorkerRequest(request, sitePayloadCache);
           } catch (error) {
             reportStatus(friendlyError(error), "error");
             emit({ error: friendlyError(error) });
@@ -402,7 +409,7 @@ function installWorkerHook() {
 
           (async () => {
             try {
-              const options = optionsFromSiteRequest(message, {});
+              const options = optionsFromSiteRequest(request, {});
               const result = await runMinCost(
                 context,
                 mode,
