@@ -599,6 +599,41 @@ fn channel_ok(a: f64, b: f64, dir: TuneDir) -> bool {
     }
 }
 
+/// Optimistic `open` value for an aim bound. `tuning_scale` clamps
+/// `1 / (1 + open / 100)` to `[0.25, 2.5]`, so the map is not monotone across
+/// `open = -100` (and flattens again at +300). Below -100 it always yields the
+/// smallest scale, so that value is a valid optimistic bound for every range
+/// that crosses the discontinuity or runs past the upper clamp.
+fn prune_open(open_min: f64, open_max: f64) -> f64 {
+    if open_min < -100.0 || open_max >= 300.0 {
+        -200.0
+    } else {
+        open_max
+    }
+}
+
+/// Monotone channel comparison for `open`, which is not actually monotone
+/// because of the tuning clamp. A pair that straddles the discontinuity in the
+/// direction that flips the effective order cannot dominate.
+fn open_channel_ok(a: f64, b: f64, dir: TuneDir) -> bool {
+    match dir {
+        TuneDir::Higher => {
+            if a < b - 1e-9 {
+                return false;
+            }
+            !(b <= -100.0 && a > -100.0 && a < 300.0)
+        }
+        TuneDir::Lower => {
+            if a > b + 1e-9 {
+                return false;
+            }
+            !(a <= -100.0 && b > -100.0 && b < 300.0)
+        }
+        TuneDir::Equal => (a - b).abs() <= 1e-9,
+        TuneDir::Ignore => true,
+    }
+}
+
 fn aim_direction(constraints: &[Constraint]) -> AimDir {
     let mut has_min = false;
     let mut has_max = false;
@@ -1858,7 +1893,7 @@ impl<'a> Solver<'a> {
             }
         }
         if let Some(max) = aim_max {
-            let open = (st.metric.eopen + sb.eopen_max).max(0.0);
+            let open = prune_open(st.metric.eopen_min + sb.eopen_min, st.metric.eopen + sb.eopen_max);
             if let Some(v) = self.evaluator.aim_time(
                 st.metric.hs + sb.hs_max,
                 st.metric.adsm + sb.adsm_min,
@@ -2114,15 +2149,18 @@ impl<'a> Solver<'a> {
         let mut suffix_hs_max = vec![0.0; options_per_slot.len() + 1];
         let mut suffix_adsm_min = vec![0.0; options_per_slot.len() + 1];
         let mut suffix_open_max = vec![0.0; options_per_slot.len() + 1];
+        let mut suffix_open_min = vec![0.0; options_per_slot.len() + 1];
         if aim_max.is_some() {
             for (idx, opts) in options_per_slot.iter().enumerate().rev() {
                 let mut hs_max = f64::NEG_INFINITY;
                 let mut adsm_min = f64::INFINITY;
                 let mut open_max = f64::NEG_INFINITY;
+                let mut open_min = f64::INFINITY;
                 for opt in opts {
                     hs_max = hs_max.max(opt.metric.hs);
                     adsm_min = adsm_min.min(opt.metric.adsm);
                     open_max = open_max.max(opt.metric.eopen);
+                    open_min = open_min.min(opt.metric.eopen_min);
                 }
                 if !hs_max.is_finite() || !adsm_min.is_finite() || !open_max.is_finite() {
                     continue;
@@ -2130,6 +2168,7 @@ impl<'a> Solver<'a> {
                 suffix_hs_max[idx] = suffix_hs_max[idx + 1] + hs_max;
                 suffix_adsm_min[idx] = suffix_adsm_min[idx + 1] + adsm_min;
                 suffix_open_max[idx] = suffix_open_max[idx + 1] + open_max;
+                suffix_open_min[idx] = suffix_open_min[idx + 1] + open_min;
             }
         }
 
@@ -2182,7 +2221,10 @@ impl<'a> Solver<'a> {
                         if let Some(best) = self.evaluator.aim_time(
                             metric.hs + suffix_hs_max[slot_idx + 1],
                             metric.adsm + suffix_adsm_min[slot_idx + 1],
-                            (metric.eopen + suffix_open_max[slot_idx + 1]).max(0.0),
+                            prune_open(
+                                metric.eopen_min + suffix_open_min[slot_idx + 1],
+                                metric.eopen + suffix_open_max[slot_idx + 1],
+                            ),
                         ) {
                             if best > max + 1e-9 {
                                 continue;
@@ -2275,7 +2317,11 @@ impl<'a> Solver<'a> {
             if let Some(max) = aim_max {
                 if let Some(best) =
                     self.evaluator
-                        .aim_time(st.metric.hs, st.metric.adsm, st.metric.eopen.max(0.0))
+                        .aim_time(
+                            st.metric.hs,
+                            st.metric.adsm,
+                            prune_open(st.metric.eopen_min, st.metric.eopen),
+                        )
                 {
                     if best > max + 1e-9 {
                         continue;
@@ -2441,7 +2487,11 @@ impl<'a> Solver<'a> {
             if let Some(max) = aim_max {
                 if let Some(best) =
                     self.evaluator
-                        .aim_time(st.metric.hs, st.metric.adsm, st.metric.eopen.max(0.0))
+                        .aim_time(
+                            st.metric.hs,
+                            st.metric.adsm,
+                            prune_open(st.metric.eopen_min, st.metric.eopen),
+                        )
                 {
                     if best > max + 1e-9 {
                         continue;
@@ -4110,6 +4160,7 @@ struct DpSuffixBound {
     ev_max: f64,
     ek_max: f64,
     eopen_max: f64,
+    eopen_min: f64,
     hs_max: f64,
     adsm_min: f64,
 }
@@ -4131,6 +4182,7 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
             ev_max: 0.0,
             ek_max: 0.0,
             eopen_max: 0.0,
+            eopen_min: 0.0,
             hs_max: 0.0,
             adsm_min: 0.0,
         };
@@ -4152,6 +4204,7 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
         let mut ev_max = f64::NEG_INFINITY;
         let mut ek_max = f64::NEG_INFINITY;
         let mut eopen_max = f64::NEG_INFINITY;
+        let mut eopen_min = f64::INFINITY;
         let mut hs_max = f64::NEG_INFINITY;
         let mut adsm_min = f64::INFINITY;
         for o in opts {
@@ -4170,6 +4223,7 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
             ev_max = ev_max.max(m.ev);
             ek_max = ek_max.max(m.ek);
             eopen_max = eopen_max.max(m.eopen);
+            eopen_min = eopen_min.min(m.eopen_min);
             hs_max = hs_max.max(m.hs);
             adsm_min = adsm_min.min(m.adsm);
         }
@@ -4185,6 +4239,7 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
             ev_max = 0.0;
             ek_max = 0.0;
             eopen_max = 0.0;
+            eopen_min = 0.0;
             hs_max = 0.0;
             adsm_min = 0.0;
         }
@@ -4204,6 +4259,7 @@ fn dp_suffix_bounds(options_per_slot: &[Vec<DpOption>]) -> Vec<DpSuffixBound> {
             ev_max: ev_max + next.ev_max,
             ek_max: ek_max + next.ek_max,
             eopen_max: eopen_max + next.eopen_max,
+            eopen_min: eopen_min + next.eopen_min,
             hs_max: hs_max + next.hs_max,
             adsm_min: adsm_min + next.adsm_min,
         };
@@ -5670,7 +5726,7 @@ fn offer_dominates(a: &Offer, b: &Offer, dims: &TuneDims) -> bool {
     channel_ok(a.e_h, b.e_h, dims.recoil_h)
         && channel_ok(a.e_v, b.e_v, dims.recoil_v)
         && channel_ok(a.e_k, b.e_k, dims.recoil_k)
-        && channel_ok(a.e_open, b.e_open, dims.open)
+        && open_channel_ok(a.e_open, b.e_open, dims.open)
         && channel_ok(a.e_move, b.e_move, dims.move_effect)
         && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
         && channel_ok(a.e_breath, b.e_breath, dims.breath)
@@ -5681,7 +5737,7 @@ fn local_offer_dominates(a: &LocalOffer, b: &LocalOffer, dims: &TuneDims) -> boo
     channel_ok(a.e_h, b.e_h, dims.recoil_h)
         && channel_ok(a.e_v, b.e_v, dims.recoil_v)
         && channel_ok(a.e_k, b.e_k, dims.recoil_k)
-        && channel_ok(a.e_open, b.e_open, dims.open)
+        && open_channel_ok(a.e_open, b.e_open, dims.open)
         && channel_ok(a.e_move, b.e_move, dims.move_effect)
         && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
         && channel_ok(a.e_breath, b.e_breath, dims.breath)
@@ -5982,7 +6038,11 @@ fn seed_candidate_margin(
     let mut margin =
         optimistic_recoil_margin(metric, h_max, v_max, k_max, control, gunkick, gunkick0, aim);
     if let Some(max) = aim_max {
-        if let Some(value) = evaluator.aim_time(metric.hs, metric.adsm, metric.eopen.max(0.0)) {
+        if let Some(value) = evaluator.aim_time(
+            metric.hs,
+            metric.adsm,
+            prune_open(metric.eopen_min, metric.eopen),
+        ) {
             margin = margin.min(relative_margin(max, value));
         }
     }
