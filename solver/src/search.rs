@@ -1210,9 +1210,16 @@ impl<'a> Solver<'a> {
             let deadline_hit = self
                 .deadline_at
                 .is_some_and(|deadline| now_ms() >= deadline);
-            if (self.best.is_some() || (fixed_cap.is_some() && seed_found))
-                && !(self.truncated && deadline_hit)
-            {
+            // The seed caps its DP frontier, so it can miss every feasible
+            // build. A seed that found nothing but did not run out of budget
+            // must still get the exact pass. A truncated seed keeps the old
+            // budget semantics: only rerun it for an existing incumbent.
+            let exact_needed = if self.truncated {
+                (self.best.is_some() || (fixed_cap.is_some() && seed_found)) && !deadline_hit
+            } else {
+                true
+            };
+            if exact_needed {
                 reset(&mut self, &mut selections, &mut decided);
                 self.frontier_abort = Some(FRONTIER_ABORT_STATES);
                 self.dfs(&mut selections, &mut decided, &mut deferred);
@@ -1295,16 +1302,22 @@ impl<'a> Solver<'a> {
             incomplete = self.heuristic_incomplete || self.aborted_pass;
         }
         let optimal = !truncated && !incomplete && !self.grid_truncated && self.best.is_some();
-        let message = if truncated {
+        let message = if self.best.is_none() {
+            if truncated {
+                "budget exhausted; no build found".to_string()
+            } else if incomplete || self.grid_truncated {
+                "search stopped early by internal limits; no build found".to_string()
+            } else {
+                "no build satisfies the constraints".to_string()
+            }
+        } else if truncated {
             "budget exhausted; result is the best found so far".to_string()
         } else if incomplete {
             "search stopped early by internal limits; result is the best found so far".to_string()
         } else if self.grid_truncated {
             "tuning grid was sampled; result is the best found so far".to_string()
-        } else if self.best.is_some() {
-            "search complete".to_string()
         } else {
-            "no build satisfies the constraints".to_string()
+            "search complete".to_string()
         };
         SolveResult {
             optimal,
