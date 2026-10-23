@@ -532,6 +532,15 @@ export function toSiteResult(context, result) {
   const generatedStates = mapped.leaves ?? 0;
 
   if (!feasible || !mapped.build) {
+    // Only a completed search proves there is no build. Deadline exhaustion
+    // and internal-limit stops are reported as truncated so the site does not
+    // present them as a proof of infeasibility. The site only understands
+    // budget/preparedness/preference-target failures, so an empty list is the
+    // safe shape when the script has no candidate to analyze.
+    const provenInfeasible =
+      kind === "infeasible" &&
+      mapped.truncated !== true &&
+      mapped.incomplete !== true;
     return {
       selections: currentSelections,
       metrics: { attributes: {} },
@@ -542,7 +551,7 @@ export function toSiteResult(context, result) {
       elapsedMs,
       evaluatedStates,
       generatedStates,
-      truncated: mapped.optimal === true ? false : true,
+      truncated: !provenInfeasible,
       smartRecommendation: {
         kind: "infeasible",
         currentMetrics: { attributes: {} },
@@ -551,7 +560,7 @@ export function toSiteResult(context, result) {
         changedTuningCount: 0,
         score: 0,
         variants: [],
-        failures: [{ kind: "solver", message: mapped.message ?? "" }],
+        failures: [],
       },
       candidates: [],
     };

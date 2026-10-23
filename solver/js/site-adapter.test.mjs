@@ -922,12 +922,13 @@ test("toSiteResult produces a recommendation with a candidate", () => {
   assert.deepEqual(site.smartRecommendation.failures, []);
 });
 
-test("toSiteResult produces an infeasible result with failures", () => {
+test("toSiteResult marks proven infeasibility without fabricating failures", () => {
   const context = makeContext({ currentSelections: { s1: "old" } });
   const site = toSiteResult(context, {
     kind: "infeasible",
     optimal: false,
     truncated: false,
+    incomplete: false,
     nodes: 3,
     leaves: 4,
     elapsedMs: 0,
@@ -936,13 +937,37 @@ test("toSiteResult produces an infeasible result with failures", () => {
 
   assert.equal(site.smartRecommendation.kind, "infeasible");
   assert.equal(site.smartRecommendation.candidate, undefined);
-  assert.deepEqual(site.smartRecommendation.failures, [
-    { kind: "solver", message: "no solution" },
-  ]);
+  assert.deepEqual(site.smartRecommendation.failures, []);
+  assert.equal(site.truncated, false);
   assert.equal(site.allTargetsSatisfied, false);
   assert.deepEqual(site.candidates, []);
   assert.deepEqual(site.selections, { s1: "old" });
   assert.deepEqual(site.metrics, { attributes: {} });
+});
+
+test("toSiteResult reports timeout and internal-limit stops as truncated", () => {
+  const context = makeContext();
+  for (const result of [
+    {
+      kind: "error",
+      optimal: false,
+      truncated: true,
+      incomplete: false,
+      message: "time budget exhausted",
+    },
+    {
+      kind: "incomplete",
+      optimal: false,
+      truncated: false,
+      incomplete: true,
+      message: "search stopped early by internal limits",
+    },
+  ]) {
+    const site = toSiteResult(context, result);
+    assert.equal(site.smartRecommendation.kind, "infeasible");
+    assert.equal(site.truncated, true);
+    assert.deepEqual(site.smartRecommendation.failures, []);
+  }
 });
 
 test("inputs are not mutated", () => {
