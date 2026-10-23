@@ -157,19 +157,23 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.25
+         "Value": 1.25,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.95
+         "Value": 0.95,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.7
+         "Value": 0.7,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 24.0,
-         "Value": 0.55
+         "Value": 0.55,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -177,19 +181,23 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.1
+         "Value": 1.1,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.8
+         "Value": 0.8,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.6
+         "Value": 0.6,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 24.0,
-         "Value": 0.45
+         "Value": 0.45,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -197,15 +205,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.15
+         "Value": 1.15,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.9
+         "Value": 0.9,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.65
+         "Value": 0.65,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -213,15 +224,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.75
+         "Value": 0.75,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.5
+         "Value": 0.5,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       }
@@ -231,15 +245,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.2
+         "Value": 1.2,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 1.35
+         "Value": 1.35,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -247,15 +264,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.1
+         "Value": 1.1,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.35
+         "Value": 1.35,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 1.5
+         "Value": 1.5,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -263,15 +283,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.3
+         "Value": 1.3,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 1.6
+         "Value": 1.6,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -279,15 +302,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.2
+         "Value": 1.2,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.6
+         "Value": 1.6,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 2.0
+         "Value": 2.0,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       }
@@ -297,15 +323,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.8
+         "Value": 0.8,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.65
+         "Value": 0.65,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -313,15 +342,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.3
+         "Value": 1.3,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 1.6
+         "Value": 1.6,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -329,19 +361,23 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.8
+         "Value": 1.8,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.3
+         "Value": 1.3,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.9
+         "Value": 0.9,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 24.0,
-         "Value": 0.6
+         "Value": 0.6,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -349,15 +385,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.6
+         "Value": 1.6,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.2
+         "Value": 1.2,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.8
+         "Value": 0.8,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -365,15 +404,18 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.4
+         "Value": 1.4,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 1.0
+         "Value": 1.0,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.7
+         "Value": 0.7,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       }

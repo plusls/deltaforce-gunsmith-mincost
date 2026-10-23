@@ -1798,6 +1798,79 @@ mod tests {
     }
 
     #[test]
+    fn unknown_interp_mode_matches_site_cubic_recoil() {
+        for mode in [Some("RCIM_Bogus"), None] {
+            let key_mode = mode.unwrap_or("");
+            let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+                "parts": {
+                    "w1": { "id": "w1", "name": "Gun" },
+                    "p1": {
+                        "id": "p1",
+                        "name": "P1",
+                        "mainAttributeModifiersByMode": {
+                            "operations": [
+                                { "attributeId": "10005", "modifierType": "Addend", "delta": 2.5 }
+                            ]
+                        }
+                    }
+                },
+                "weaponNumericProfilesById": {
+                    "w1": {
+                        "linkedTables": {
+                            "aimRecoil": {
+                                "ContinueShootRecoil": {
+                                    "HorizontalScale": 1.0,
+                                    "VerticalScale": 1.0
+                                },
+                                "SingleOrBurstShootRecoil": {
+                                    "HorizontalScale": 1.0,
+                                    "VerticalScale": 1.0
+                                }
+                            },
+                            "recoilCurves": {
+                                "recoilControl": {
+                                    "keys": [
+                                        { "Time": 0, "Value": 10, "InterpMode": key_mode },
+                                        { "Time": 10, "Value": 30 }
+                                    ]
+                                },
+                                "gunkick": {
+                                    "keys": [
+                                        { "Time": 0, "Value": 1 },
+                                        { "Time": 10, "Value": 1 }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+            let assembler = Assembler::new(&payload, "w1");
+            let prices: FxHashMap<String, i64> = FxHashMap::default();
+            let ev = Evaluator {
+                payload: &payload,
+                weapon_id: "w1",
+                mode: "operations",
+                laser_enabled: false,
+                bipod_deployed: false,
+                prices: &prices,
+            };
+            let parts: Vec<&Part> = vec![payload.parts.get("p1").unwrap()];
+            let r = ev
+                .recoil(
+                    &assembler,
+                    &parts,
+                    &price_assembly("p1"),
+                    &TuningState::default(),
+                )
+                .expect("recoil");
+            assert_eq!(r.continuous_h, 13.13, "mode {mode:?}");
+            assert_eq!(r.continuous_v, 13.13, "mode {mode:?}");
+        }
+    }
+
+    #[test]
     fn quantize_clamps_and_steps() {
         assert!((quantize(12.0, -10.0, 10.0, 1.0) - 10.0).abs() < 1e-9);
         assert!((quantize(-12.0, -10.0, 10.0, 1.0) + 10.0).abs() < 1e-9);

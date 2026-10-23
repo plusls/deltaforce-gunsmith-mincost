@@ -522,9 +522,12 @@ impl Curve {
                 return Some(b.value);
             }
             let t = (x - a.time) / (b.time - a.time);
+            // The site only special-cases Constant and Linear; cubic is the
+            // fallback for every other (or missing) InterpMode.
             return match a.interp_mode.as_str() {
                 "RCIM_Constant" => Some(a.value),
-                "RCIM_Cubic" => {
+                "RCIM_Linear" => Some(a.value + (b.value - a.value) * t),
+                _ => {
                     let dt = b.time - a.time;
                     let t2 = t * t;
                     let t3 = t2 * t;
@@ -535,8 +538,7 @@ impl Curve {
                             + (t3 - t2) * dt * b.arrive_tangent,
                     )
                 }
-                _ => Some(a.value + (b.value - a.value) * t),
-            };
+            }
         }
         Some(last.value)
     }
@@ -717,5 +719,31 @@ mod tests {
             keys: vec![first, key(10.0, 0.5)],
         };
         assert!((curve.eval(9.9).unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn curve_unknown_or_missing_interp_mode_is_cubic() {
+        // The site only special-cases Constant and Linear; anything else
+        // (including a missing InterpMode) uses the cubic hermite formula.
+        for mode in [Some("RCIM_Bogus"), None] {
+            let mut first = key(0.0, 10.0);
+            first.leave_tangent = 0.0;
+            first.interp_mode = mode.map(str::to_string).unwrap_or_default();
+            let curve = Curve {
+                keys: vec![first, key(10.0, 30.0)],
+            };
+            assert!(
+                (curve.eval(2.5).unwrap() - 13.125).abs() < 1e-9,
+                "mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curve_linear_mode_stays_linear() {
+        let curve = Curve {
+            keys: vec![key(0.0, 10.0), key(10.0, 30.0)],
+        };
+        assert!((curve.eval(2.5).unwrap() - 15.0).abs() < 1e-9);
     }
 }

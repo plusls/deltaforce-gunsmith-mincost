@@ -141,19 +141,23 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.25
+         "Value": 1.25,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.95
+         "Value": 0.95,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.7
+         "Value": 0.7,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 24.0,
-         "Value": 0.55
+         "Value": 0.55,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       },
@@ -161,19 +165,23 @@
        "keys": [
         {
          "Time": 0.0,
-         "Value": 1.1
+         "Value": 1.1,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 8.0,
-         "Value": 0.8
+         "Value": 0.8,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 16.0,
-         "Value": 0.6
+         "Value": 0.6,
+         "InterpMode": "RCIM_Linear"
         },
         {
          "Time": 24.0,
-         "Value": 0.45
+         "Value": 0.45,
+         "InterpMode": "RCIM_Linear"
         }
        ]
       }

@@ -99,9 +99,9 @@ fn curve_payload(fire_camera_keys: Value) -> Value {
 
 fn fire_camera_curve() -> Value {
     json!([
-        { "Time": 0, "Value": 1.0 },
-        { "Time": 8, "Value": 0.3 },
-        { "Time": 16, "Value": 0.12 }
+        { "Time": 0, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+        { "Time": 8, "Value": 0.3, "InterpMode": "RCIM_Linear" },
+        { "Time": 16, "Value": 0.12, "InterpMode": "RCIM_Linear" }
     ])
 }
 

@@ -97,8 +97,8 @@ fn baseline_payload() -> Value {
                     "handlingCurves": {
                         "adsTime": {
                             "keys": [
-                                { "Time": 0, "Value": 1.0 },
-                                { "Time": 100, "Value": 0.5 }
+                                { "Time": 0, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 100, "Value": 0.5, "InterpMode": "RCIM_Linear" }
                             ]
                         }
                     }
@@ -131,33 +131,33 @@ fn movement_payload() -> Value {
                     "stabilityCurves": {
                         "breathScale": {
                             "keys": [
-                                { "Time": -20, "Value": 1.0 },
-                                { "Time": 20, "Value": 1.0 }
+                                { "Time": -20, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 20, "Value": 1.0, "InterpMode": "RCIM_Linear" }
                             ]
                         },
                         "breathTime": {
                             "keys": [
-                                { "Time": -20, "Value": 1.0 },
-                                { "Time": 20, "Value": 1.0 }
+                                { "Time": -20, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 20, "Value": 1.0, "InterpMode": "RCIM_Linear" }
                             ]
                         },
                         "fireCameraStability": {
                             "keys": [
-                                { "Time": -20, "Value": 1.0 },
-                                { "Time": 20, "Value": 1.0 }
+                                { "Time": -20, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 20, "Value": 1.0, "InterpMode": "RCIM_Linear" }
                             ]
                         },
                         "movementCameraStability": {
                             "keys": [
-                                { "Time": -20, "Value": 2.0 },
-                                { "Time": 0, "Value": 1.0 },
-                                { "Time": 20, "Value": 0.3 }
+                                { "Time": -20, "Value": 2.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 0, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 20, "Value": 0.3, "InterpMode": "RCIM_Linear" }
                             ]
                         },
                         "holdBreathRecoil": {
                             "keys": [
-                                { "Time": -20, "Value": 1.0 },
-                                { "Time": 20, "Value": 1.0 }
+                                { "Time": -20, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                                { "Time": 20, "Value": 1.0, "InterpMode": "RCIM_Linear" }
                             ]
                         }
                     },

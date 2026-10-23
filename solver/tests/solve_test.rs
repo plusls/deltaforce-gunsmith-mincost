@@ -261,14 +261,14 @@ fn detail_payload() -> serde_json::Value {
     payload["weaponNumericProfilesById"]["w1"]["linkedTables"]["handlingCurves"] = json!({
         "adsTime": {
             "keys": [
-                { "Time": 0, "Value": 1.0 },
-                { "Time": 100, "Value": 0.5 }
+                { "Time": 0, "Value": 1.0, "InterpMode": "RCIM_Linear" },
+                { "Time": 100, "Value": 0.5, "InterpMode": "RCIM_Linear" }
             ]
         },
         "adsStrafeSpeed": {
             "keys": [
-                { "Time": 0, "Value": 0.0 },
-                { "Time": 100, "Value": 1.0 }
+                { "Time": 0, "Value": 0.0, "InterpMode": "RCIM_Linear" },
+                { "Time": 100, "Value": 1.0, "InterpMode": "RCIM_Linear" }
             ]
         }
     });
