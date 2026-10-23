@@ -1485,6 +1485,14 @@ const TUNE_GRID_LIMIT: usize = 65_536;
 /// be sampled. Every grid value matters: a constraint can have a feasible band
 /// narrower than one step, so dropping interior values silently turns a
 /// feasible build into "no build".
+///
+/// The returned set defines the scope of `optimal = true`: it only means best
+/// within these discrete tuning candidates, never over a continuous range.
+/// `step > 0` enumerates the full `[min, max]` grid; `step <= 0` (free tuning)
+/// uses `{min, max, default} ∪ {curve key Time}`, clamped to `[min, max]` and
+/// deduped. The site optimizer only tries `default` for free tuning, so this
+/// set is a superset of the site's. It does not change the `truncated` flag,
+/// which still reports only sampling of an oversized step grid.
 pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
     let mut values = vec![tune.min_value, tune.max_value, tune.default_value];
     for effect in &tune.display_effects {

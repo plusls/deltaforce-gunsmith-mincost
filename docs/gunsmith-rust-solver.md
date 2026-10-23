@@ -152,6 +152,7 @@ DP 前沿每层上限 200,000 状态 (种子 pass 为 8,192). 超过时按价格
 - 后坐力约束的 max 为负, 或加值/倍率为负时, 常规 Pareto 支配和下界不再成立, 对应剪枝关闭并回退到全枚举
 - 激光件的所有非 `con` Addend 都按选中激光的加成计入, 不只 `pro`
 - `optimal=false` 表示未证明最优 (含时间/预算截断和内部前沿上限); `truncated=true` 只表示时间或预算耗尽
+- `optimal=true` 只表示在求解器的离散调校候选集内最优: `step>0` 时是 `[min,max]` 的完整步进网格; `step<=0` (自由调校) 时是 `{min, max, default} ∪ 各效果曲线 key 的 Time`, 全部按 `[min,max]` clamp 并去重. 站点 optimizer 对 `step<=0` 的自由调校只试 `default`, 因此这里的候选集是站点的超集, 可能得到与站点相同或更好的解. 该候选集不改变 `truncated` 语义
 
 #### 单调曲线细分指标的归约
 
@@ -211,6 +212,7 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 ### 5.6 精确性边界
 
 - 无约束或只有 max 约束, 且未触发预算/前沿/时间截断: 在 DP 支配关系成立的假设下是全局最优.
+- 调校维度的最优性只限离散候选集: `step>0` 为完整步进网格, `step<=0` 为 `{min,max,default} ∪ 曲线 key.time` (按 `[min,max]` clamp). 站点 optimizer 对 `step<=0` 只试 `default`, Rust 的候选集是它的超集.
 - 有 min 约束: `dp_ok=false`, 完整枚举, 可能较慢.
 - DP 前沿超过 200,000 (种子 pass 8,192): 置 `heuristic_incomplete`, `optimal=false`, 不置 `truncated`; 该上限不触发精校前沿的第二阶段重跑.
 - 精校前沿超过 4,096 / 16,384 上限: 同样置 `heuristic_incomplete`, `optimal=false`. 若精确 pass 未因时间/预算被截断, 且剩余时间不少于 1,000 ms, 会用 65,536 上限重跑一次精确 pass, 见 5.3.
