@@ -286,16 +286,22 @@ impl<'a> Assembler<'a> {
                 }
                 let mut picked = None;
                 for rule in rules {
-                    let matches = if rule.condition_type == "ItemId" {
-                        rule.condition_item_ids
+                    if rule.condition_type == "ItemId"
+                        && rule
+                            .condition_item_ids
                             .iter()
                             .any(|id| current_active.contains(id))
-                    } else {
-                        rule.condition_type == "None"
-                    };
-                    if matches {
+                    {
                         picked = Some(*rule);
                         break;
+                    }
+                }
+                if picked.is_none() {
+                    for rule in rules {
+                        if rule.condition_type == "None" {
+                            picked = Some(*rule);
+                            break;
+                        }
                     }
                 }
                 let Some(rule) = picked else { continue };
