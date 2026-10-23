@@ -248,6 +248,66 @@ test("budget maps to costCap and override wins", () => {
   );
 });
 
+test("blackhawk budget mirrors the site worker's forced cap", () => {
+  const request = (targets = {}) => ({
+    mode: "blackhawk",
+    weaponId: "18010000008",
+    data: {
+      blackhawkPrices: { "18010000008": 1000, "13140000035": 40 },
+      blackhawkModifyLimit: 600,
+    },
+    targets,
+    smartOptions: {},
+  });
+
+  assert.equal(optionsFromSiteRequest(request()).costCap, 1600);
+  assert.equal(
+    optionsFromSiteRequest(request({ budgetEnabled: false, budgetPrice: 100000 }))
+      .costCap,
+    1600,
+  );
+  assert.equal(
+    optionsFromSiteRequest(request({ budgetEnabled: true, budgetPrice: 100000 }))
+      .costCap,
+    1600,
+  );
+  assert.equal(
+    optionsFromSiteRequest(request({ budgetEnabled: true, budgetPrice: 1200 }))
+      .costCap,
+    1200,
+  );
+  assert.equal(
+    optionsFromSiteRequest(request({ budgetEnabled: true, budgetPrice: 100000 }), {
+      costCap: 5000,
+    }).costCap,
+    5000,
+  );
+});
+
+test("blackhawk budget needs weapon data before it can cap the budget", () => {
+  const options = optionsFromSiteRequest({
+    mode: "blackhawk",
+    weaponId: "18010000008",
+    targets: { budgetEnabled: true, budgetPrice: 100000 },
+    smartOptions: {},
+  });
+  assert.equal(options.costCap, 100000);
+});
+
+test("operations mode still ignores the blackhawk cap", () => {
+  const options = optionsFromSiteRequest({
+    mode: "operations",
+    weaponId: "18010000008",
+    data: {
+      blackhawkPrices: { "18010000008": 1000 },
+      blackhawkModifyLimit: 600,
+    },
+    targets: {},
+    smartOptions: {},
+  });
+  assert.equal(options.costCap, null);
+});
+
 test("site timeBudgetMs seeds deadlineMs and overrides win", () => {
   const request = { targets: {}, smartOptions: {}, timeBudgetMs: 15_000 };
 

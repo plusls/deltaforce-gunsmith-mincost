@@ -173,6 +173,36 @@ function readLegacyAdvanced(smartOptions, targets) {
   }
 }
 
+function blackhawkPricesFromRequest(request) {
+  const data = asObject(request.data);
+  const prices = data.blackhawkPrices;
+  return prices !== null && typeof prices === "object" && !Array.isArray(prices)
+    ? prices
+    : null;
+}
+
+// The site worker rewrites blackhawk requests before solving: budget is always
+// enabled and its price is `blackhawkPrices[weaponId] + blackhawkModifyLimit`,
+// or the user budget when that is enabled and lower. The rewrite happens
+// inside the worker, so the script has to reproduce it to hand the same cap to
+// the wasm solver.
+function blackhawkCostCap(request, userBudgetEnabled) {
+  const data = asObject(request.data);
+  const prices = blackhawkPricesFromRequest(request);
+  const base = Number.isFinite(prices[request.weaponId])
+    ? prices[request.weaponId]
+    : 0;
+  const limit = Number.isFinite(data.blackhawkModifyLimit)
+    ? data.blackhawkModifyLimit
+    : 0;
+  const cap = base + limit;
+  const budgetPrice = request.targets?.budgetPrice;
+  if (userBudgetEnabled && Number.isFinite(budgetPrice)) {
+    return Math.round(Math.min(cap, budgetPrice));
+  }
+  return Math.round(cap);
+}
+
 export function optionsFromSiteRequest(siteRequest, overrides = {}) {
   const request = asObject(siteRequest);
   const overrideValues = asObject(overrides);
@@ -185,7 +215,10 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
 
   let costCap = null;
   const budgetPrice = targets.budgetPrice;
-  if (targets.budgetEnabled === true && Number.isFinite(budgetPrice) && budgetPrice > 0) {
+  const budgetEnabled = targets.budgetEnabled === true;
+  if (request.mode === "blackhawk" && blackhawkPricesFromRequest(request)) {
+    costCap = blackhawkCostCap(request, budgetEnabled);
+  } else if (budgetEnabled && Number.isFinite(budgetPrice) && budgetPrice > 0) {
     costCap = Math.round(budgetPrice);
   }
 
