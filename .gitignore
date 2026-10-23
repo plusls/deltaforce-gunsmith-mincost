@@ -1,15 +1,11 @@
-# Python-generated files
-.mypy_cache/
-.pytest_cache/
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
 # Rust / WASM
 /target
+
+# Userscript bundle
+/userscript/dist/
+
+# Editor / OS
+.DS_Store
+
+# Local agent workspace
+.claude/
