@@ -26,6 +26,10 @@ export function buildBundle({
   wasmBytes = null,
 } = {}) {
   const core = [
+    readModule(repoDir, "solver/js/core/util.mjs"),
+    readModule(repoDir, "solver/js/core/limits.mjs"),
+    readModule(repoDir, "solver/js/core/protocol.mjs"),
+    readModule(repoDir, "solver/js/core/payload-cache.mjs"),
     readModule(repoDir, "solver/js/solver.mjs"),
     readModule(repoDir, "solver/js/deadline.mjs"),
     readModule(repoDir, "solver/js/site-adapter.mjs"),
@@ -33,7 +37,10 @@ export function buildBundle({
   ].join("\n");
 
   const workerSource = `${core}\n${readModule(repoDir, "userscript/src/worker-main.mjs")}\n`;
-  const mainSource = readModule(repoDir, "userscript/src/main.mjs");
+  const mainSource = `${readModule(repoDir, "userscript/src/status.mjs")}\n${readModule(
+    repoDir,
+    "userscript/src/main.mjs",
+  )}`;
   const wasmBase64 = (wasmBytes ?? readFileSync(wasmPath)).toString("base64");
 
   let bundle = `${metadata}

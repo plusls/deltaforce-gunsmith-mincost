@@ -1,4 +1,6 @@
-import { SOLVE_DEADLINE_MAX_MS } from "./deadline.mjs";
+import { clampRequestDeadlineMs } from "./core/limits.mjs";
+import { DEFAULT_SITE_MODE } from "./core/protocol.mjs";
+import { asArray, asPlainObject, hasOwn } from "./core/util.mjs";
 
 export class UnsupportedConstraintError extends Error {
   constructor(constraints) {
@@ -73,7 +75,7 @@ const DETAIL_METRIC_FIELDS = {
 };
 
 function detailMetricMap(raw) {
-  const detail = asObject(raw);
+  const detail = asPlainObject(raw);
   const out = {};
   for (const [id, field] of Object.entries(DETAIL_METRIC_FIELDS)) {
     const value = detail[field];
@@ -102,18 +104,8 @@ export const OPTION_DEFAULTS = Object.freeze({
   constraints: [],
 });
 
-const hasOwn = (object, key) =>
-  Object.prototype.hasOwnProperty.call(object, key);
-
-const asObject = (value) =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : {};
-
-const asArray = (value) => (Array.isArray(value) ? value : []);
-
 export function captureWorkerRequest(message, cache) {
-  const msg = asObject(message);
+  const msg = asPlainObject(message);
   const store = cache instanceof Map ? cache : new Map();
   const dataKey = msg.dataKey;
 
@@ -133,13 +125,13 @@ export function captureWorkerRequest(message, cache) {
   return {
     dataVersion: data.dataVersion ?? "",
     weaponId: msg.weaponId ?? "",
-    mode: msg.mode ?? "operations",
+    mode: msg.mode ?? DEFAULT_SITE_MODE,
     laserEnabled: msg.laserEnabled === true,
     bipodDeployed: msg.bipodDeployed === true,
     data,
-    pricesByObjectId: asObject(msg.pricesByObjectId),
-    currentSelections: asObject(msg.currentSelections),
-    tuningState: asObject(msg.tuningState),
+    pricesByObjectId: asPlainObject(msg.pricesByObjectId),
+    currentSelections: asPlainObject(msg.currentSelections),
+    tuningState: asPlainObject(msg.tuningState),
     lockedPathKeys: asArray(msg.lockedPathKeys),
     lockedTuningKeys: asArray(msg.lockedTuningKeys),
     excludedPartIds: asArray(msg.excludedPartIds),
@@ -172,9 +164,9 @@ function defaultOperatorFor(id) {
 }
 
 function readLegacyAdvanced(smartOptions, targets) {
-  const prefs = asObject(smartOptions.advancedPreferences);
-  const values = asObject(smartOptions.advancedPreferenceValues);
-  const operators = asObject(smartOptions.advancedPreferenceOperators);
+  const prefs = asPlainObject(smartOptions.advancedPreferences);
+  const values = asPlainObject(smartOptions.advancedPreferenceValues);
+  const operators = asPlainObject(smartOptions.advancedPreferenceOperators);
 
   for (const [id, raw] of Object.entries(values)) {
     if (targets.has(id)) continue;
@@ -202,7 +194,7 @@ function readLegacyAdvanced(smartOptions, targets) {
 }
 
 function blackhawkPricesFromRequest(request) {
-  const data = asObject(request.data);
+  const data = asPlainObject(request.data);
   const prices = data.blackhawkPrices;
   return prices !== null && typeof prices === "object" && !Array.isArray(prices)
     ? prices
@@ -215,7 +207,7 @@ function blackhawkPricesFromRequest(request) {
 // inside the worker, so the script has to reproduce it to hand the same cap to
 // the wasm solver.
 function blackhawkCostCap(request, userBudgetEnabled) {
-  const data = asObject(request.data);
+  const data = asPlainObject(request.data);
   const prices = blackhawkPricesFromRequest(request);
   const base = Number.isFinite(prices[request.weaponId])
     ? prices[request.weaponId]
@@ -232,10 +224,10 @@ function blackhawkCostCap(request, userBudgetEnabled) {
 }
 
 export function optionsFromSiteRequest(siteRequest, overrides = {}) {
-  const request = asObject(siteRequest);
-  const overrideValues = asObject(overrides);
-  const targets = asObject(request.targets);
-  const smartOptions = asObject(request.smartOptions);
+  const request = asPlainObject(siteRequest);
+  const overrideValues = asPlainObject(overrides);
+  const targets = asPlainObject(request.targets);
+  const smartOptions = asPlainObject(request.smartOptions);
 
   if (targets.preparednessEnabled === true) {
     throw new UnsupportedFeatureError("preparedness");
@@ -250,19 +242,19 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
     costCap = Math.round(budgetPrice);
   }
 
-  const siteTimeBudget = Number(request.timeBudgetMs);
+  const siteTimeBudget = clampRequestDeadlineMs(request.timeBudgetMs);
 
   const constraints = [];
-  const conditions = asObject(smartOptions.preferenceConditions);
+  const conditions = asPlainObject(smartOptions.preferenceConditions);
   for (const [group, attributeId] of Object.entries(PRIMARY_ATTR_BY_GROUP)) {
-    const condition = asObject(conditions[group]);
+    const condition = asPlainObject(conditions[group]);
     const constraint = constraintFor(attributeId, condition.operator, condition.value);
     if (constraint) constraints.push(constraint);
   }
 
   const advanced = new Map();
-  for (const [id, raw] of Object.entries(asObject(smartOptions.advancedPreferenceTargets))) {
-    const condition = asObject(raw);
+  for (const [id, raw] of Object.entries(asPlainObject(smartOptions.advancedPreferenceTargets))) {
+    const condition = asPlainObject(raw);
     if (!Number.isFinite(condition.value)) continue;
     advanced.set(id, { operator: condition.operator, value: condition.value });
   }
@@ -287,13 +279,7 @@ export function optionsFromSiteRequest(siteRequest, overrides = {}) {
     result[key] = hasOwn(overrideValues, key) ? overrideValues[key] : fallback;
   }
   if (!hasOwn(overrideValues, "deadlineMs")) {
-    result.deadlineMs =
-      Number.isFinite(siteTimeBudget) && siteTimeBudget > 0
-        ? Math.max(
-            1,
-            Math.min(Math.round(siteTimeBudget), SOLVE_DEADLINE_MAX_MS),
-          )
-        : OPTION_DEFAULTS.deadlineMs;
+    result.deadlineMs = siteTimeBudget ?? OPTION_DEFAULTS.deadlineMs;
   }
   result.constraints = Array.isArray(overrideValues.constraints)
     ? [...overrideValues.constraints]
@@ -333,7 +319,7 @@ function blackhawkPrices(ctx, excluded) {
     throw new Error("blackhawk mode requires data.blackhawkPrices");
   }
 
-  const parts = asObject(data.parts);
+  const parts = asPlainObject(data.parts);
   const prices = {};
   for (const [partId, value] of Object.entries(rawPrices)) {
     // `sn()` on the site only counts an absent key as missing; a stored 0 is a
@@ -344,7 +330,7 @@ function blackhawkPrices(ctx, excluded) {
       continue;
     }
 
-    const part = asObject(parts[partId]);
+    const part = asPlainObject(parts[partId]);
     const priceId =
       typeof part.officialObjectId === "string" && part.officialObjectId !== ""
         ? part.officialObjectId
@@ -360,9 +346,9 @@ function blackhawkPrices(ctx, excluded) {
 // translated back before they reach the solver.
 function partIdByPriceId(data) {
   const map = new Map();
-  const parts = asObject(asObject(data).parts);
+  const parts = asPlainObject(asPlainObject(data).parts);
   for (const [partId, raw] of Object.entries(parts)) {
-    const part = asObject(raw);
+    const part = asPlainObject(raw);
     const priceId =
       typeof part.officialObjectId === "string" && part.officialObjectId !== ""
         ? part.officialObjectId
@@ -375,8 +361,8 @@ function partIdByPriceId(data) {
 }
 
 export function toSolveRequest(context, options) {
-  const ctx = asObject(context);
-  const opts = asObject(options);
+  const ctx = asPlainObject(context);
+  const opts = asPlainObject(options);
 
   const excluded = new Set(asArray(ctx.excludedPartIds));
   let prices = {};
@@ -384,11 +370,11 @@ export function toSolveRequest(context, options) {
   if (ctx.mode === "blackhawk") {
     prices = blackhawkPrices(ctx, excluded);
   } else {
-    const pricesByObjectId = asObject(ctx.pricesByObjectId);
+    const pricesByObjectId = asPlainObject(ctx.pricesByObjectId);
     const partIdByObject = partIdByPriceId(ctx.data);
 
     for (const [officialObjectId, rawPair] of Object.entries(pricesByObjectId)) {
-      const pair = asObject(rawPair);
+      const pair = asPlainObject(rawPair);
       const pickSystem = opts.priceSource === "system";
       const value = pickSystem ? pair.systemPrice : pair.currentPrice;
 
@@ -413,7 +399,7 @@ export function toSolveRequest(context, options) {
     }
   }
 
-  const currentSelections = asObject(ctx.currentSelections);
+  const currentSelections = asPlainObject(ctx.currentSelections);
   const lockedPathKeys = {};
   for (const path of pathKeys(ctx.lockedPathKeys)) {
     const partId = currentSelections[path];
@@ -427,7 +413,7 @@ export function toSolveRequest(context, options) {
     }
   }
 
-  const tuningState = asObject(ctx.tuningState);
+  const tuningState = asPlainObject(ctx.tuningState);
   const lockedTuningKeys = {};
   for (const key of pathKeys(ctx.lockedTuningKeys)) {
     const value = tuningState[key];
@@ -442,7 +428,7 @@ export function toSolveRequest(context, options) {
   return {
     prices,
     weaponId: ctx.weaponId ?? "",
-    mode: ctx.mode ?? "operations",
+    mode: ctx.mode ?? DEFAULT_SITE_MODE,
     laserEnabled: ctx.laserEnabled === true,
     bipodDeployed,
     lockedPathKeys,
@@ -459,9 +445,9 @@ export function toSolveRequest(context, options) {
 }
 
 function mapBuild(raw) {
-  const solution = asObject(raw);
+  const solution = asPlainObject(raw);
   const selections = {};
-  for (const [path, partId] of Object.entries(asObject(solution.selections))) {
+  for (const [path, partId] of Object.entries(asPlainObject(solution.selections))) {
     if (typeof partId === "string") selections[path] = partId;
   }
 
@@ -481,11 +467,11 @@ function mapBuild(raw) {
 
   return {
     selections,
-    tuning: asObject(solution.tuning),
+    tuning: asPlainObject(solution.tuning),
     installedPartKeys: [...installedPartKeys],
-    attributes: asObject(solution.panel),
-    detail: asObject(solution.detail),
-    recoil: asObject(solution.recoil),
+    attributes: asPlainObject(solution.panel),
+    detail: asPlainObject(solution.detail),
+    recoil: asPlainObject(solution.recoil),
     totalPrice: solution.total_price,
     attachmentPrice: solution.attachment_price,
   };
@@ -503,7 +489,7 @@ function solverIncomplete(output) {
 }
 
 export function fromSolverOutput(raw) {
-  const output = asObject(raw);
+  const output = asPlainObject(raw);
   const optimal = output.optimal === true;
   const truncated = output.truncated === true;
   const incomplete = solverIncomplete(output);
@@ -543,15 +529,15 @@ export function fromSolverOutput(raw) {
 
 function sanitizeSelections(selections) {
   const clean = {};
-  for (const [path, partId] of Object.entries(asObject(selections))) {
+  for (const [path, partId] of Object.entries(asPlainObject(selections))) {
     if (typeof partId === "string") clean[path] = partId;
   }
   return clean;
 }
 
 export function toSiteResult(context, result) {
-  const ctx = asObject(context);
-  const mapped = asObject(result);
+  const ctx = asPlainObject(context);
+  const mapped = asPlainObject(result);
   const kind = mapped.kind;
   const feasible = kind === "optimal" || kind === "feasible";
   const currentSelections = sanitizeSelections(ctx.currentSelections);
@@ -594,13 +580,13 @@ export function toSiteResult(context, result) {
     };
   }
 
-  const build = asObject(mapped.build);
+  const build = asPlainObject(mapped.build);
   const candidate = {
     selections: sanitizeSelections(build.selections),
-    tuningState: asObject(build.tuning),
+    tuningState: asPlainObject(build.tuning),
     installedPartKeys: asArray(build.installedPartKeys),
     metrics: {
-      attributes: asObject(build.attributes),
+      attributes: asPlainObject(build.attributes),
       detailMetrics: detailMetricMap(build.detail),
     },
   };

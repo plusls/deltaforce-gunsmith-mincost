@@ -160,6 +160,7 @@ test("bundle replacement treats $ sequences in worker source literally", () => {
   const dir = mkdtempSync(resolve(tmpdir(), "gunsmith-build-"));
   try {
     mkdirSync(resolve(dir, "solver/js"), { recursive: true });
+    mkdirSync(resolve(dir, "solver/js/core"), { recursive: true });
     mkdirSync(resolve(dir, "userscript/src"), { recursive: true });
     const modules = {
       "solver.mjs": "solverModule",
@@ -170,6 +171,13 @@ test("bundle replacement treats $ sequences in worker source literally", () => {
     for (const [name, identifier] of Object.entries(modules)) {
       writeFileSync(resolve(dir, "solver/js", name), `const ${identifier} = 1;\n`);
     }
+    for (const name of ["util", "limits", "protocol", "payload-cache"]) {
+      writeFileSync(
+        resolve(dir, "solver/js/core", `${name}.mjs`),
+        `const core${name.replace("-", "")} = 1;\n`,
+      );
+    }
+    writeFileSync(resolve(dir, "userscript/src/status.mjs"), "");
     const workerBody = `const SPECIAL_PATTERNS = "$$ $& $' $\`";\n`;
     writeFileSync(resolve(dir, "userscript/src/worker-main.mjs"), workerBody);
     writeFileSync(

@@ -9,9 +9,30 @@ import {
   SITE_SEARCH_INPUT_SELECTOR,
   SITE_SEARCH_SECONDS_MAX,
   SITE_SEARCH_SECONDS_MIN,
+} from "../../solver/js/deadline.mjs";
+import {
+  SITE_SOLVE_CAPTURE_TIMEOUT_MS,
   SOLVE_DEADLINE_MAX_MS,
   SOLVE_DEADLINE_MIN_MS,
-} from "../../solver/js/deadline.mjs";
+  WORKER_INIT_TIMEOUT_MS,
+} from "../../solver/js/core/limits.mjs";
+import {
+  SITE_MESSAGE_PURPOSE,
+  SITE_OPTIMIZER_WORKER_URL_PATTERN,
+  SITE_SOLVER_URL_HINT_PATTERN,
+  WORKER_MESSAGE_TYPES,
+} from "../../solver/js/core/protocol.mjs";
+import {
+  BoundedPayloadCache,
+  PAYLOAD_CACHE_LIMIT,
+  fillCachedPayload,
+} from "../../solver/js/core/payload-cache.mjs";
+import {
+  friendlyError,
+  reportStatus,
+  setStatusEl,
+  statusColor,
+} from "./status.mjs";
 
 const MINCOST_WASM_BASE64 = "__WASM_BASE64__";
 const MINCOST_WORKER_SOURCE = "__WORKER_SOURCE__";
@@ -51,49 +72,12 @@ function saveSettings() {
   }
 }
 
-let statusEl = null;
-const STATUS_COLORS = {
-  info: "#a2a5ad",
-  ok: "#86efac",
-  warn: "#fbbf24",
-  error: "#f87171",
-};
-
-function reportStatus(text, tone = "info") {
-  if (!statusEl || !statusEl.isConnected) return;
-  statusEl.textContent = text;
-  statusEl.style.color = STATUS_COLORS[tone] ?? STATUS_COLORS.info;
-}
-
 function dataKeyOf(context) {
   return `${context.dataVersion}:${context.weaponId}:${context.mode}`;
 }
 
 let backendPromise = null;
 let backendToken = 0;
-const PAYLOAD_CACHE_LIMIT = 4;
-
-class BoundedPayloadCache extends Map {
-  constructor(limit) {
-    super();
-    this.limit = limit;
-  }
-
-  get(key) {
-    if (!super.has(key)) return undefined;
-    const value = super.get(key);
-    super.delete(key);
-    super.set(key, value);
-    return value;
-  }
-
-  set(key, value) {
-    if (super.has(key)) super.delete(key);
-    super.set(key, value);
-    while (this.size > this.limit) super.delete(super.keys().next().value);
-    return this;
-  }
-}
 
 const payloadCache = new BoundedPayloadCache(PAYLOAD_CACHE_LIMIT);
 
@@ -142,7 +126,7 @@ function createSolverWorkerBackend(wasmBytes, onFatal) {
     let settled = false;
     const timer = setTimeout(() => {
       fail(new Error("solver worker init timeout"));
-    }, 10_000);
+    }, WORKER_INIT_TIMEOUT_MS);
 
     function fail(error) {
       if (failed) return;
@@ -166,7 +150,7 @@ function createSolverWorkerBackend(wasmBytes, onFatal) {
     worker.onmessage = (event) => {
       const message = event.data;
       if (!message || typeof message !== "object") return;
-      if (message.type === "ready") {
+      if (message.type === WORKER_MESSAGE_TYPES.READY) {
         if (failed) return;
         ready = true;
         settled = true;
@@ -178,7 +162,7 @@ function createSolverWorkerBackend(wasmBytes, onFatal) {
             return new Promise((resolveOne, rejectOne) => {
               pending.set(id, { resolve: resolveOne, reject: rejectOne });
               worker.postMessage({
-                type: "solve",
+                type: WORKER_MESSAGE_TYPES.SOLVE,
                 id,
                 key,
                 data,
@@ -197,15 +181,18 @@ function createSolverWorkerBackend(wasmBytes, onFatal) {
         });
         return;
       }
-      if (message.type === "init-error") {
+      if (message.type === WORKER_MESSAGE_TYPES.INIT_ERROR) {
         fail(new Error(message.message || "solver worker init failed"));
         return;
       }
-      if (message.type === "result" || message.type === "error") {
+      if (
+        message.type === WORKER_MESSAGE_TYPES.RESULT ||
+        message.type === WORKER_MESSAGE_TYPES.ERROR
+      ) {
         const entry = pending.get(message.id);
         if (!entry) return;
         pending.delete(message.id);
-        if (message.type === "result") entry.resolve(message.result);
+        if (message.type === WORKER_MESSAGE_TYPES.RESULT) entry.resolve(message.result);
         else entry.reject(new Error(message.message || "solver failed"));
       }
     };
@@ -214,7 +201,7 @@ function createSolverWorkerBackend(wasmBytes, onFatal) {
       fail(new Error((event && event.message) || "solver worker error"));
     };
 
-    worker.postMessage({ type: "init", wasm: wasmBytes });
+    worker.postMessage({ type: WORKER_MESSAGE_TYPES.INIT, wasm: wasmBytes });
   });
 }
 
@@ -273,12 +260,6 @@ async function runMinCost(context, mode, options, requestDeadlineMs) {
   return { ...result, deadlineMs, deadlineSource: source, bipodDeployed };
 }
 
-function requestWithCachedData(message, cache) {
-  if (message.data != null) return message;
-  if (message.dataKey == null || !cache.has(message.dataKey)) return message;
-  return { ...message, data: cache.get(message.dataKey) };
-}
-
 function installWorkerHook() {
   const sitePayloadCache = new BoundedPayloadCache(PAYLOAD_CACHE_LIMIT);
   let pendingMinCost = null;
@@ -303,12 +284,12 @@ function installWorkerHook() {
       console.warn(
         "[gunsmith-mincost] no site solve request captured within 3s; site solver result used",
       );
-    }, 3_000);
+    }, SITE_SOLVE_CAPTURE_TIMEOUT_MS);
   }
 
   function noteWorkerMismatch(url) {
     if (!pendingMinCost || pendingMinCost.warned) return;
-    if (!/optimizer|solver/i.test(String(url))) return;
+    if (!SITE_SOLVER_URL_HINT_PATTERN.test(String(url))) return;
     pendingMinCost.warned = true;
     reportStatus("未接管 · 站点求解 Worker 地址不匹配, 本次显示站点原方案", "warn");
     console.warn("[gunsmith-mincost] site worker URL did not match:", String(url));
@@ -316,7 +297,7 @@ function installWorkerHook() {
 
   function PatchedWorker(url, options) {
     const real = new RealPageWorker(url, options);
-    if (!/optimizer\.worker/.test(String(url))) {
+    if (!SITE_OPTIMIZER_WORKER_URL_PATTERN.test(String(url))) {
       noteWorkerMismatch(url);
       return real;
     }
@@ -347,7 +328,7 @@ function installWorkerHook() {
           sitePayloadCache.set(message.dataKey, message.data);
         }
 
-        if (pendingMinCost && message.purpose === "solve") {
+        if (pendingMinCost && message.purpose === SITE_MESSAGE_PURPOSE.SOLVE) {
           const mode = pendingMinCost.mode;
           pendingMinCost = null;
           pendingToken += 1;
@@ -368,7 +349,7 @@ function installWorkerHook() {
             }
           };
 
-          const request = requestWithCachedData(message, sitePayloadCache);
+          const request = fillCachedPayload(message, sitePayloadCache);
           let context;
           try {
             context = captureWorkerRequest(request, sitePayloadCache);
@@ -425,15 +406,7 @@ function installWorkerHook() {
           return;
         }
 
-        let outgoing = message;
-        if (
-          message.data == null &&
-          message.dataKey != null &&
-          sitePayloadCache.has(message.dataKey)
-        ) {
-          outgoing = { ...message, data: sitePayloadCache.get(message.dataKey) };
-        }
-        real.postMessage(outgoing, ...rest);
+        real.postMessage(fillCachedPayload(message, sitePayloadCache), ...rest);
       },
       terminate() {
         real.terminate();
@@ -625,8 +598,8 @@ function injectButton(trigger) {
 
   const status = document.createElement("div");
   status.className = "gunsmith-mincost-status";
-  status.style.cssText = `font:500 11px/16px ${MINCOST_FONT};color:${STATUS_COLORS.info};min-height:16px`;
-  statusEl = status;
+  status.style.cssText = `font:500 11px/16px ${MINCOST_FONT};color:${statusColor("info")};min-height:16px`;
+  setStatusEl(status);
 
   options.append(mode.label, price.label, missing.label, limit.label);
   bar.append(button, options, status);
@@ -650,17 +623,6 @@ function injectButton(trigger) {
     trigger(settings.mode);
     target.click();
   });
-}
-
-function friendlyError(error) {
-  if (error && error.name === "UnsupportedConstraintError") {
-    return `暂不支持这些约束: ${error.constraints.join(", ")}`;
-  }
-  if (error && error.name === "UnsupportedFeatureError") {
-    if (error.feature === "preparedness") return "暂不支持战备下限约束";
-    return `暂不支持: ${error.feature}`;
-  }
-  return String(error && error.message ? error.message : error);
 }
 
 const hook = installWorkerHook();

@@ -4,6 +4,8 @@ import {
   createSandbox,
   loadSolverWorker,
   loadWorkerArtifacts,
+  testContext,
+  TEST_OPTIONS,
 } from "./harness.mjs";
 
 const payload = {
@@ -135,6 +137,28 @@ test("missing site payload is only reused while it is still cached", () => {
   }
   siteWorker.postMessage({ purpose: "search", dataKey: "dk1" });
   assert.equal(real.received.at(-1).data, undefined);
+});
+
+test("main payload cache key includes dataVersion, weaponId, and mode", async () => {
+  const sb = createSandbox();
+
+  await sb.v.solveContext(testContext("v1"), TEST_OPTIONS);
+  await sb.v.solveContext(testContext("v1"), TEST_OPTIONS);
+  await sb.v.solveContext(testContext("v2"), TEST_OPTIONS);
+
+  const changedWeapon = { ...testContext("v2"), weaponId: "w2" };
+  await sb.v.solveContext(changedWeapon, TEST_OPTIONS);
+  const changedMode = { ...testContext("v2"), mode: "blackhawk" };
+  await sb.v.solveContext(changedMode, TEST_OPTIONS);
+  await sb.v.solveContext({ ...testContext("v2"), mode: "blackhawk" }, TEST_OPTIONS);
+
+  assert.equal(sb.solveRequests.length, 6);
+  assert.deepEqual(sb.solveRequests[0].data, { marker: "v1" });
+  assert.equal(sb.solveRequests[1].data, undefined);
+  assert.deepEqual(sb.solveRequests[2].data, { marker: "v2" });
+  assert.deepEqual(sb.solveRequests[3].data, { marker: "v2" });
+  assert.deepEqual(sb.solveRequests[4].data, { marker: "v2" });
+  assert.equal(sb.solveRequests[5].data, undefined);
 });
 
 const artifacts = loadWorkerArtifacts();

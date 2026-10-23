@@ -1,26 +1,9 @@
-const PAYLOAD_CACHE_LIMIT = 4;
-
-class BoundedPayloadCache extends Map {
-  constructor(limit) {
-    super();
-    this.limit = limit;
-  }
-
-  get(key) {
-    if (!super.has(key)) return undefined;
-    const value = super.get(key);
-    super.delete(key);
-    super.set(key, value);
-    return value;
-  }
-
-  set(key, value) {
-    if (super.has(key)) super.delete(key);
-    super.set(key, value);
-    while (this.size > this.limit) super.delete(super.keys().next().value);
-    return this;
-  }
-}
+import {
+  BoundedPayloadCache,
+  PAYLOAD_CACHE_LIMIT,
+} from "../../solver/js/core/payload-cache.mjs";
+import { WORKER_MESSAGE_TYPES } from "../../solver/js/core/protocol.mjs";
+import { errorMessage } from "../../solver/js/core/util.mjs";
 
 function startSolverWorker(scope) {
   let enginePromise = null;
@@ -30,22 +13,22 @@ function startSolverWorker(scope) {
     const message = event.data;
     if (!message || typeof message !== "object") return;
 
-    if (message.type === "init") {
+    if (message.type === WORKER_MESSAGE_TYPES.INIT) {
       try {
         enginePromise = createMinCostEngine({ wasm: message.wasm });
         await enginePromise;
-        scope.postMessage({ type: "ready" });
+        scope.postMessage({ type: WORKER_MESSAGE_TYPES.READY });
       } catch (error) {
         enginePromise = null;
         scope.postMessage({
-          type: "init-error",
-          message: String(error && error.message ? error.message : error),
+          type: WORKER_MESSAGE_TYPES.INIT_ERROR,
+          message: errorMessage(error),
         });
       }
       return;
     }
 
-    if (message.type !== "solve") return;
+    if (message.type !== WORKER_MESSAGE_TYPES.SOLVE) return;
 
     try {
       const engine = await enginePromise;
@@ -55,12 +38,12 @@ function startSolverWorker(scope) {
       if (!data) throw new Error(`missing payload for ${message.key}`);
       const context = { ...message.context, data };
       const result = engine.solve(context, message.options);
-      scope.postMessage({ type: "result", id: message.id, result });
+      scope.postMessage({ type: WORKER_MESSAGE_TYPES.RESULT, id: message.id, result });
     } catch (error) {
       scope.postMessage({
-        type: "error",
+        type: WORKER_MESSAGE_TYPES.ERROR,
         id: message.id,
-        message: String(error && error.message ? error.message : error),
+        message: errorMessage(error),
       });
     }
   };

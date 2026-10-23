@@ -1,3 +1,19 @@
+import { DEFAULT_SITE_MODE } from "./core/protocol.mjs";
+import {
+  clamp,
+  clampRequestDeadlineMs,
+  SOLVE_DEADLINE_FALLBACK_MS,
+  SOLVE_DEADLINE_MAX_MS,
+  SOLVE_DEADLINE_MIN_MS,
+} from "./core/limits.mjs";
+import { asPlainObject } from "./core/util.mjs";
+
+export {
+  SOLVE_DEADLINE_FALLBACK_MS,
+  SOLVE_DEADLINE_MAX_MS,
+  SOLVE_DEADLINE_MIN_MS,
+};
+
 export const SITE_SEARCH_INPUT_SELECTOR =
   'input[aria-label="搜索时长（秒）"]';
 
@@ -10,29 +26,12 @@ export const SITE_SEARCH_SECONDS_MAX = 60;
 export const SITE_SEARCH_FINETUNE_MIN_SECONDS = 5;
 export const SITE_MAX_EVALUATIONS_PER_SECOND = 15_000;
 
-export const SOLVE_DEADLINE_FALLBACK_MS = Object.freeze({
-  full: 5_000,
-  fast: 2_000,
-});
-
-export const SOLVE_DEADLINE_MIN_MS = 1_000;
-export const SOLVE_DEADLINE_MAX_MS = 300_000;
-
 export const TIME_LIMIT_SOURCES = Object.freeze({
   user: "user",
   site: "site",
   request: "request",
   fallback: "fallback",
 });
-
-const asPlainObject = (value) =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value
-    : {};
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
 
 export function normalizeTimeLimitSeconds(raw) {
   if (raw === null || raw === undefined || raw === "") return null;
@@ -54,7 +53,7 @@ export function normalizeSiteSearchSeconds(raw) {
 }
 
 export function siteOptimizerInputsKey(weaponId, mode, preparedness = false) {
-  return `${SITE_OPTIMIZER_INPUTS_KEY_PREFIX}:${weaponId ?? ""}:${mode ?? "operations"}:${
+  return `${SITE_OPTIMIZER_INPUTS_KEY_PREFIX}:${weaponId ?? ""}:${mode ?? DEFAULT_SITE_MODE}:${
     preparedness ? "preparedness" : "ordinary"
   }`;
 }
@@ -99,13 +98,10 @@ export function resolveDeadlineMs({
     };
   }
 
-  const requestMs = Number(requestDeadlineMs);
-  if (Number.isFinite(requestMs) && requestMs > 0) {
+  const requestDeadline = clampRequestDeadlineMs(requestDeadlineMs);
+  if (requestDeadline !== null) {
     return {
-      deadlineMs: Math.max(
-        1,
-        Math.min(Math.round(requestMs), SOLVE_DEADLINE_MAX_MS),
-      ),
+      deadlineMs: requestDeadline,
       source: TIME_LIMIT_SOURCES.request,
     };
   }
