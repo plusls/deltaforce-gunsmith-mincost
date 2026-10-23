@@ -85,6 +85,57 @@ fn default_panel_excludes_internal_parts_but_detail_keeps_them() {
 }
 
 #[test]
+fn explicitly_selecting_the_default_part_matches_leaving_it_unset() {
+    let payload = payload();
+    let prices = prices();
+    let assembler = Assembler::new(&payload, WEAPON);
+    let implicit = assembler.resolve(&FxHashMap::default());
+
+    let mut selections = FxHashMap::default();
+    selections.insert(
+        "weapon:18060000009/slot:11:Sco_point".to_string(),
+        Some(INTERNAL_SIGHT.to_string()),
+    );
+    let explicit = assembler.resolve(&selections);
+
+    let mut implicit_ids = implicit.installed_part_ids();
+    let mut explicit_ids = explicit.installed_part_ids();
+    implicit_ids.sort();
+    explicit_ids.sort();
+    assert_eq!(implicit_ids, explicit_ids);
+    assert!(explicit
+        .internal_parts
+        .iter()
+        .any(|part| part.part_id == INTERNAL_SIGHT));
+    assert!(explicit
+        .visible_slots
+        .iter()
+        .all(|slot| slot.selected_part_id.as_deref() != Some(INTERNAL_SIGHT)));
+
+    let evaluate_with = |assembly: &delta_weapon_solver::assembly::Assembly| {
+        let evaluator = Evaluator {
+            payload: &payload,
+            weapon_id: WEAPON,
+            mode: "operations",
+            laser_enabled: true,
+            bipod_deployed: false,
+            prices: &prices,
+        };
+        evaluator
+            .evaluate(&assembler, assembly, &TuningState::default())
+            .expect("evaluate assembly")
+    };
+    let implicit_metrics = evaluate_with(&implicit);
+    let explicit_metrics = evaluate_with(&explicit);
+    assert_eq!(implicit_metrics.panel, explicit_metrics.panel);
+    assert_eq!(
+        implicit_metrics.detail.stability_score,
+        explicit_metrics.detail.stability_score
+    );
+    assert_eq!(implicit_metrics.total_price, explicit_metrics.total_price);
+}
+
+#[test]
 fn normal_price_skips_internal_parts_while_blackhawk_keeps_them() {
     let payload = payload();
     // A synthetic single price source keeps the mode comparison independent of

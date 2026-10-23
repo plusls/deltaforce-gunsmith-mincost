@@ -204,6 +204,10 @@ impl<'a> Assembler<'a> {
         tree
     }
 
+    /// Drops selections that name the default part. The site normalizes those
+    /// before building the tree as well (`Wi`/`qt` run ahead of `yn`/`Oe`), so
+    /// an explicit default is treated exactly like an unset slot: the part is
+    /// installed internally and stays out of the visible panel.
     fn clean_selections(
         &self,
         selections: &Map<String, Option<String>>,
