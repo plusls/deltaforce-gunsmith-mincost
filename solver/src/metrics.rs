@@ -1353,6 +1353,8 @@ pub fn eval_curve_points(points: &[CurveKey], x: f64) -> Option<f64> {
         return eval_sorted_curve_points(points, x);
     }
     let mut keys: Vec<&CurveKey> = points.iter().collect();
+    // Tuning curves use the site's `mr`, which does tie-break equal times by
+    // key_index (unlike the curve normalization used by profile curves).
     keys.sort_by(|a, b| {
         a.time
             .partial_cmp(&b.time)

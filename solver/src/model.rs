@@ -489,11 +489,12 @@ impl<'de> Deserialize<'de> for Curve {
             Repr::WithKeys { keys } => keys,
             Repr::Arr(keys) => keys,
         };
+        // The site sorts curve keys by Time only (stable), so equal-time keys
+        // keep the payload order; key_index is not a tie-break here.
         keys.sort_by(|a, b| {
             a.time
                 .partial_cmp(&b.time)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.key_index.cmp(&b.key_index))
         });
         Ok(Curve { keys })
     }
@@ -719,6 +720,24 @@ mod tests {
             keys: vec![first, key(10.0, 0.5)],
         };
         assert!((curve.eval(9.9).unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn curve_equal_time_keys_keep_input_order() {
+        // The site's curve normalization only sorts by Time, and Rust's sort
+        // is stable, so equal-time keys retain the payload order instead of
+        // being reordered by key_index.
+        let curve: Curve = serde_json::from_value(serde_json::json!({
+            "keys": [
+                { "Time": 0, "Value": 10, "key_index": 1 },
+                { "Time": 0, "Value": 20, "key_index": 0 },
+                { "Time": 10, "Value": 30, "key_index": 2 }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(curve.eval(0.0), Some(10.0));
+        assert_eq!(curve.eval(-1.0), Some(10.0));
+        assert_eq!(curve.eval(5.0), Some(25.0));
     }
 
     #[test]
