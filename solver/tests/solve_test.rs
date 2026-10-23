@@ -128,6 +128,7 @@ fn first_solution_returns_a_feasible_build_without_optimality_claim() {
     request["firstSolution"] = json!(true);
     let out = run(request);
     assert_eq!(out["optimal"], false);
+    assert_eq!(out["incomplete"], false);
     assert!(out["best"]["total_price"].as_i64().is_some());
     // 0.75 (control at d=50) * (1 - 0.5), reported through the site's
     // two-decimal scale ratio.

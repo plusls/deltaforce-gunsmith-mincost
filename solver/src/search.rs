@@ -292,6 +292,10 @@ pub struct RecoilSummary {
 pub struct SolveResult {
     pub optimal: bool,
     pub truncated: bool,
+    /// The search stopped early on an internal limit (a capped heuristic
+    /// frontier or a sampled tuning grid) without exhausting the budget, so
+    /// an exhaustive search might still find a different build.
+    pub incomplete: bool,
     pub nodes: u64,
     pub leaves: u64,
     pub best: Option<Solution>,
@@ -1108,6 +1112,7 @@ impl<'a> Solver<'a> {
             return SolveResult {
                 optimal: false,
                 truncated: false,
+                incomplete: false,
                 nodes: 0,
                 leaves: 0,
                 best: None,
@@ -1176,6 +1181,7 @@ impl<'a> Solver<'a> {
             return SolveResult {
                 optimal: false,
                 truncated: self.truncated,
+                incomplete: self.heuristic_incomplete || self.grid_truncated,
                 nodes: self.nodes,
                 leaves: self.leaves,
                 best: self.best,
@@ -1322,6 +1328,7 @@ impl<'a> Solver<'a> {
         SolveResult {
             optimal,
             truncated,
+            incomplete: incomplete || self.grid_truncated,
             nodes: total_nodes,
             leaves: total_leaves,
             best: self.best,

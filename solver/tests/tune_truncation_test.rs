@@ -19,6 +19,7 @@ fn a_sampled_tuning_grid_is_never_reported_as_optimal() {
     let out = run("cache_mask_payload.json");
     assert_eq!(out["optimal"], false, "{out}");
     assert_eq!(out["truncated"], false, "{out}");
+    assert_eq!(out["incomplete"], true, "{out}");
     assert_eq!(out["best"]["total_price"], 1500, "{out}");
     assert!(
         out["message"]
@@ -33,5 +34,6 @@ fn a_sampled_tuning_grid_is_never_reported_as_optimal() {
 fn a_full_tuning_grid_stays_optimal() {
     let out = run("control_payload_max65535.json");
     assert_eq!(out["optimal"], true, "{out}");
+    assert_eq!(out["incomplete"], false, "{out}");
     assert_eq!(out["best"]["total_price"], 1050, "{out}");
 }
