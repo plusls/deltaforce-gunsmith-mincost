@@ -73,7 +73,31 @@ function dataKeyOf(context) {
 
 let backendPromise = null;
 let backendToken = 0;
-const payloadCache = new Map();
+const PAYLOAD_CACHE_LIMIT = 4;
+
+class BoundedPayloadCache extends Map {
+  constructor(limit) {
+    super();
+    this.limit = limit;
+  }
+
+  get(key) {
+    if (!super.has(key)) return undefined;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (super.has(key)) super.delete(key);
+    super.set(key, value);
+    while (this.size > this.limit) super.delete(super.keys().next().value);
+    return this;
+  }
+}
+
+const payloadCache = new BoundedPayloadCache(PAYLOAD_CACHE_LIMIT);
 
 function getBackend() {
   if (backendPromise) return backendPromise;
@@ -279,7 +303,7 @@ async function runMinCost(context, mode, options, requestDeadlineMs) {
 }
 
 function installWorkerHook() {
-  const sitePayloadCache = new Map();
+  const sitePayloadCache = new BoundedPayloadCache(PAYLOAD_CACHE_LIMIT);
   let pendingMinCost = null;
   let pendingToken = 0;
   let hookFailed = false;
@@ -471,7 +495,7 @@ function installWorkerHook() {
     console.warn("[gunsmith-mincost] failed to hook Worker", error);
   }
 
-  return { trigger };
+  return { trigger, sitePayloadCache };
 }
 
 const MINCOST_FONT =

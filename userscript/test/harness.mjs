@@ -1,5 +1,14 @@
 import vm from "node:vm";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildBundle } from "../build.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const wasmPath = resolve(
+  here,
+  "../../target/wasm32-unknown-unknown/release/gunsmith_mincost.wasm",
+);
 
 const hostSetTimeout = setTimeout;
 const hostClearTimeout = clearTimeout;
@@ -181,6 +190,7 @@ export function createSandbox({
   return {
     sandbox,
     page,
+    vmMap: vm.runInContext("Map", sandbox),
     workers,
     warnings,
     errors,
@@ -248,4 +258,55 @@ export async function waitFor(predicate, ms = 2_000) {
     if (Date.now() > deadline) throw new Error("timed out waiting for condition");
     await tick(5);
   }
+}
+
+export function loadWorkerArtifacts() {
+  if (!existsSync(wasmPath)) return null;
+  const { workerSource } = buildBundle();
+  return { workerSource, wasm: readFileSync(wasmPath) };
+}
+
+export function loadSolverWorker(workerSource) {
+  const outbox = [];
+  const waiters = [];
+  const scope = {
+    onmessage: null,
+    postMessage(message) {
+      outbox.push(message);
+      for (const wake of waiters.splice(0)) wake();
+    },
+  };
+
+  async function next(predicate = () => true, timeoutMs = 20_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const index = outbox.findIndex(predicate);
+      if (index >= 0) return outbox.splice(index, 1)[0];
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("timed out waiting for worker message");
+      await new Promise((resolvePromise, rejectPromise) => {
+        const timer = hostSetTimeout(
+          () => rejectPromise(new Error("timed out waiting for worker message")),
+          remaining,
+        );
+        waiters.push(() => {
+          hostClearTimeout(timer);
+          resolvePromise();
+        });
+      });
+    }
+  }
+
+  const sandbox = {
+    self: scope,
+    console,
+    WebAssembly,
+    TextEncoder,
+    TextDecoder,
+    setTimeout,
+    clearTimeout,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(workerSource, sandbox);
+  return { scope, next };
 }
