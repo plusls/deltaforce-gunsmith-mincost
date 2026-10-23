@@ -175,6 +175,25 @@ test("engine returns infeasible when no build meets the constraint", async (t) =
   assert.equal(result.build, undefined);
 });
 
+test("engine result records the price source and cap used", async (t) => {
+  if (!existsSync(wasmPath)) {
+    t.skip(`missing ${wasmPath}; build the wasm target first`);
+    return;
+  }
+  const engine = await createMinCostEngine({ wasm: readFileSync(wasmPath) });
+  const capped = engine.solve(context(), {
+    constraints: constraint,
+    priceSource: "system",
+    costCap: 2000,
+  });
+  assert.equal(capped.priceSource, "system");
+  assert.equal(capped.costCap, 2000);
+
+  const defaults = engine.solve(context(), { constraints: constraint });
+  assert.equal(defaults.priceSource, "current");
+  assert.equal(defaults.costCap, null);
+});
+
 test("engine accepts a site request through the adapter", async (t) => {
   if (!existsSync(wasmPath)) {
     t.skip(`missing ${wasmPath}; build the wasm target first`);

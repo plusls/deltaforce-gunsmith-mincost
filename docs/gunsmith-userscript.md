@@ -186,6 +186,8 @@ type MinCostOptions = {
 | `deadlineMs` | 软截止时间 (毫秒), 超时返回当前最好解并标记 `truncated`. 默认跟随站点"搜索时长", 没有站点控件时 full 5000 / fast 2000 |
 | `missingPricePolicy` | 缺价时拒绝该配件, 或用系统价代替 |
 
+`costCap` 与 `priceSource` 是解耦的. 站点预算的原始语义是**市场价上限** (站点 worker 始终用 `currentPrice` 判断 `budgetPrice`), 而脚本允许用同一个 `budgetPrice` 去约束系统价. 当 `priceSource: "system"` 且预算启用时, 求解器按系统价判断预算, 结果状态会附注 `预算按系统价约束, 市场价可能超预算`, 并且不再把该结果显示为无警告的"最优解". 系统价达标不代表市场价达标; 需要市场价预算时请把价格来源切回 `current`.
+
 ### 4.3 引擎 API
 
 ```ts
@@ -203,6 +205,8 @@ type MinCostResult = {
   };
   optimal: boolean;
   truncated: boolean;
+  priceSource: "current" | "system";
+  costCap: number | null;
   nodes: number;
   leaves: number;
   elapsedMs: number;

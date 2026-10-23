@@ -336,6 +336,21 @@ test("budget maps to costCap and override wins", () => {
   );
 });
 
+test("budget cap is not converted when the price source switches to system", () => {
+  const context = makeContext({
+    pricesByObjectId: { a: { currentPrice: 100, systemPrice: 10 } },
+  });
+  const options = optionsFromSiteRequest(
+    { targets: { budgetEnabled: true, budgetPrice: 100000 }, smartOptions: {} },
+    { priceSource: "system" },
+  );
+
+  assert.equal(options.costCap, 100000);
+  const request = toSolveRequest(context, options);
+  assert.deepEqual(request.prices, { a: 10 });
+  assert.equal(request.costCap, 100000);
+});
+
 test("blackhawk budget mirrors the site worker's forced cap", () => {
   const request = (targets = {}) => ({
     mode: "blackhawk",

@@ -165,6 +165,43 @@ test("formatDuration renders milliseconds and seconds", () => {
   assert.equal(formatDuration(Number.NaN), "0 毫秒");
 });
 
+test("system-price budgets are disclosed instead of claimed as market-price optimal", () => {
+  const base = {
+    kind: "optimal",
+    optimal: true,
+    truncated: false,
+    elapsedMs: 1200,
+    priceSource: "system",
+    costCap: 100000,
+  };
+
+  const system = describeResultStatus(base, 5000);
+  assert.equal(system.tone, "warn");
+  assert.match(system.text, /最优解/);
+  assert.match(system.text, /预算按系统价约束, 市场价可能超预算/);
+
+  const current = describeResultStatus(
+    { ...base, priceSource: "current" },
+    5000,
+  );
+  assert.equal(current.tone, "ok");
+  assert.doesNotMatch(current.text, /系统价/);
+
+  const noCap = describeResultStatus(
+    { ...base, costCap: null },
+    5000,
+  );
+  assert.equal(noCap.tone, "ok");
+  assert.doesNotMatch(noCap.text, /系统价/);
+
+  const infeasible = describeResultStatus(
+    { kind: "infeasible", truncated: false, priceSource: "system", costCap: 100 },
+    5000,
+  );
+  assert.equal(infeasible.tone, "error");
+  assert.match(infeasible.text, /市场价可能超预算/);
+});
+
 test("result status never claims optimal for a truncated run", () => {
   assert.deepEqual(describeResultStatus({ kind: "optimal", elapsedMs: 1200 }, 5000), {
     tone: "ok",

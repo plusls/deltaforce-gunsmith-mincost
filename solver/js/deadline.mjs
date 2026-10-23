@@ -122,8 +122,25 @@ export function formatDuration(ms) {
   return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} 秒`;
 }
 
+const SYSTEM_PRICE_BUDGET_NOTE = "预算按系统价约束, 市场价可能超预算";
+
+// The site defines its budget against market prices, while the script can run
+// the same cap against system prices. Never let that mismatch look like a
+// market-price budget was satisfied.
+function noteBudgetPriceSource(status, result) {
+  if (result.priceSource !== "system" || result.costCap == null) return status;
+  return {
+    tone: status.tone === "ok" ? "warn" : status.tone,
+    text: `${status.text} · ${SYSTEM_PRICE_BUDGET_NOTE}`,
+  };
+}
+
 export function describeResultStatus(result, deadlineMs) {
   const mapped = asPlainObject(result);
+  return noteBudgetPriceSource(describeBaseStatus(mapped, deadlineMs), mapped);
+}
+
+function describeBaseStatus(mapped, deadlineMs) {
   const elapsed = Number.isFinite(mapped.elapsedMs) ? mapped.elapsedMs : 0;
   const hasBuild = mapped.kind === "optimal" || mapped.kind === "feasible";
 

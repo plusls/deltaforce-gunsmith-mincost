@@ -56,6 +56,8 @@ export async function createMinCostEngine(options) {
     const started = now();
     const raw = solver.solve(context.data, request);
     const result = fromSolverOutput(raw);
+    result.priceSource = normalized.priceSource;
+    result.costCap = normalized.costCap;
     result.elapsedMs = Math.round(now() - started);
     return result;
   }
