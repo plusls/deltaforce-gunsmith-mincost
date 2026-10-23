@@ -1486,6 +1486,45 @@ impl<'a> Solver<'a> {
         actions
     }
 
+    /// Whether an internal part currently hides a slot whose candidates an
+    /// explicit removal could install.
+    fn hidden_slot_release_possible(&self, assembly: &crate::assembly::Assembly) -> bool {
+        let mut claimed: FxHashSet<&str> = FxHashSet::default();
+        for item in &assembly.internal_parts {
+            if let Some(part) = self.payload.parts.get(&item.part_id) {
+                for extra in &part.extra_occupy_socket_ids {
+                    claimed.insert(extra.as_str());
+                }
+            }
+        }
+        if claimed.is_empty() {
+            return false;
+        }
+        for host in assembly
+            .active_part_ids
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(self.evaluator.weapon_id))
+        {
+            let Some(slots) = self.payload.slots_by_host.get(host) else {
+                continue;
+            };
+            for slot in slots {
+                if !claimed.contains(slot.id.as_str()) {
+                    continue;
+                }
+                let visible = assembly
+                    .visible_slots
+                    .iter()
+                    .any(|v| &v.host_part_id == host && v.slot.id == slot.id);
+                if !visible {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn cannot_satisfy(
         &self,
         _selections: &FxHashMap<String, Option<String>>,
@@ -1501,6 +1540,13 @@ impl<'a> Solver<'a> {
             .iter()
             .any(|c| c.max.is_some() && is_recoil_metric(&c.id));
         if !has_panel && !has_recoil_max {
+            return false;
+        }
+        // The bound below only sees the current assembly. A default/internal
+        // part may claim a socket through `extraOccupySocketIds` and hide the
+        // slot behind it, yet removing that part releases the slot and its
+        // candidates. Assume the best when such a release is possible.
+        if self.hidden_slot_release_possible(assembly) {
             return false;
         }
         let has_visible_bound = |slot: &crate::assembly::VisibleSlot| {
