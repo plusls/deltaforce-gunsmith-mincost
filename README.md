@@ -63,7 +63,7 @@ target/release/solve --payload weapon.json --prices prices.json \
 | 选项 | 说明 |
 | --- | --- |
 | `--request request.json` | 完整请求或仅含求解参数的请求；不能与 `--prices` 同时使用 |
-| `--prices prices.json` | 文件格式 `{"prices": {"partId": 12345}}`；缺价默认排除，`--allow-missing-prices` 视为 0 |
+| `--prices prices.json` | 价格表，支持裸 map 或 `{"prices": {...}}`；缺价默认排除，`--allow-missing-prices` 视为 0 |
 | `--constraint id:max` / `id:min:max` | 指标约束，可重复 |
 | `--laser-off` | 关闭激光 |
 | `--bipod-deployed` | 两脚架展开 |
@@ -133,6 +133,16 @@ node --test solver/js/*.test.mjs userscript/test/*.test.mjs
 
 `Cargo.toml` 的 release profile 设置了 `panic = "abort"`，release 模式下直接跑测试会链接失败，因此需要上面的环境变量。发布 WASM/userscript 时不要带该变量。
 
+除常规测试外，仓库提供独立于搜索剪枝的暴力枚举器 `bf`，用于验证“没有更便宜的可行解”：
+
+```bash
+cargo build --release
+target/release/bf spec.json
+node solver/js/brute-diff.mjs cases/*.json
+```
+
+`brute-diff.mjs` 会对每个 case 同时运行 `solve` 和 `bf`，比较总价、约束值与复算结果，出现 `DIFF` 时以非零状态退出。详见 `docs/gunsmith-testing.md`。
+
 ## 说明
 
 本项目与游戏发行商、站点运营方无关。所有武器数据、价格和配装都由浏览器页面在本地提供，脚本只在本机内存中处理，不上传数据。使用前请自行确认符合站点条款与所在地法规。
@@ -143,3 +153,4 @@ node --test solver/js/*.test.mjs userscript/test/*.test.mjs
 - `docs/gunsmith-smart-build.md`：站点“生成智能配件方案”的 worker 协议与 beam search 分析
 - `docs/gunsmith-rust-solver.md`：求解器算法、复杂度与实测结果
 - `docs/gunsmith-userscript.md`：脚本数据来源、接口约定、构建与真实页面验证
+- `docs/gunsmith-testing.md`：测试分层、暴力枚举 oracle、批量差分与 fixture 说明
