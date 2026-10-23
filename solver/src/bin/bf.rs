@@ -393,7 +393,7 @@ fn main() {
         .as_str()
         .unwrap_or("operations")
         .to_string();
-    let laser = spec.request["laserEnabled"].as_bool().unwrap_or(true);
+    let laser = spec.request["laserEnabled"].as_bool().unwrap_or(false);
     let bipod = spec.request["bipodDeployed"].as_bool().unwrap_or(false);
     let constraints: Vec<Constraint> =
         serde_json::from_value(spec.request["constraints"].clone()).unwrap_or_default();

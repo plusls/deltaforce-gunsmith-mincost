@@ -184,3 +184,49 @@ fn brute_without_locks_keeps_using_the_conflicting_part() {
     assert_eq!(brute["witnessLock"]["valid"], json!(true));
     assert_eq!(brute["witnessLock"]["checked"].as_array().unwrap().len(), 0);
 }
+
+fn laser_payload() -> Value {
+    json!({
+        "dataVersion": "laser-default",
+        "parts": {
+            "w1": {"id": "w1", "name": "gun"},
+            "L": {
+                "id": "L",
+                "name": "laser",
+                "uiEffectsByMode": {"operations": [{"conditionId": 10038}]},
+                "modifiersByMode": {"operations": [
+                    {"attributeId": "10005", "modifierType": "Addend", "delta": 10, "polarity": "pro"}
+                ]}
+            }
+        },
+        "slotsByHost": {
+            "w1": [{"id": "1", "name": "Muz_point", "candidateIds": ["L"]}]
+        },
+        "weaponStatsById": {
+            "w1": {
+                "byMode": {
+                    "operations": {
+                        "base": {"10001": 50, "10005": 50},
+                        "display": {"10001": 50, "10005": 50}
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[test]
+fn brute_treats_missing_laser_enabled_as_false() {
+    let mut request = json!({
+        "weaponId": "w1",
+        "mode": "operations",
+        "prices": {"w1": 1000, "L": 100},
+        "lockedPathKeys": {"weapon:w1/slot:1:Muz_point": "L"}
+    });
+    let off = run_bf(laser_payload(), request.clone(), 64, "laser-default");
+    assert_eq!(off["brute"]["witness"]["panel"]["10005"], json!(50.0));
+
+    request["laserEnabled"] = json!(true);
+    let on = run_bf(laser_payload(), request, 64, "laser-enabled");
+    assert_eq!(on["brute"]["witness"]["panel"]["10005"], json!(60.0));
+}
