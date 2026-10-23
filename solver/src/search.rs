@@ -69,7 +69,7 @@ pub struct ConstraintResult {
 /// Abort a speculative exact pass once its Pareto frontier exceeds this many
 /// states. The frontier is kept cost-ordered, so aborting only affects how
 /// quickly a tighter incumbent is found; the final pass has no such limit.
-const FRONTIER_ABORT_STATES: usize = 8_192;
+const FRONTIER_ABORT_STATES: usize = 65_536;
 /// Do not abort a DP level before it has run this long. Fast passes with a
 /// wide-but-short-lived frontier must still complete exactly.
 const FRONTIER_ABORT_LEVEL_MS: u64 = 1_000;
@@ -78,6 +78,7 @@ const FRONTIER_ABORT_LEVEL_MS: u64 = 1_000;
 const SEED_IMPROVE_WORK: u64 = 10_000;
 /// Hard wall-clock cap on the heuristic improvement pass.
 const SEED_IMPROVE_MS: u64 = 8_000;
+const SEED_BEAM_RETRY_MS: u64 = 500;
 /// Tolerance of every final constraint comparison. Pruning bounds and the
 /// tuning requirement inversion must use the same value: a value the final
 /// check accepts must never be rejected earlier as a rounding-level violation.
@@ -326,6 +327,7 @@ pub struct Solver<'a> {
     aim_dp: AimDir,
     panel_attrs: Vec<String>,
     panel_dirs: Vec<PanelDir>,
+    panel_exact: bool,
     seed_panel_attrs: Vec<usize>,
     seed_aim: f64,
     dp_metric_cache: FxHashMap<(String, String, bool), ExactPart>,
@@ -368,6 +370,7 @@ pub struct Solver<'a> {
     truncated: bool,
     heuristic_incomplete: bool,
     seed_beam_tried: bool,
+    seed_beam_next_ms: u64,
     stop: bool,
     best_cost: i64,
     panel_base: [f64; 5],
@@ -386,6 +389,8 @@ impl Relevance {
             .unwrap_or(false)
     }
 }
+
+const SPRINT_PRUNE: bool = true;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DpDims {
@@ -1019,6 +1024,17 @@ impl<'a> Solver<'a> {
             })
             .map(|(idx, _)| idx)
             .collect();
+        // The DP panel only sums unconditioned addends, while the exact panel
+        // also applies conditioned ones. Exact threshold pruning is only
+        // admissible when both agree, so it stays off for payloads that use
+        // conditioned display addends.
+        let panel_exact = payload.parts.values().all(|part| {
+            part.display_mods_for(weapon_id, &options.mode).all(|m| {
+                !(m.condition_id.is_some()
+                    && m.modifier_type == "Addend"
+                    && is_panel_attr(&normalize_attr(m.attribute_id.as_deref())))
+            })
+        });
         let mut dp_ok = search_constraints.iter().all(|c| {
             if c.id == "10001" {
                 false
@@ -1078,6 +1094,7 @@ impl<'a> Solver<'a> {
             aim_dp: aim_direction(&search_constraints),
             panel_attrs,
             panel_dirs,
+            panel_exact,
             seed_panel_attrs,
             seed_aim: seed_aim_weight(&search_constraints),
             search_constraints,
@@ -1114,6 +1131,7 @@ impl<'a> Solver<'a> {
             truncated: false,
             heuristic_incomplete: false,
             seed_beam_tried: false,
+            seed_beam_next_ms: 0,
             stop: false,
             best_cost: i64::MAX,
             panel_base,
@@ -1157,6 +1175,7 @@ impl<'a> Solver<'a> {
             solver.heuristic_incomplete = false;
             solver.tune_incomplete = false;
             solver.seed_beam_tried = false;
+            solver.seed_beam_next_ms = 0;
             solver.nodes = 0;
             solver.leaves = 0;
             solver.run_found = false;
@@ -1555,11 +1574,66 @@ impl<'a> Solver<'a> {
             }
         }
         let mut actions: Vec<Action> = Vec::new();
-        actions.extend(forced);
-        if can_defer {
-            actions.push(Action::Defer);
+        if self.seed {
+            // The seed pass only needs one feasible build. Rank the explicit
+            // parts against the internal default instead of always expanding
+            // the default first: a structural default can select a whole
+            // subtree (a barrel picks its matching handguard), so expanding it
+            // first hides every combination that needs another part until the
+            // entire default subtree has been exhausted.
+            let mut entries: Vec<(f64, i64, String, Action)> =
+                Vec::with_capacity(part_actions.len() + forced.len());
+            for action in part_actions {
+                if let Action::Part(id) = &action {
+                    let score = self.seed_part_score(id, &slot.slot.name);
+                    let price = self.part_price(id);
+                    entries.push((score, price, id.clone(), action));
+                }
+            }
+            for action in forced {
+                let (score, price, key) = match &action {
+                    Action::Unset => match unset.as_ref().and_then(|id| self.payload.parts.get(id))
+                    {
+                        Some(part) => {
+                            let metric = self
+                                .dp_option_for_part(
+                                    part,
+                                    &slot.slot.name,
+                                    SlotChoice::Unset,
+                                    &[],
+                                    false,
+                                )
+                                .metric;
+                            (
+                                self.seed_metric_score(&metric),
+                                self.part_price(&part.id),
+                                part.id.clone(),
+                            )
+                        }
+                        None => (f64::NEG_INFINITY, 0, String::new()),
+                    },
+                    Action::Remove => (f64::NEG_INFINITY, 0, String::new()),
+                    _ => (f64::NEG_INFINITY, 0, String::new()),
+                };
+                entries.push((score, price, key, action));
+            }
+            entries.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            actions.extend(entries.into_iter().map(|(_, _, _, action)| action));
+            if can_defer {
+                actions.push(Action::Defer);
+            }
+        } else {
+            actions.extend(forced);
+            if can_defer {
+                actions.push(Action::Defer);
+            }
+            actions.extend(part_actions);
         }
-        actions.extend(part_actions);
         actions
     }
 
@@ -1847,6 +1921,54 @@ impl<'a> Solver<'a> {
         self.seed_metric_score(&metric)
     }
 
+    fn panel_may_satisfy(&self, metric: &ExactPart, suffix_min: &[f64], suffix_max: &[f64]) -> bool {
+        if !self.panel_exact {
+            return true;
+        }
+        for c in &self.search_constraints {
+            let Some(idx) = panel_attr_index(&c.id) else {
+                continue;
+            };
+            let Some(pos) = self.panel_attrs.iter().position(|a| *a == c.id) else {
+                continue;
+            };
+            let base = self.panel_base[idx] + metric.panel.get(pos).copied().unwrap_or(0.0);
+            let lo = base + suffix_min.get(pos).copied().unwrap_or(0.0);
+            let hi = base + suffix_max.get(pos).copied().unwrap_or(0.0);
+            if c.min.is_some_and(|min| hi < min - 1e-9)
+                || c.max.is_some_and(|max| lo > max + 1e-9)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Rejects a completed DP state whose additive panel value already breaks
+    /// a panel bound. The panel is exact for the DP abstraction (visible
+    /// parts only, no conditional display addends reach the panel), so a
+    /// candidate that fails here can never satisfy the exact evaluation.
+    fn panel_bound_fails(&self, st: &DpState) -> bool {
+        if !self.panel_exact {
+            return false;
+        }
+        for c in &self.search_constraints {
+            let Some(idx) = panel_attr_index(&c.id) else {
+                continue;
+            };
+            let Some(pos) = self.panel_attrs.iter().position(|a| *a == c.id) else {
+                continue;
+            };
+            let value = self.panel_base[idx] + st.metric.panel.get(pos).copied().unwrap_or(0.0);
+            if c.min.is_some_and(|m| value < m - 1e-9)
+                || c.max.is_some_and(|m| value > m + 1e-9)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn dp_level_may_satisfy(&self, st: &DpState, sb: &DpSuffixBound) -> bool {
         let mut has_recoil = false;
         let mut aim_max: Option<f64> = None;
@@ -1939,17 +2061,19 @@ impl<'a> Solver<'a> {
                 }
             }
         }
-        if let Some(max) = sprint_max {
-            let open = sprint_open_for_min(
-                st.metric.eopen_min + sb.eopen_min,
-                st.metric.eopen + sb.eopen_max,
-            );
-            if let Some(v) = self
-                .evaluator
-                .sprint_fire_delay(st.metric.hs + sb.hs_max, open)
-            {
-                if v > max + 1e-9 {
-                    return false;
+        if SPRINT_PRUNE {
+            if let Some(max) = sprint_max {
+                let open = sprint_open_for_min(
+                    st.metric.eopen_min + sb.eopen_min,
+                    st.metric.eopen + sb.eopen_max,
+                );
+                if let Some(v) = self
+                    .evaluator
+                    .sprint_fire_delay(st.metric.hs + sb.hs_max, open)
+                {
+                    if v > max + 1e-9 {
+                        return false;
+                    }
                 }
             }
         }
@@ -2188,6 +2312,68 @@ impl<'a> Solver<'a> {
             suffix_min[idx] = suffix_min[idx + 1] + min_cost;
         }
         let suffix_bound = dp_suffix_bounds(&options_per_slot);
+        {
+            let base_state = DpState {
+                cost: base_cost,
+                metric: base.clone(),
+                detail_pro: base_detail_pro.clone(),
+                panel_pro: base_panel_pro.clone(),
+                choices: None,
+            };
+            if !self.dp_level_may_satisfy(&base_state, &suffix_bound[0]) {
+                return;
+            }
+        }
+
+        // Skip a leaf whose structural base leaves no room for a panel bound.
+        // Without this every hopeless leaf still pays for a full tuning DP.
+        let panel_dims = self.panel_attrs.len();
+        let mut suffix_panel_min_by: Vec<Vec<f64>> = Vec::new();
+        let mut suffix_panel_max_by: Vec<Vec<f64>> = Vec::new();
+        if panel_dims > 0 && self.panel_exact {
+            let mut suffix_panel_min = vec![0.0f64; panel_dims];
+            let mut suffix_panel_max = vec![0.0f64; panel_dims];
+            suffix_panel_min_by = vec![vec![0.0f64; panel_dims]; options_per_slot.len() + 1];
+            suffix_panel_max_by = vec![vec![0.0f64; panel_dims]; options_per_slot.len() + 1];
+            for (idx, opts) in options_per_slot.iter().enumerate().rev() {
+                for p in 0..panel_dims {
+                    let mut lo = f64::INFINITY;
+                    let mut hi = f64::NEG_INFINITY;
+                    for o in opts {
+                        let v = o.metric.panel.get(p).copied().unwrap_or(0.0);
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                    if lo.is_finite() {
+                        suffix_panel_min[p] += lo;
+                        suffix_panel_min_by[idx][p] = suffix_panel_min_by[idx + 1][p] + lo;
+                    }
+                    if hi.is_finite() {
+                        suffix_panel_max[p] += hi;
+                        suffix_panel_max_by[idx][p] = suffix_panel_max_by[idx + 1][p] + hi;
+                    }
+                }
+            }
+            let hopeless = self.search_constraints.iter().any(|c| {
+                if !is_panel_attr(&c.id) {
+                    return false;
+                }
+                let (Some(pos), Some(p)) = (
+                    panel_attr_index(&c.id),
+                    self.panel_attrs.iter().position(|a| *a == c.id),
+                ) else {
+                    return false;
+                };
+                let base = self.panel_base[pos] + base.panel.get(p).copied().unwrap_or(0.0);
+                let lo = base + suffix_panel_min[p];
+                let hi = base + suffix_panel_max[p];
+                c.min.is_some_and(|min| hi < min - 1e-9)
+                    || c.max.is_some_and(|max| lo > max + 1e-9)
+            });
+            if hopeless {
+                return;
+            }
+        }
 
         // Admissible aim-time bounds for the slots that are not placed yet.
         // Pruning on them early only drops states that no completion can make
@@ -2227,9 +2413,9 @@ impl<'a> Solver<'a> {
         }
 
         if self.seed
-            && self.options.first_solution
             && self.best_cost == i64::MAX
             && !self.seed_beam_tried
+            && now_ms() >= self.seed_beam_next_ms
         {
             self.seed_beam_tried = true;
             if self.seed_beam_incumbent(
@@ -2241,6 +2427,11 @@ impl<'a> Solver<'a> {
             ) {
                 return;
             }
+            // A leaf whose fixed structural parts are weak can leave the beam a
+            // few percent short of a panel bound. Retry on a later leaf with a
+            // different structural base instead of giving up after one shot.
+            self.seed_beam_tried = false;
+            self.seed_beam_next_ms = now_ms().saturating_add(SEED_BEAM_RETRY_MS);
         }
 
         let mut states: Vec<DpState> = vec![DpState {
@@ -2285,17 +2476,19 @@ impl<'a> Solver<'a> {
                             }
                         }
                     }
-                    if let Some(max) = sprint_max {
-                        let open = sprint_open_for_min(
-                            metric.eopen_min + suffix_open_min[slot_idx + 1],
-                            metric.eopen + suffix_open_max[slot_idx + 1],
-                        );
-                        if let Some(best) = self
-                            .evaluator
-                            .sprint_fire_delay(metric.hs + suffix_hs_max[slot_idx + 1], open)
-                        {
-                            if best > max + 1e-9 {
-                                continue;
+                    if SPRINT_PRUNE {
+                        if let Some(max) = sprint_max {
+                            let open = sprint_open_for_min(
+                                metric.eopen_min + suffix_open_min[slot_idx + 1],
+                                metric.eopen + suffix_open_max[slot_idx + 1],
+                            );
+                            if let Some(best) = self
+                                .evaluator
+                                .sprint_fire_delay(metric.hs + suffix_hs_max[slot_idx + 1], open)
+                            {
+                                if best > max + 1e-9 {
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -2313,10 +2506,19 @@ impl<'a> Solver<'a> {
                 }
             }
             next.retain(|st| self.dp_level_may_satisfy(st, &suffix_bound[slot_idx + 1]));
+            if panel_dims > 0 && self.panel_exact {
+                next.retain(|st| {
+                    self.panel_may_satisfy(
+                        &st.metric,
+                        &suffix_panel_min_by[slot_idx + 1],
+                        &suffix_panel_max_by[slot_idx + 1],
+                    )
+                });
+            }
             // The seed pass only has to find one feasible build, so it keeps a
             // small capability-ranked frontier. The optimal pass needs its
             // cost-ranked frontier intact.
-            let dp_limit = if self.seed { 8192 } else { 200_000 };
+            let dp_limit = if self.seed { 32768 } else { 200_000 };
             if !self.seed && self.frontier_abort.is_some() {
                 self.frontier_abort_not_before = Some(now_ms() + FRONTIER_ABORT_LEVEL_MS);
             }
@@ -2399,16 +2601,21 @@ impl<'a> Solver<'a> {
                     }
                 }
             }
-            if let Some(max) = sprint_max {
-                let open = sprint_open_for_min(st.metric.eopen_min, st.metric.eopen);
-                if let Some(best) = self.evaluator.sprint_fire_delay(st.metric.hs, open) {
-                    if best > max + 1e-9 {
-                        continue;
+            if SPRINT_PRUNE {
+                if let Some(max) = sprint_max {
+                    let open = sprint_open_for_min(st.metric.eopen_min, st.metric.eopen);
+                    if let Some(best) = self.evaluator.sprint_fire_delay(st.metric.hs, open) {
+                        if best > max + 1e-9 {
+                            continue;
+                        }
                     }
                 }
             }
             let total = st.cost + self.weapon_price;
             if self.best_cost < i64::MAX && total >= self.best_cost {
+                continue;
+            }
+            if self.panel_bound_fails(&st) {
                 continue;
             }
             let mut trial = base_trial.clone();
@@ -2448,7 +2655,7 @@ impl<'a> Solver<'a> {
         slot_paths: &[String],
         base_trial: &FxHashMap<String, Option<String>>,
     ) -> bool {
-        const BEAM_WIDTH: usize = 1024;
+        const BEAM_WIDTH: usize = 16384;
         const EVAL_LIMIT: usize = 16;
         if options_per_slot.is_empty() {
             return false;
@@ -2461,6 +2668,7 @@ impl<'a> Solver<'a> {
             && k_max.is_none()
             && aim_max.is_none()
             && sprint_max.is_none()
+            && self.panel_attrs.is_empty()
         {
             return false;
         }
@@ -2471,7 +2679,25 @@ impl<'a> Solver<'a> {
             panel_pro: None,
             choices: None,
         }];
-        for opts in options_per_slot {
+        // Scoring a partial state against its current metrics alone rejects
+        // states that still have room to improve in the slots that remain.
+        // Rank against the best possible completion instead.
+        let suffix = dp_suffix_bounds(options_per_slot);
+        let panel_dims = self.panel_attrs.len();
+        let mut suffix_panel: Vec<Vec<f64>> = vec![vec![0.0; panel_dims]; options_per_slot.len() + 1];
+        for idx in (0..options_per_slot.len()).rev() {
+            for p in 0..panel_dims {
+                let best = options_per_slot[idx]
+                    .iter()
+                    .map(|o| o.metric.panel.get(p).copied().unwrap_or(0.0))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                suffix_panel[idx][p] = if best.is_finite() { best } else { 0.0 }
+                    + suffix_panel[idx + 1][p];
+            }
+        }
+        for (slot_idx, opts) in options_per_slot.iter().enumerate() {
+            let sb = &suffix[slot_idx + 1];
+            let sp = &suffix_panel[slot_idx + 1];
             let mut scored: Vec<(f64, f64, i64, DpState)> =
                 Vec::with_capacity(beam.len().saturating_mul(opts.len()).min(BEAM_WIDTH * 8));
             for st in &beam {
@@ -2483,12 +2709,29 @@ impl<'a> Solver<'a> {
                     }
                     let mut metric = st.metric.clone();
                     metric.add(&opt.metric);
+                    let mut optimistic = metric.clone();
+                    for (p, value) in optimistic.panel.iter_mut().enumerate() {
+                        *value += sp.get(p).copied().unwrap_or(0.0);
+                    }
+                    optimistic.d += sb.d_max;
+                    optimistic.ah += sb.ah_min;
+                    optimistic.av += sb.av_min;
+                    optimistic.ch *= sb.ch_min;
+                    optimistic.cv *= sb.cv_min;
+                    optimistic.ck *= sb.ck_min;
+                    optimistic.eh += sb.eh_max;
+                    optimistic.ev += sb.ev_max;
+                    optimistic.ek += sb.ek_max;
+                    optimistic.eopen += sb.eopen_max;
+                    optimistic.eopen_min += sb.eopen_min;
+                    optimistic.hs += sb.hs_max;
+                    optimistic.adsm += sb.adsm_min;
                     let choices = Some(Rc::new(ChoiceNode {
                         choice: opt.choice.clone(),
                         prev: st.choices.clone(),
                     }));
                     let margin = seed_candidate_margin(
-                        &metric,
+                        &optimistic,
                         h_max,
                         v_max,
                         k_max,
@@ -2499,6 +2742,9 @@ impl<'a> Solver<'a> {
                         self.gunkick0,
                         &self.aim_scale,
                         &self.evaluator,
+                        &self.panel_attrs,
+                        &self.panel_base,
+                        &self.search_constraints,
                     );
                     let rank = self.seed_metric_score(&metric);
                     scored.push((
@@ -2551,6 +2797,9 @@ impl<'a> Solver<'a> {
                     self.gunkick0,
                     &self.aim_scale,
                     &self.evaluator,
+                    &self.panel_attrs,
+                    &self.panel_base,
+                    &self.search_constraints,
                 )
             })
             .collect();
@@ -6457,6 +6706,9 @@ fn seed_candidate_margin(
     gunkick0: f64,
     aim: &AimScaleFloor,
     evaluator: &Evaluator,
+    panel_attrs: &[String],
+    panel_base: &[f64; 5],
+    constraints: &[Constraint],
 ) -> f64 {
     let mut margin =
         optimistic_recoil_margin(metric, h_max, v_max, k_max, control, gunkick, gunkick0, aim);
@@ -6477,11 +6729,44 @@ fn seed_candidate_margin(
             margin = margin.min(relative_margin(max, value));
         }
     }
+    margin = margin.min(seed_panel_margin(
+        metric, panel_attrs, panel_base, constraints,
+    ));
     if margin.is_finite() {
         margin
     } else {
         0.0
     }
+}
+
+/// Slack of a partial panel score against every panel bound. A beam that
+/// ignores these bounds fills up with cheap low-panel states and never
+/// reaches a stability-heavy build.
+fn seed_panel_margin(
+    metric: &ExactPart,
+    panel_attrs: &[String],
+    panel_base: &[f64; 5],
+    constraints: &[Constraint],
+) -> f64 {
+    let mut margin = f64::INFINITY;
+    for (idx, attr) in panel_attrs.iter().enumerate() {
+        let Some(pos) = panel_attr_index(attr) else {
+            continue;
+        };
+        let value = panel_base[pos] + metric.panel.get(idx).copied().unwrap_or(0.0);
+        for c in constraints {
+            if &c.id != attr {
+                continue;
+            }
+            if let Some(min) = c.min {
+                margin = margin.min((value - min) / min.abs().max(1e-6));
+            }
+            if let Some(max) = c.max {
+                margin = margin.min((max - value) / max.abs().max(1e-6));
+            }
+        }
+    }
+    margin
 }
 
 /// Orders incumbent candidates: optimistically feasible states first (they are

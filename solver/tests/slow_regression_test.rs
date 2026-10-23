@@ -95,16 +95,7 @@ fn ak12_aim_recoil_regression() {
 #[test]
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn live_sprint_dp_regression() {
-    use flate2::read::GzDecoder;
-    use std::io::Read;
-
-    let path = format!(
-        "{}/tests/fixtures/live_sprint_dp.payload.json.gz",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let mut decoder = GzDecoder::new(std::fs::File::open(path).unwrap());
-    let mut payload = String::new();
-    decoder.read_to_string(&mut payload).unwrap();
+    let payload = live_payload("live_sprint_dp.payload.json.gz");
     let request = std::fs::read(format!(
         "{}/tests/fixtures/live_sprint_dp.request.json",
         env!("CARGO_MANIFEST_DIR")
@@ -116,4 +107,38 @@ fn live_sprint_dp_regression() {
     assert_eq!(out["optimal"], true, "{out}");
     assert_eq!(out["truncated"], false, "{out}");
     assert_eq!(out["best"]["total_price"], 153185, "{out}");
+}
+
+fn live_payload(name: &str) -> String {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let mut decoder = GzDecoder::new(std::fs::File::open(path).unwrap());
+    let mut payload = String::new();
+    decoder.read_to_string(&mut payload).unwrap();
+    payload
+}
+
+#[test]
+#[ignore = "slow regression; run with --release -- --ignored"]
+fn live_page_full_regression() {
+    // Seven tight bounds from the live smart optimizer panel. The seed pass
+    // used to expand the structural default first, so the default barrel chose
+    // its matching handguard and hid every combination that needs another one.
+    let payload = live_payload("live_sprint_dp.payload.json.gz");
+    let request = std::fs::read(format!(
+        "{}/tests/fixtures/live_page_full.request.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+
+    let out = gunsmith_mincost::solve_slices(payload.as_bytes(), &request).unwrap();
+    let out: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["optimal"], true, "{out}");
+    assert_eq!(out["truncated"], false, "{out}");
+    assert_eq!(out["best"]["total_price"], 126821, "{out}");
+    for constraint in out["best"]["constraints"].as_array().unwrap() {
+        assert_eq!(constraint["ok"], true, "{out}");
+    }
 }
