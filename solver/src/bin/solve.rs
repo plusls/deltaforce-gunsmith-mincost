@@ -142,17 +142,7 @@ fn run() -> Result<(), String> {
     if let Some(path) = prices_path {
         strict_prices = true;
         let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        let map = value
-            .get("prices")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        for (k, v) in map {
-            if let Some(n) = v.as_f64() {
-                prices.insert(k, n);
-            }
-        }
+        prices = parse_price_map(&text)?;
     }
     if strict_prices && !allow_missing_prices {
         let resolved_weapon = weapon_id
@@ -234,4 +224,45 @@ fn print_help() {
 \
          Use --allow-missing-prices to treat them as price 0."
     );
+}
+
+/// Accepts both a bare `{ "partId": price }` map and a wrapped
+/// `{ "prices": { ... } }` payload, since snapshots exist in both shapes.
+fn parse_price_map(text: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let map = match value.get("prices") {
+        Some(prices) => prices.as_object(),
+        None => value.as_object(),
+    };
+    Ok(map
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, price)| price.as_f64().map(|value| (id.clone(), value)))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_price_map;
+
+    #[test]
+    fn price_map_accepts_a_bare_object() {
+        let prices = parse_price_map(r#"{ "a": 1, "b": 2.5, "c": "x" }"#).unwrap();
+        assert_eq!(prices.get("a"), Some(&1.0));
+        assert_eq!(prices.get("b"), Some(&2.5));
+        assert_eq!(prices.get("c"), None);
+    }
+
+    #[test]
+    fn price_map_accepts_a_wrapped_object() {
+        let prices = parse_price_map(r#"{ "dataVersion": "x", "prices": { "a": 3 } }"#).unwrap();
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices.get("a"), Some(&3.0));
+    }
+
+    #[test]
+    fn price_map_ignores_metadata_outside_prices() {
+        let prices = parse_price_map(r#"{ "prices": {}, "a": 9 }"#).unwrap();
+        assert!(prices.is_empty());
+    }
 }
