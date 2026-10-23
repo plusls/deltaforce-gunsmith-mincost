@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import vm from "node:vm";
@@ -146,6 +154,46 @@ test("bundle replaces placeholders and parses as a userscript", { skip }, () => 
   assert.match(mainSource, /resolveDeadlineMs/);
   assert.match(workerSource, /resolveDeadlineMs/);
   assert.match(bundle, /SITE_SEARCH_INPUT_SELECTOR/);
+});
+
+test("bundle replacement treats $ sequences in worker source literally", () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "gunsmith-build-"));
+  try {
+    mkdirSync(resolve(dir, "solver/js"), { recursive: true });
+    mkdirSync(resolve(dir, "userscript/src"), { recursive: true });
+    const modules = {
+      "solver.mjs": "solverModule",
+      "deadline.mjs": "deadlineModule",
+      "site-adapter.mjs": "adapterModule",
+      "engine.mjs": "engineModule",
+    };
+    for (const [name, identifier] of Object.entries(modules)) {
+      writeFileSync(resolve(dir, "solver/js", name), `const ${identifier} = 1;\n`);
+    }
+    const workerBody = `const SPECIAL_PATTERNS = "$$ $& $' $\`";\n`;
+    writeFileSync(resolve(dir, "userscript/src/worker-main.mjs"), workerBody);
+    writeFileSync(
+      resolve(dir, "userscript/src/main.mjs"),
+      'const MINCOST_WASM_BASE64 = "__WASM_BASE64__";\n' +
+        'const MINCOST_WORKER_SOURCE = "__WORKER_SOURCE__";\n',
+    );
+
+    const { bundle, workerSource } = buildBundle({
+      repoDir: dir,
+      wasmBytes: Buffer.from("fake-wasm"),
+    });
+
+    assert.ok(workerSource.includes(workerBody.trim()));
+    assert.ok(bundle.includes("$$ $& $' $`"));
+    assert.ok(bundle.includes(JSON.stringify(workerSource)));
+    assert.ok(bundle.includes(JSON.stringify(Buffer.from("fake-wasm").toString("base64"))));
+    assert.ok(!bundle.includes("__WASM_BASE64__"));
+    assert.ok(!bundle.includes("__WORKER_SOURCE__"));
+    assert.doesNotThrow(() => new vm.Script(bundle));
+    assert.doesNotThrow(() => new vm.Script(workerSource));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("worker source initializes, caches payloads, and solves", { skip, timeout: 30_000 }, async () => {

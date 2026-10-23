@@ -45,8 +45,8 @@ ${mainSource}
 `;
 
   bundle = bundle
-    .replace('"__WASM_BASE64__"', JSON.stringify(wasmBase64))
-    .replace('"__WORKER_SOURCE__"', JSON.stringify(workerSource));
+    .replace('"__WASM_BASE64__"', () => JSON.stringify(wasmBase64))
+    .replace('"__WORKER_SOURCE__"', () => JSON.stringify(workerSource));
 
   if (bundle.includes("__WASM_BASE64__") || bundle.includes("__WORKER_SOURCE__")) {
     throw new Error("bundle placeholders were not replaced");
