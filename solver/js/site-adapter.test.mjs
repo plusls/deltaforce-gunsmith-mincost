@@ -318,6 +318,143 @@ test("price source selects current or system prices", () => {
   assert.deepEqual(system.prices, { a: 51, b: 20 });
 });
 
+test("blackhawk mode takes blackhawkPrices instead of market prices", () => {
+  const context = makeContext({
+    mode: "blackhawk",
+    weaponId: "18060000009",
+    data: {
+      ...WEAPON_DATA,
+      blackhawkPrices: {
+        "18060000009": 1800,
+        "13110000057": 40,
+        "13020000443": 160.4,
+      },
+    },
+    pricesByObjectId: {
+      "18060000009": { currentPrice: 102000, systemPrice: 90000 },
+      "13110000057": { currentPrice: 82309, systemPrice: 80000 },
+      "13020000443": { currentPrice: 150664, systemPrice: 140000 },
+    },
+  });
+
+  const request = toSolveRequest(context, {
+    priceSource: "system",
+    lockMode: "locked",
+    missingPricePolicy: "fallback-system",
+  });
+
+  assert.equal(request.mode, "blackhawk");
+  assert.deepEqual(request.prices, {
+    "18060000009": 1800,
+    "13110000057": 40,
+    "13020000443": 160,
+  });
+});
+
+test("blackhawk prices are keyed by officialObjectId when present", () => {
+  const context = makeContext({
+    mode: "blackhawk",
+    data: {
+      ...WEAPON_DATA,
+      parts: { p1: { id: "p1", officialObjectId: "official-1" } },
+      blackhawkPrices: { p1: 55 },
+    },
+  });
+
+  const request = toSolveRequest(context, {
+    lockMode: "locked",
+    missingPricePolicy: "reject",
+  });
+  assert.deepEqual(request.prices, { "official-1": 55 });
+});
+
+test("blackhawk mode only excludes absent or non-numeric prices", () => {
+  const context = makeContext({
+    mode: "blackhawk",
+    excludedPartIds: ["pre"],
+    data: {
+      ...WEAPON_DATA,
+      blackhawkPrices: {
+        good: 40,
+        zero: 0,
+        negative: -5,
+        nullPrice: null,
+        nanPrice: Number.NaN,
+        infinitePrice: Number.POSITIVE_INFINITY,
+        stringPrice: "40",
+      },
+    },
+    pricesByObjectId: {
+      good: { currentPrice: 100, systemPrice: 90 },
+      zero: { currentPrice: 70, systemPrice: 60 },
+    },
+  });
+
+  const request = toSolveRequest(context, {
+    priceSource: "current",
+    lockMode: "locked",
+    missingPricePolicy: "fallback-system",
+  });
+
+  // The site's `sn()` treats a stored 0 as a real price and only an absent key
+  // as missing, so zero and negative entries must survive the conversion.
+  assert.deepEqual(request.prices, { good: 40, zero: 0, negative: -5 });
+  assert.deepEqual(request.excludedPartIds, [
+    "pre",
+    "nullPrice",
+    "nanPrice",
+    "infinitePrice",
+    "stringPrice",
+  ]);
+});
+
+test("blackhawk mode without usable weapon data throws", () => {
+  const options = {
+    lockMode: "locked",
+    missingPricePolicy: "reject",
+  };
+
+  assert.throws(
+    () => toSolveRequest(makeContext({ mode: "blackhawk", data: null }), options),
+    /blackhawk mode requires context\.data/,
+  );
+  assert.throws(
+    () => toSolveRequest(makeContext({ mode: "blackhawk", data: {} }), options),
+    /blackhawk mode requires data\.blackhawkPrices/,
+  );
+});
+
+test("warfare mode keeps using current and system market prices", () => {
+  const context = makeContext({
+    mode: "warfare",
+    data: {
+      ...WEAPON_DATA,
+      blackhawkPrices: { a: 1, b: 2 },
+    },
+    pricesByObjectId: {
+      a: { currentPrice: 100.4, systemPrice: 50.6 },
+      b: { currentPrice: 80, systemPrice: 20 },
+    },
+  });
+
+  assert.deepEqual(
+    toSolveRequest(context, {
+      priceSource: "current",
+      lockMode: "locked",
+      missingPricePolicy: "reject",
+    }).prices,
+    { a: 100, b: 80 },
+  );
+  assert.deepEqual(
+    toSolveRequest(context, {
+      priceSource: "system",
+      lockMode: "locked",
+      missingPricePolicy: "reject",
+    }).prices,
+    { a: 51, b: 20 },
+  );
+});
+
 test("missing current prices are excluded by default and fallback uses system price", () => {
   const context = makeContext({
     excludedPartIds: ["pre"],

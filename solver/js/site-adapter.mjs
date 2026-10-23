@@ -257,34 +257,75 @@ function pathKeys(value) {
   return [];
 }
 
+function blackhawkPrices(ctx, excluded) {
+  const data = ctx.data;
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("blackhawk mode requires context.data");
+  }
+
+  const rawPrices = data.blackhawkPrices;
+  if (
+    rawPrices === null ||
+    typeof rawPrices !== "object" ||
+    Array.isArray(rawPrices)
+  ) {
+    throw new Error("blackhawk mode requires data.blackhawkPrices");
+  }
+
+  const parts = asObject(data.parts);
+  const prices = {};
+  for (const [partId, value] of Object.entries(rawPrices)) {
+    // `sn()` on the site only counts an absent key as missing; a stored 0 is a
+    // real price. Non-numbers never occur in the JSON payload but would break
+    // the integer handoff, so they are dropped instead.
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      excluded.add(partId);
+      continue;
+    }
+
+    const part = asObject(parts[partId]);
+    const priceId =
+      typeof part.officialObjectId === "string" && part.officialObjectId !== ""
+        ? part.officialObjectId
+        : partId;
+    prices[priceId] = Math.round(value);
+  }
+  return prices;
+}
+
 export function toSolveRequest(context, options) {
   const ctx = asObject(context);
   const opts = asObject(options);
 
-  const prices = {};
   const excluded = new Set(asArray(ctx.excludedPartIds));
-  const pricesByObjectId = asObject(ctx.pricesByObjectId);
+  let prices = {};
 
-  for (const [officialObjectId, rawPair] of Object.entries(pricesByObjectId)) {
-    const pair = asObject(rawPair);
-    const pickSystem = opts.priceSource === "system";
-    const value = pickSystem ? pair.systemPrice : pair.currentPrice;
+  if (ctx.mode === "blackhawk") {
+    prices = blackhawkPrices(ctx, excluded);
+  } else {
+    const pricesByObjectId = asObject(ctx.pricesByObjectId);
 
-    if (Number.isFinite(value) && value > 0) {
-      prices[officialObjectId] = Math.round(value);
-      continue;
+    for (const [officialObjectId, rawPair] of Object.entries(pricesByObjectId)) {
+      const pair = asObject(rawPair);
+      const pickSystem = opts.priceSource === "system";
+      const value = pickSystem ? pair.systemPrice : pair.currentPrice;
+
+      if (Number.isFinite(value) && value > 0) {
+        prices[officialObjectId] = Math.round(value);
+        continue;
+      }
+
+      if (
+        opts.missingPricePolicy === "fallback-system" &&
+        Number.isFinite(pair.systemPrice) &&
+        pair.systemPrice > 0
+      ) {
+        prices[officialObjectId] = Math.round(pair.systemPrice);
+        continue;
+      }
+
+      excluded.add(officialObjectId);
     }
-
-    if (
-      opts.missingPricePolicy === "fallback-system" &&
-      Number.isFinite(pair.systemPrice) &&
-      pair.systemPrice > 0
-    ) {
-      prices[officialObjectId] = Math.round(pair.systemPrice);
-      continue;
-    }
-
-    excluded.add(officialObjectId);
   }
 
   const currentSelections = asObject(ctx.currentSelections);
