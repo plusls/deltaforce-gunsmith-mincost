@@ -6381,6 +6381,39 @@ fn compute_relevance(
         }
     }
 
+    // A default preset part is not a slot candidate, but its slot still hosts
+    // it as an internal part, and keeping it can be what satisfies a
+    // constraint. Mark that slot relevant so the search can choose between
+    // keeping and removing the default.
+    if let Some(preset) = payload.default_presets.get(weapon_id) {
+        for node in &preset.nodes {
+            let Some(path) = &node.path_key else {
+                continue;
+            };
+            if !parts.contains(&node.part_id) {
+                continue;
+            }
+            let Some(slot_id) = crate::assembly::socket_id_from_path(path) else {
+                continue;
+            };
+            let host = match path.rfind("/part:") {
+                Some(idx) => {
+                    let encoded = &path[idx + 6..];
+                    match payload
+                        .parts
+                        .keys()
+                        .find(|id| crate::assembly::enc(id) == encoded)
+                    {
+                        Some(id) => id.clone(),
+                        None => continue,
+                    }
+                }
+                None => weapon_id.to_string(),
+            };
+            slots.entry(host).or_default().insert(slot_id);
+        }
+    }
+
     Relevance { slots }
 }
 
