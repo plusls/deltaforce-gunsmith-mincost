@@ -214,10 +214,9 @@ impl<'a> Assembler<'a> {
     }
 
     pub fn resolve(&self, selections: &Map<String, Option<String>>) -> Assembly {
-        let clean = self.clean_selections(selections);
-        let (mut active, claimed) = self.initial_active(&clean);
+        let (mut active, claimed) = self.initial_active(selections);
         let mut virtual_sel = self.select_virtual(&active, &claimed);
-        let mut tree = self.build_tree(&clean, &virtual_sel);
+        let mut tree = self.build_tree(selections, &virtual_sel);
 
         for _ in 0..64 {
             active = tree
@@ -237,35 +236,22 @@ impl<'a> Assembler<'a> {
                 return tree;
             }
             virtual_sel = next;
-            tree = self.build_tree(&clean, &virtual_sel);
+            tree = self.build_tree(selections, &virtual_sel);
         }
         tree
     }
 
-    /// Drops selections that name the default part. The site normalizes those
-    /// before building the tree as well (`Wi`/`qt` run ahead of `yn`/`Oe`), so
-    /// an explicit default is treated exactly like an unset slot: the part is
-    /// installed internally and stays out of the visible panel.
-    fn clean_selections(
-        &self,
-        selections: &Map<String, Option<String>>,
-    ) -> Map<String, Option<String>> {
-        let mut out = Map::default();
-        for (path, part) in selections {
-            let is_default = part
-                .as_deref()
-                .map(|id| {
-                    self.defaults
-                        .get(path)
-                        .map(|d| d.part_id == id)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if !is_default {
-                out.insert(path.clone(), part.clone());
-            }
-        }
-        out
+    /// True when the selection names the default part for `path`. The site
+    /// normalizes those before building the tree as well (`Wi`/`qt` run ahead
+    /// of `yn`/`Oe`), so an explicit default is treated exactly like an unset
+    /// slot: the part is installed internally and stays out of the visible
+    /// panel. Checking at the point of use avoids copying the whole selection
+    /// map on every resolve.
+    fn selection_is_default(&self, path: &str, part_id: &str) -> bool {
+        self.defaults
+            .get(path)
+            .map(|d| d.part_id == part_id)
+            .unwrap_or(false)
     }
 
     fn initial_active(
@@ -279,6 +265,9 @@ impl<'a> Assembler<'a> {
         }
         for (path, part_id) in selections {
             let Some(part_id) = part_id else { continue };
+            if self.selection_is_default(path, part_id) {
+                continue;
+            }
             let Some(part) = self.payload.parts.get(part_id) else {
                 continue;
             };
@@ -293,7 +282,12 @@ impl<'a> Assembler<'a> {
             }
         }
         for (path, node) in &self.defaults {
-            if selections.contains_key(path) {
+            let explicitly_set = selections.get(path).is_some_and(|part| {
+                !part
+                    .as_deref()
+                    .is_some_and(|id| self.selection_is_default(path, id))
+            });
+            if explicitly_set {
                 continue;
             }
             let Some(part) = self.payload.parts.get(&node.part_id) else {
@@ -460,9 +454,13 @@ impl<'a> Assembler<'a> {
             path_key.push_str(host_path);
             path_key.push_str(&meta.suffix);
             let candidates = &meta.candidates;
-            let has_selection = selections.contains_key(&path_key);
+            let raw_selection = selections.get(&path_key);
+            let default_like = raw_selection
+                .and_then(|v| v.as_deref())
+                .is_some_and(|id| self.selection_is_default(&path_key, id));
+            let has_selection = raw_selection.is_some() && !default_like;
             let selected_raw = if has_selection {
-                selections.get(&path_key).and_then(|v| v.clone())
+                raw_selection.and_then(|v| v.clone())
             } else {
                 None
             };

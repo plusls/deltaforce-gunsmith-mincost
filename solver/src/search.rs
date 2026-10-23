@@ -465,6 +465,8 @@ struct Offer {
     e_move_stability: f64,
     values: Vec<f64>,
     deviation: f64,
+    src_a: u32,
+    src_b: u32,
 }
 
 /// True when the offer sets every tuning in `assignment`. Key order is not
@@ -3431,6 +3433,8 @@ impl<'a> Solver<'a> {
             e_move_stability: 0.0,
             values: Vec::new(),
             deviation: 0.0,
+            src_a: 0,
+            src_b: 0,
         };
         let mut frontier: Vec<Offer> = vec![empty()];
         let mut keys: Vec<String> = Vec::new();
@@ -3468,13 +3472,11 @@ impl<'a> Solver<'a> {
                 keys.push(key_base.clone());
                 let default = tune.default_value;
                 let mut next = Vec::new();
-                for a in &group {
-                    for b in &offers {
+                for (a_idx, a) in group.iter().enumerate() {
+                    for (b_idx, b) in offers.iter().enumerate() {
                         if next.len() >= tune_next {
                             break;
                         }
-                        let mut values = a.values.clone();
-                        values.push(b.value);
                         next.push(Offer {
                             e_h: a.e_h + b.e_h,
                             e_v: a.e_v + b.e_v,
@@ -3484,8 +3486,10 @@ impl<'a> Solver<'a> {
                             e_move_runtime: a.e_move_runtime + b.e_move_runtime,
                             e_breath: a.e_breath + b.e_breath,
                             e_move_stability: a.e_move_stability + b.e_move_stability,
-                            values,
+                            values: Vec::new(),
                             deviation: a.deviation + (b.value - default).abs(),
+                            src_a: a_idx as u32,
+                            src_b: b_idx as u32,
                         });
                     }
                     if next.len() >= tune_next {
@@ -3504,19 +3508,23 @@ impl<'a> Solver<'a> {
                 capped |= cut.capped;
                 self.tune_incomplete |= cut.capped;
                 self.truncated |= cut.deadline;
+                let mut pruned = pruned;
+                for o in &mut pruned {
+                    let mut values = group[o.src_a as usize].values.clone();
+                    values.push(offers[o.src_b as usize].value);
+                    o.values = values;
+                }
                 group = pruned;
             }
             if group.len() == 1 && group[0].values.is_empty() {
                 continue;
             }
             let mut next = Vec::new();
-            for a in &frontier {
-                for b in &group {
+            for (a_idx, a) in frontier.iter().enumerate() {
+                for (b_idx, b) in group.iter().enumerate() {
                     if next.len() >= tune_next {
                         break;
                     }
-                    let mut values = a.values.clone();
-                    values.extend_from_slice(&b.values);
                     next.push(Offer {
                         e_h: a.e_h + b.e_h,
                         e_v: a.e_v + b.e_v,
@@ -3526,8 +3534,10 @@ impl<'a> Solver<'a> {
                         e_move_runtime: a.e_move_runtime + b.e_move_runtime,
                         e_breath: a.e_breath + b.e_breath,
                         e_move_stability: a.e_move_stability + b.e_move_stability,
-                        values,
+                        values: Vec::new(),
                         deviation: a.deviation + b.deviation,
+                        src_a: a_idx as u32,
+                        src_b: b_idx as u32,
                     });
                 }
                 if next.len() >= tune_next {
@@ -3546,6 +3556,12 @@ impl<'a> Solver<'a> {
             capped |= cut.capped;
             self.tune_incomplete |= cut.capped;
             self.truncated |= cut.deadline;
+            let mut pruned = pruned;
+            for o in &mut pruned {
+                let mut values = frontier[o.src_a as usize].values.clone();
+                values.extend_from_slice(&group[o.src_b as usize].values);
+                o.values = values;
+            }
             frontier = pruned;
         }
         // The reported tuning map zips keys with values, so a length mismatch
@@ -3760,6 +3776,8 @@ impl<'a> Solver<'a> {
                 e_move_stability: o.e_move_stability,
                 values: vec![o.value],
                 deviation: deviation(o.value),
+                src_a: 0,
+                src_b: 0,
             })
             .collect();
         self.offer_cache.insert(key, cached);
@@ -5684,6 +5702,55 @@ fn tune_cache_key(instances: &[TuningInstance<'_>]) -> String {
     key
 }
 
+fn norm8(dims: &TuneDims, o: &Offer) -> [f64; 8] {
+    let v = |dir: TuneDir, x: f64| match dir {
+        TuneDir::Higher | TuneDir::Equal => x,
+        TuneDir::Lower => -x,
+        TuneDir::Ignore => 0.0,
+    };
+    [
+        v(dims.recoil_h, o.e_h),
+        v(dims.recoil_v, o.e_v),
+        v(dims.recoil_k, o.e_k),
+        v(dims.open, o.e_open),
+        v(dims.move_effect, o.e_move),
+        v(dims.move_effect, o.e_move_runtime),
+        v(dims.breath, o.e_breath),
+        v(dims.move_stability, o.e_move_stability),
+    ]
+}
+
+fn neighbor_keys(key: [i64; 3], dim_count: usize, out: &mut [[i64; 3]; 27]) -> usize {
+    let mut n = 0;
+    match dim_count {
+        1 => {
+            for a in -1..=1 {
+                out[n] = [key[0] + a, 0, 0];
+                n += 1;
+            }
+        }
+        2 => {
+            for a in -1..=1 {
+                for b in -1..=1 {
+                    out[n] = [key[0] + a, key[1] + b, 0];
+                    n += 1;
+                }
+            }
+        }
+        _ => {
+            for a in -1..=1 {
+                for b in -1..=1 {
+                    for c in -1..=1 {
+                        out[n] = [key[0] + a, key[1] + b, key[2] + c];
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
 fn pareto_capped(
     mut offers: Vec<Offer>,
     dims: &TuneDims,
@@ -5724,7 +5791,41 @@ fn pareto_capped(
     // same metric) pins that channel. Without `Equal` channels every offer can
     // dominate every other, so keep the full scan.
     if equal_dims.is_empty() || equal_dims.len() > 3 {
+        const BLOCK: usize = 32;
+        const SUPER: usize = 32;
         let mut out: Vec<Offer> = Vec::new();
+        let mut maxs: Vec<[f64; 8]> = Vec::new();
+        let mut mins1: Vec<[f64; 8]> = Vec::new();
+        let mut mins2: Vec<[f64; 8]> = Vec::new();
+        let rebuild = |out: &[Offer],
+                       maxs: &mut Vec<[f64; 8]>,
+                       mins1: &mut Vec<[f64; 8]>,
+                       mins2: &mut Vec<[f64; 8]>| {
+            maxs.clear();
+            mins1.clear();
+            mins2.clear();
+            for chunk in out.chunks(BLOCK) {
+                let mut hi = [f64::NEG_INFINITY; 8];
+                let mut lo = [f64::INFINITY; 8];
+                for p in chunk {
+                    let pn = norm8(dims, p);
+                    for d in 0..8 {
+                        hi[d] = hi[d].max(pn[d]);
+                        lo[d] = lo[d].min(pn[d]);
+                    }
+                }
+                maxs.push(hi);
+                mins1.push(lo);
+                if mins1.len() % SUPER == 1 {
+                    mins2.push(lo);
+                } else {
+                    let si = mins2.len() - 1;
+                    for d in 0..8 {
+                        mins2[si][d] = mins2[si][d].min(lo[d]);
+                    }
+                }
+            }
+        };
         for (idx, o) in offers.into_iter().enumerate() {
             if out.len() >= limit {
                 trim.capped = true;
@@ -5734,10 +5835,75 @@ fn pareto_capped(
                 trim.deadline = true;
                 break;
             }
-            if out.iter().any(|p| offer_dominates(p, &o, dims)) {
+            let on = norm8(dims, &o);
+            let mut dominated = false;
+            for (bi, bmax) in maxs.iter().enumerate() {
+                if !(0..8).all(|d| bmax[d] >= on[d] - 1e-9) {
+                    continue;
+                }
+                let start = bi * BLOCK;
+                let end = (start + BLOCK).min(out.len());
+                if out[start..end].iter().any(|p| offer_dominates(p, &o, dims)) {
+                    dominated = true;
+                    break;
+                }
+            }
+            if dominated {
                 continue;
             }
-            out.retain(|p| !offer_dominates(&o, p, dims));
+            let mut removed = false;
+            let mut dead: Vec<bool> = Vec::new();
+            for (si, bmin) in mins2.iter().enumerate() {
+                if !(0..8).all(|d| bmin[d] <= on[d] + 1e-9) {
+                    continue;
+                }
+                let bstart = si * SUPER;
+                let bend = ((si + 1) * SUPER).min(mins1.len());
+                for bi in bstart..bend {
+                    if !(0..8).all(|d| mins1[bi][d] <= on[d] + 1e-9) {
+                        continue;
+                    }
+                    let start = bi * BLOCK;
+                    let end = (start + BLOCK).min(out.len());
+                    if dead.len() < end {
+                        dead.resize(end, false);
+                    }
+                    for i in start..end {
+                        if !dead[i] && offer_dominates(&o, &out[i], dims) {
+                            dead[i] = true;
+                            removed = true;
+                        }
+                    }
+                }
+            }
+            if removed {
+                let mut it = dead.into_iter();
+                out.retain(|_| !it.next().unwrap_or(false));
+                rebuild(&out, &mut maxs, &mut mins1, &mut mins2);
+            }
+            let idx_new = out.len();
+            let bi = idx_new / BLOCK;
+            if bi == maxs.len() {
+                maxs.push(on);
+                mins1.push(on);
+                if mins1.len() % SUPER == 1 {
+                    mins2.push(on);
+                } else {
+                    let si = mins2.len() - 1;
+                    for d in 0..8 {
+                        mins2[si][d] = mins2[si][d].min(on[d]);
+                    }
+                }
+            } else {
+                for d in 0..8 {
+                    maxs[bi][d] = maxs[bi][d].max(on[d]);
+                    mins1[bi][d] = mins1[bi][d].min(on[d]);
+                }
+                let si = bi / SUPER;
+                for d in 0..8 {
+                    mins2[si][d] = mins2[si][d].min(on[d]);
+                }
+            }
             out.push(o);
         }
         return (out, trim);
@@ -5746,31 +5912,12 @@ fn pareto_capped(
     // channel values land in the same or an adjacent bucket; probing the 3^k
     // neighbors never misses a dominator.
     const BUCKET_SCALE: f64 = 1e6;
-    let bucket_key = |o: &Offer| -> Vec<i64> {
-        equal_dims
-            .iter()
-            .map(|channel| (channel(o) * BUCKET_SCALE).round() as i64)
-            .collect()
-    };
-    let neighbor_keys = |key: &[i64]| -> Vec<Vec<i64>> {
-        let mut keys = vec![Vec::with_capacity(key.len())];
-        for &value in key {
-            let mut next = Vec::with_capacity(keys.len() * 3);
-            for base in &keys {
-                for delta in -1..=1 {
-                    let mut candidate = base.clone();
-                    candidate.push(value + delta);
-                    next.push(candidate);
-                }
-            }
-            keys = next;
-        }
-        keys
-    };
-    let mut buckets: FxHashMap<Vec<i64>, Vec<usize>> = FxHashMap::default();
+    let dim_count = equal_dims.len();
+    let mut buckets: FxHashMap<[i64; 3], Vec<usize>> = FxHashMap::default();
     let mut out: Vec<Offer> = Vec::new();
     let mut alive: Vec<bool> = Vec::new();
     let mut kept = 0usize;
+    let mut neighbors = [[0i64; 3]; 27];
     for (idx, o) in offers.into_iter().enumerate() {
         if kept >= limit {
             trim.capped = true;
@@ -5780,10 +5927,13 @@ fn pareto_capped(
             trim.deadline = true;
             break;
         }
-        let key = bucket_key(&o);
-        let neighbors = neighbor_keys(&key);
+        let mut key = [0i64; 3];
+        for (d, channel) in equal_dims.iter().enumerate() {
+            key[d] = (channel(&o) * BUCKET_SCALE).round() as i64;
+        }
+        let neighbor_count = neighbor_keys(key, dim_count, &mut neighbors);
         let mut dominated = false;
-        for neighbor in &neighbors {
+        for neighbor in &neighbors[..neighbor_count] {
             let Some(list) = buckets.get(neighbor) else {
                 continue;
             };
@@ -5802,7 +5952,7 @@ fn pareto_capped(
         out.push(o);
         alive.push(true);
         kept += 1;
-        for neighbor in &neighbors {
+        for neighbor in &neighbors[..neighbor_count] {
             let Some(list) = buckets.get_mut(neighbor) else {
                 continue;
             };
@@ -7672,6 +7822,8 @@ mod tests {
             e_move_stability: 0.0,
             values: Vec::new(),
             deviation: 0.0,
+            src_a: 0,
+            src_b: 0,
         }
     }
 
