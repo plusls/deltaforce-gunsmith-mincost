@@ -1509,7 +1509,15 @@ pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
                 let mut v = tune.min_value;
                 while v <= tune.max_value + step * 0.5 {
                     values.push(v);
-                    v += step;
+                    let next = v + step;
+                    if !next.is_finite() || next == v {
+                        // The step is absorbed by floating point at this
+                        // magnitude, so the grid cannot be enumerated and must
+                        // not be reported as complete.
+                        truncated = true;
+                        break;
+                    }
+                    v = next;
                 }
             } else {
                 truncated = true;
@@ -1951,6 +1959,28 @@ mod tests {
         assert_eq!(zero, 0.0);
         assert!(zero.is_sign_negative());
         assert_eq!(panel_10001(1.0, Some(-1.5)), Some(-1.0));
+    }
+
+    #[test]
+    fn absorbed_step_does_not_loop_forever() {
+        // At 1e16 the ulp is 2, so v + 1 == v. The enumeration must stop and
+        // report an incomplete grid instead of pushing the same value forever.
+        let tune = TuningOption {
+            min_value: 1e16,
+            max_value: 1e16 + 100.0,
+            default_value: 1e16,
+            step_value: 1.0,
+            ..Default::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(tune_offer_values(&tune));
+        });
+        let (values, truncated) = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("tune_offer_values must terminate when v + step == v");
+        assert!(truncated, "an absorbed step cannot claim a complete grid");
+        assert!(values.len() < 10, "unexpected values: {values:?}");
     }
 
     #[test]
