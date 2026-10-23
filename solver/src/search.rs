@@ -332,6 +332,9 @@ pub struct Solver<'a> {
     tune_cap: usize,
     tune_next: usize,
     tune_incomplete: bool,
+    /// A tuning grid was sampled instead of enumerated. This survives the
+    /// per-pass reset so the final result can never claim optimality.
+    grid_truncated: bool,
     control_curve: Option<Curve>,
     gunkick_curve: Option<Curve>,
     control_min: Option<f64>,
@@ -476,6 +479,9 @@ struct CachedFrontier {
     /// of once per offer.
     keys: Rc<Vec<String>>,
     capped: bool,
+    /// The frontier contains sampled tuning values. Restored on a cache hit so
+    /// a later pass cannot look complete.
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1030,6 +1036,7 @@ impl<'a> Solver<'a> {
             tune_cap: TUNE_CAP,
             tune_next: TUNE_NEXT_LIMIT,
             tune_incomplete: false,
+            grid_truncated: false,
             control_curve,
             gunkick_curve,
             control_min,
@@ -1252,11 +1259,13 @@ impl<'a> Solver<'a> {
             truncated = self.truncated;
             incomplete = self.heuristic_incomplete || self.aborted_pass;
         }
-        let optimal = !truncated && !incomplete && self.best.is_some();
+        let optimal = !truncated && !incomplete && !self.grid_truncated && self.best.is_some();
         let message = if truncated {
             "budget exhausted; result is the best found so far".to_string()
         } else if incomplete {
             "search stopped early by internal limits; result is the best found so far".to_string()
+        } else if self.grid_truncated {
+            "tuning grid was sampled; result is the best found so far".to_string()
         } else if self.best.is_some() {
             "search complete".to_string()
         } else {
@@ -3289,9 +3298,15 @@ impl<'a> Solver<'a> {
         let cache_key = tune_cache_key(instances);
         let (frontier, keys, capped) =
             if let Some(cached) = self.tune_frontier_cache.get(&cache_key) {
+                if cached.truncated {
+                    self.heuristic_incomplete = true;
+                    self.tune_incomplete = true;
+                }
                 (cached.offers.clone(), cached.keys.clone(), cached.capped)
             } else {
+                let was_truncated = self.tune_incomplete;
                 let (built, keys, capped) = self.build_tune_frontier(instances)?;
+                let sampled = self.tune_incomplete && !was_truncated;
                 let built = Rc::new(built);
                 let keys = Rc::new(keys);
                 if self.tune_frontier_cache.len() >= TUNE_FRONTIER_CACHE_LIMIT {
@@ -3303,6 +3318,7 @@ impl<'a> Solver<'a> {
                         offers: built.clone(),
                         keys: keys.clone(),
                         capped,
+                        truncated: sampled,
                     },
                 );
                 (built, keys, capped)
@@ -3610,6 +3626,7 @@ impl<'a> Solver<'a> {
         if truncated {
             self.heuristic_incomplete = true;
             self.tune_incomplete = true;
+            self.grid_truncated = true;
         }
         let deviation = |v: f64| (v - tune.default_value).abs();
         let mut offers: Vec<LocalOffer> = values
