@@ -1471,7 +1471,7 @@ pub fn tune_channels(tune: &TuningOption, value: f64) -> TuneChannels {
                     out.k += v;
                 }
             }
-            "%瞄准时移动速度" => {
+            name if name.contains("移动速度") => {
                 out.move_speed += v;
                 if runtime_target_allowed(tune, "GMovement_ADSSpeed") {
                     out.move_runtime += v / 100.0;
@@ -2048,6 +2048,25 @@ mod tests {
         };
         let (_, truncated) = tune_offer_values(&tune);
         assert!(truncated);
+    }
+
+    #[test]
+    fn move_speed_channel_matches_any_move_speed_name() {
+        // The site matches the effect name by substring, and the evaluator
+        // already sums "移动速度"; only this channel used an exact name.
+        for name in ["%瞄准时移动速度", "%瞄准移动速度"] {
+            let tune = TuningOption {
+                display_effects: vec![TuningEffect {
+                    attribute_name_snapshot: name.to_string(),
+                    curve_points: vec![key(0.0, 0.0), key(20.0, 20.0)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let channels = tune_channels(&tune, 7.0);
+            assert_eq!(channels.move_speed, 7.0, "name {name}");
+            assert!((channels.move_runtime - 0.07).abs() < 1e-12, "name {name}");
+        }
     }
 
     #[test]
