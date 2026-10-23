@@ -2000,7 +2000,7 @@ impl<'a> Solver<'a> {
         let mut base_panel_pro: Option<Rc<LaserPro>> = None;
         for (part, slot_name, visible) in &base_parts {
             let is_laser = crate::metrics::has_laser(part);
-            let m = exact_part_metric(
+            let (m, cap_cut) = exact_part_metric(
                 part,
                 self.evaluator.weapon_id,
                 slot_name,
@@ -2010,7 +2010,11 @@ impl<'a> Solver<'a> {
                 false,
                 *visible,
                 &self.panel_attrs,
+                self.deadline_at,
             );
+            if cap_cut {
+                self.truncated = true;
+            }
             base.add(&m);
             if is_laser && self.options.laser_enabled {
                 let score = crate::metrics::laser_pro_score(part, mode);
@@ -2555,7 +2559,7 @@ impl<'a> Solver<'a> {
         let metric = if let Some(m) = self.dp_metric_cache.get(&key) {
             m.clone()
         } else {
-            let m = exact_part_metric(
+            let (m, cap_cut) = exact_part_metric(
                 part,
                 self.evaluator.weapon_id,
                 slot_name,
@@ -2565,7 +2569,11 @@ impl<'a> Solver<'a> {
                 false,
                 visible_choice,
                 &self.panel_attrs,
+                self.deadline_at,
             );
+            if cap_cut {
+                self.truncated = true;
+            }
             self.dp_metric_cache.insert(key, m.clone());
             m
         };
@@ -3722,17 +3730,13 @@ impl<'a> Solver<'a> {
                 )
         });
         let dims = self.tune_dims;
-        let mut pruned: Vec<LocalOffer> = Vec::new();
-        if self.negative_recoil_max {
-            pruned = offers;
+        let (mut pruned, local_cut) = if self.negative_recoil_max {
+            (offers, false)
         } else {
-            for o in offers {
-                if pruned.iter().any(|p| local_offer_dominates(p, &o, &dims)) {
-                    continue;
-                }
-                pruned.retain(|p| !local_offer_dominates(&o, p, &dims));
-                pruned.push(o);
-            }
+            prune_local_offers(offers, &dims, self.deadline_at)
+        };
+        if local_cut {
+            self.truncated = true;
         }
         pruned.sort_by(|a, b| {
             b.e_h
@@ -3879,31 +3883,39 @@ fn cap_trim(mut pts: Vec<CapPoint>, want_max: bool) -> Vec<CapPoint> {
     pts
 }
 
-/// Sorted Pareto extremes of a reachable set.
-fn cap_extremes(pts: Vec<CapPoint>, want_max: bool) -> Vec<CapPoint> {
+/// Sorted Pareto extremes of a reachable set. The pairwise scan is quadratic,
+/// so it polls the deadline and reports whether it had to stop early.
+fn cap_extremes(
+    pts: Vec<CapPoint>,
+    want_max: bool,
+    deadline_at: Option<u64>,
+) -> (Vec<CapPoint>, bool) {
     if pts.len() <= 1 {
-        return pts;
+        return (pts, false);
     }
     let pts = cap_sort_dedup(pts);
     let mut out: Vec<CapPoint> = Vec::new();
-    for i in 0..pts.len() {
+    for (i, point) in pts.iter().enumerate() {
+        if i & 255 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
+            return (out, true);
+        }
         let mut keep = true;
-        for j in 0..pts.len() {
+        for (j, other) in pts.iter().enumerate() {
             if i == j {
                 continue;
             }
-            let ge = cap_ge(&pts[j], &pts[i]);
-            let le = cap_le(&pts[j], &pts[i]);
+            let ge = cap_ge(other, point);
+            let le = cap_le(other, point);
             if (want_max && ge && !le) || (!want_max && le && !ge) {
                 keep = false;
                 break;
             }
         }
         if keep {
-            out.push(pts[i]);
+            out.push(*point);
         }
     }
-    out
+    (out, false)
 }
 
 /// Fold a sorted reachable set into at most `CAP_REQ_LIMIT` corners whose
@@ -3938,19 +3950,39 @@ fn cap_corners(pts: &[CapPoint], want_max: bool) -> Vec<CapPoint> {
     out
 }
 
-fn cap_front(points: Vec<CapPoint>) -> CapFront {
+fn cap_front(points: Vec<CapPoint>, deadline_at: Option<u64>) -> (CapFront, bool) {
     if points.is_empty() {
-        return CapFront::default();
+        return (CapFront::default(), false);
     }
     let pts = cap_sort_dedup(points);
-    let max = cap_extremes(pts.clone(), true);
-    let min = cap_extremes(pts, false);
-    CapFront {
-        max_req: cap_corners(&max, true),
-        min_req: cap_corners(&min, false),
-        max: cap_trim(max, true),
-        min: cap_trim(min, false),
+    let (max, max_cut) = cap_extremes(pts.clone(), true, deadline_at);
+    let (min, min_cut) = cap_extremes(pts.clone(), false, deadline_at);
+    if max_cut || min_cut {
+        // The quadratic scan ran out of time. Requirement corners are built
+        // from the full reachable set so they still cover every vector; the
+        // dominator side only needs reachable points, so the sorted extremes
+        // are a sound (if weaker) stand-in for the untrimmed Pareto set.
+        let max = cap_trim(pts.clone(), true);
+        let min = cap_trim(pts.clone(), false);
+        return (
+            CapFront {
+                max,
+                max_req: cap_corners(&pts, true),
+                min,
+                min_req: cap_corners(&pts, false),
+            },
+            true,
+        );
     }
+    (
+        CapFront {
+            max_req: cap_corners(&max, true),
+            min_req: cap_corners(&min, false),
+            max: cap_trim(max, true),
+            min: cap_trim(min, false),
+        },
+        false,
+    )
 }
 
 /// Sums of the operands' candidate vectors. The extreme points of a Minkowski
@@ -4348,7 +4380,8 @@ fn exact_part_metric(
     include_laser_pro: bool,
     include_panel: bool,
     panel_attrs: &[String],
-) -> ExactPart {
+    deadline_at: Option<u64>,
+) -> (ExactPart, bool) {
     let mut m = ExactPart::neutral_panel(panel_attrs.len());
     if include_panel && !panel_attrs.is_empty() {
         for modif in part.display_mods_for(weapon_id, mode) {
@@ -4435,11 +4468,12 @@ fn exact_part_metric(
         }
     }
     if !crate::metrics::tuning_available(slot_name, part) {
-        return m;
+        return (m, false);
     }
     let mut front = CapFront::default();
     let mut has_front = false;
     let mut tuned = false;
+    let mut truncated = false;
     for tune in &part.tuning_options {
         let mut max_h = f64::NEG_INFINITY;
         let mut max_v = f64::NEG_INFINITY;
@@ -4466,7 +4500,8 @@ fn exact_part_metric(
             }
         }
         if !points.is_empty() {
-            let option_front = cap_front(points);
+            let (option_front, cut) = cap_front(points, deadline_at);
+            truncated |= cut;
             front = if has_front {
                 cap_combine(&front, &option_front)
             } else {
@@ -4503,7 +4538,7 @@ fn exact_part_metric(
     if tuned {
         m.e_front = Some(Rc::new(front));
     }
-    m
+    (m, truncated)
 }
 
 /// Additive `pro` modifiers of a laser part, with every other field neutral.
@@ -5755,6 +5790,34 @@ fn local_offer_dominates(a: &LocalOffer, b: &LocalOffer, dims: &TuneDims) -> boo
         && channel_ok(a.e_move_runtime, b.e_move_runtime, dims.move_effect)
         && channel_ok(a.e_breath, b.e_breath, dims.breath)
         && channel_ok(a.e_move_stability, b.e_move_stability, dims.move_stability)
+}
+
+/// Pareto pruning of one part's tuning offers. The dominance scan is
+/// quadratic, so it polls the deadline; once it expires the remaining offers
+/// are kept without pruning, which only costs work downstream and never drops
+/// a reachable value.
+fn prune_local_offers(
+    offers: Vec<LocalOffer>,
+    dims: &TuneDims,
+    deadline_at: Option<u64>,
+) -> (Vec<LocalOffer>, bool) {
+    let mut pruned: Vec<LocalOffer> = Vec::new();
+    let mut cut = false;
+    for (idx, offer) in offers.into_iter().enumerate() {
+        if !cut && idx & 1023 == 0 && deadline_at.is_some_and(|d| now_ms() >= d) {
+            cut = true;
+        }
+        if cut {
+            pruned.push(offer);
+            continue;
+        }
+        if pruned.iter().any(|p| local_offer_dominates(p, &offer, dims)) {
+            continue;
+        }
+        pruned.retain(|p| !local_offer_dominates(&offer, p, dims));
+        pruned.push(offer);
+    }
+    (pruned, cut)
 }
 
 /// Inverts a monotone metric exactly: finds the tuning total (in percent)
@@ -7156,7 +7219,9 @@ mod tests {
                 false,
                 true,
                 &panel_attrs,
-            ),
+                None,
+            )
+            .0,
             laser_pro: Some(Rc::new(LaserPro {
                 score: crate::metrics::laser_pro_score(&part, mode),
                 metric: exact_laser_pro(&part, "w1", mode, &panel_attrs),
@@ -7193,7 +7258,9 @@ mod tests {
             true,
             true,
             &panel_attrs,
-        );
+            None,
+        )
+        .0;
         once.add(&exact_part_metric(
             &weak_part,
             "w1",
@@ -7204,7 +7271,9 @@ mod tests {
             false,
             true,
             &panel_attrs,
-        ));
+            None,
+        )
+        .0);
 
         let forward = dp_advance(&dp_advance(&start, &strong, 100), &weak, 300);
         let reverse = dp_advance(&dp_advance(&start, &weak, 200), &strong, 300);
@@ -7231,7 +7300,9 @@ mod tests {
             true,
             true,
             &panel_attrs,
-        );
+            None,
+        )
+        .0;
         expected.add(&exact_part_metric(
             &weak_part,
             "w1",
@@ -7242,7 +7313,9 @@ mod tests {
             false,
             true,
             &panel_attrs,
-        ));
+            None,
+        )
+        .0);
         expected.add(&exact_part_metric(
             &strong_part,
             "w1",
@@ -7253,7 +7326,9 @@ mod tests {
             false,
             true,
             &panel_attrs,
-        ));
+            None,
+        )
+        .0);
         assert!(metric_eq(&replaced.metric, &expected));
         assert!((replaced.metric.panel[0] - 20.0).abs() < 1e-9);
         assert!((replaced.metric.hs - 22.0).abs() < 1e-9);
@@ -7321,10 +7396,10 @@ mod tests {
         }
         let mut tuned_a = ExactPart::neutral();
         tuned_a.eh = 1.0;
-        tuned_a.e_front = Some(Rc::new(cap_front(vec![[1.0, 0.0, 0.0, 0.0]])));
+        tuned_a.e_front = Some(Rc::new(cap_front(vec![[1.0, 0.0, 0.0, 0.0]], None).0));
         let mut tuned_b = ExactPart::neutral();
         tuned_b.eh = 1.0;
-        tuned_b.e_front = Some(Rc::new(cap_front(vec![[0.0, 0.0, 0.0, 1.0]])));
+        tuned_b.e_front = Some(Rc::new(cap_front(vec![[0.0, 0.0, 0.0, 1.0]], None).0));
         assert_ne!(metric_hash(&tuned_a), metric_hash(&tuned_b));
         assert!(!metric_eq(&tuned_a, &tuned_b));
         let mut tuned_c = ExactPart::neutral();
@@ -7332,6 +7407,70 @@ mod tests {
         tuned_c.e_front = tuned_a.e_front.clone();
         assert_eq!(metric_hash(&tuned_a), metric_hash(&tuned_c));
         assert!(metric_eq(&tuned_a, &tuned_c));
+    }
+
+    #[test]
+    fn cap_front_interrupts_on_the_deadline_and_keeps_sound_bounds() {
+        // h rises while k falls, so every point is extreme in some direction.
+        let pts: Vec<CapPoint> = (0..4096)
+            .map(|i| [i as f64, 0.0, 0.0, (4095 - i) as f64])
+            .collect();
+        let (front, truncated) = cap_front(pts.clone(), Some(now_ms().saturating_sub(1)));
+        assert!(truncated);
+        for p in &pts {
+            assert!(front
+                .max_req
+                .iter()
+                .any(|c| (0..4).all(|d| c[d] >= p[d] - 1e-9)));
+            assert!(front
+                .min_req
+                .iter()
+                .any(|c| (0..4).all(|d| c[d] <= p[d] + 1e-9)));
+        }
+        assert!(front.max.len() <= CAP_COVER_LIMIT);
+        assert!(front.min.len() <= CAP_COVER_LIMIT);
+    }
+
+    #[test]
+    fn cap_front_without_a_deadline_returns_the_exact_extremes() {
+        let pts = vec![
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+        ];
+        let (front, truncated) = cap_front(pts, None);
+        assert!(!truncated);
+        assert_eq!(front.max.len(), 3);
+        assert_eq!(front.min.len(), 3);
+    }
+
+    fn local_offer(h: f64, k: f64) -> LocalOffer {
+        LocalOffer {
+            e_h: h,
+            e_v: 0.0,
+            e_k: k,
+            e_open: 0.0,
+            e_move: 0.0,
+            e_move_runtime: 0.0,
+            e_breath: 0.0,
+            e_move_stability: 0.0,
+            value: h,
+        }
+    }
+
+    #[test]
+    fn local_offer_pruning_stops_at_the_deadline_without_dropping_offers() {
+        // Cheap offers come first so an unpruned prefix is empty at the cut.
+        let offers: Vec<LocalOffer> = (0..4096)
+            .map(|i| local_offer(1.0, i as f64))
+            .collect();
+        let dims = TuneDims::from_constraints(&[]);
+        let (pruned, cut) = prune_local_offers(offers.clone(), &dims, Some(now_ms().saturating_sub(1)));
+        assert!(cut);
+        assert_eq!(pruned.len(), offers.len());
+        let (kept, no_cut) = prune_local_offers(offers, &dims, None);
+        assert!(!no_cut);
+        assert!(kept.len() < 4096);
     }
 
     #[test]
