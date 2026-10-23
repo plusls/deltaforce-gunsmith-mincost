@@ -34,3 +34,11 @@ jobs:
 
       - name: Build userscript
         run: node userscript/build.mjs
+
+      - name: Upload userscript
+        uses: actions/upload-artifact@v4
+        with:
+          name: gunsmith-mincost-user-js
+          path: userscript/dist/gunsmith-mincost.user.js
+          if-no-files-found: error
+          retention-days: 30
