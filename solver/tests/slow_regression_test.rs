@@ -91,3 +91,29 @@ fn ak12_aim_recoil_regression() {
         Some(5_000),
     );
 }
+
+#[test]
+#[ignore = "slow regression; run with --release -- --ignored"]
+fn live_sprint_dp_regression() {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let path = format!(
+        "{}/tests/fixtures/live_sprint_dp.payload.json.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut decoder = GzDecoder::new(std::fs::File::open(path).unwrap());
+    let mut payload = String::new();
+    decoder.read_to_string(&mut payload).unwrap();
+    let request = std::fs::read(format!(
+        "{}/tests/fixtures/live_sprint_dp.request.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+
+    let out = gunsmith_mincost::solve_slices(payload.as_bytes(), &request).unwrap();
+    let out: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["optimal"], true, "{out}");
+    assert_eq!(out["truncated"], false, "{out}");
+    assert_eq!(out["best"]["total_price"], 153185, "{out}");
+}

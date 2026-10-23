@@ -401,6 +401,7 @@ struct DpDims {
     hs: bool,
     adsm: bool,
     eopen: bool,
+    sprint: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +445,10 @@ impl DpDims {
                 "handling-aim-time" => {
                     dims.hs = true;
                     dims.adsm = true;
+                    dims.eopen = true;
+                }
+                "handling-sprint-fire-delay" => {
+                    dims.sprint = true;
                     dims.eopen = true;
                 }
                 _ => {}
@@ -1023,6 +1028,8 @@ impl<'a> Solver<'a> {
                 c.min.is_none()
             } else if c.id == "handling-aim-time" {
                 !(c.min.is_some() && c.max.is_some())
+            } else if c.id == "handling-sprint-fire-delay" {
+                c.min.is_none() && sprint_curve_monotone(payload, weapon_id, &options.mode)
             } else {
                 false
             }
@@ -1843,6 +1850,7 @@ impl<'a> Solver<'a> {
     fn dp_level_may_satisfy(&self, st: &DpState, sb: &DpSuffixBound) -> bool {
         let mut has_recoil = false;
         let mut aim_max: Option<f64> = None;
+        let mut sprint_max: Option<f64> = None;
         for c in &self.search_constraints {
             let Some(max) = c.max else { continue };
             match c.id.as_str() {
@@ -1852,6 +1860,7 @@ impl<'a> Solver<'a> {
                 | "recoil-single-vertical"
                 | "recoil-fire-stability" => has_recoil = true,
                 "handling-aim-time" if c.min.is_none() => aim_max = Some(max),
+                "handling-sprint-fire-delay" if c.min.is_none() => sprint_max = Some(max),
                 _ => {}
             }
         }
@@ -1925,6 +1934,20 @@ impl<'a> Solver<'a> {
                 st.metric.adsm + sb.adsm_min,
                 open,
             ) {
+                if v > max + 1e-9 {
+                    return false;
+                }
+            }
+        }
+        if let Some(max) = sprint_max {
+            let open = sprint_open_for_min(
+                st.metric.eopen_min + sb.eopen_min,
+                st.metric.eopen + sb.eopen_max,
+            );
+            if let Some(v) = self
+                .evaluator
+                .sprint_fire_delay(st.metric.hs + sb.hs_max, open)
+            {
                 if v > max + 1e-9 {
                     return false;
                 }
@@ -2176,11 +2199,12 @@ impl<'a> Solver<'a> {
             .iter()
             .find(|c| c.id == "handling-aim-time" && c.min.is_none())
             .and_then(|c| c.max);
+        let sprint_max = sprint_fire_delay_max(&self.options.constraints);
         let mut suffix_hs_max = vec![0.0; options_per_slot.len() + 1];
         let mut suffix_adsm_min = vec![0.0; options_per_slot.len() + 1];
         let mut suffix_open_max = vec![0.0; options_per_slot.len() + 1];
         let mut suffix_open_min = vec![0.0; options_per_slot.len() + 1];
-        if aim_max.is_some() {
+        if aim_max.is_some() || sprint_max.is_some() {
             for (idx, opts) in options_per_slot.iter().enumerate().rev() {
                 let mut hs_max = f64::NEG_INFINITY;
                 let mut adsm_min = f64::INFINITY;
@@ -2261,6 +2285,20 @@ impl<'a> Solver<'a> {
                             }
                         }
                     }
+                    if let Some(max) = sprint_max {
+                        let open = sprint_open_for_min(
+                            metric.eopen_min + suffix_open_min[slot_idx + 1],
+                            metric.eopen + suffix_open_max[slot_idx + 1],
+                        );
+                        if let Some(best) = self
+                            .evaluator
+                            .sprint_fire_delay(metric.hs + suffix_hs_max[slot_idx + 1], open)
+                        {
+                            if best > max + 1e-9 {
+                                continue;
+                            }
+                        }
+                    }
                     let choices = Some(Rc::new(ChoiceNode {
                         choice: opt.choice.clone(),
                         prev: st.choices.clone(),
@@ -2330,6 +2368,7 @@ impl<'a> Solver<'a> {
         }
         let (h_max, v_max, k_max) = recoil_maxima(&self.search_constraints);
         let aim_max = aim_time_max(&self.search_constraints);
+        let sprint_max = sprint_fire_delay_max(&self.search_constraints);
         for st in states {
             if self.budget_exceeded() {
                 return;
@@ -2355,6 +2394,14 @@ impl<'a> Solver<'a> {
                             prune_open(st.metric.eopen_min, st.metric.eopen),
                         )
                 {
+                    if best > max + 1e-9 {
+                        continue;
+                    }
+                }
+            }
+            if let Some(max) = sprint_max {
+                let open = sprint_open_for_min(st.metric.eopen_min, st.metric.eopen);
+                if let Some(best) = self.evaluator.sprint_fire_delay(st.metric.hs, open) {
                     if best > max + 1e-9 {
                         continue;
                     }
@@ -2408,7 +2455,13 @@ impl<'a> Solver<'a> {
         }
         let (h_max, v_max, k_max) = recoil_maxima(&self.search_constraints);
         let aim_max = aim_time_max(&self.search_constraints);
-        if h_max.is_none() && v_max.is_none() && k_max.is_none() && aim_max.is_none() {
+        let sprint_max = sprint_fire_delay_max(&self.search_constraints);
+        if h_max.is_none()
+            && v_max.is_none()
+            && k_max.is_none()
+            && aim_max.is_none()
+            && sprint_max.is_none()
+        {
             return false;
         }
         let mut beam: Vec<DpState> = vec![DpState {
@@ -2440,6 +2493,7 @@ impl<'a> Solver<'a> {
                         v_max,
                         k_max,
                         aim_max,
+                        sprint_max,
                         self.control_curve.as_ref(),
                         self.gunkick_curve.as_ref(),
                         self.gunkick0,
@@ -2491,6 +2545,7 @@ impl<'a> Solver<'a> {
                     v_max,
                     k_max,
                     aim_max,
+                    sprint_max,
                     self.control_curve.as_ref(),
                     self.gunkick_curve.as_ref(),
                     self.gunkick0,
@@ -4816,7 +4871,7 @@ fn dp_dominates(
     if dims.ek {
         higher_mask |= 4;
     }
-    if aim_higher {
+    if aim_higher || dims.sprint {
         higher_mask |= 8;
     }
     let lower_mask = if aim_lower { 8u8 } else { 0 };
@@ -4873,6 +4928,9 @@ fn dp_dominates(
             }
             AimDir::Ignore => {}
         }
+    }
+    if dims.sprint && x.hs < y.hs - 1e-9 {
+        return false;
     }
     if x.panel.len() != y.panel.len() {
         return false;
@@ -5636,6 +5694,55 @@ fn curve_is_nonincreasing(curve: &Curve) -> bool {
     true
 }
 
+/// Whether the sprint delay is nonincreasing in the handling addend and the
+/// open speed, so the DP can bound it by substituting the largest reachable
+/// values. A weapon without the curve uses a closed form that is monotone.
+fn sprint_curve_monotone(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> bool {
+    let Some(profile) = payload.numeric_profiles.get(weapon_id) else {
+        return true;
+    };
+    let curves = &profile.linked_tables.handling_curves;
+    let curve = if mode == "warfare" {
+        curves
+            .sprint_to_fire_mp
+            .as_ref()
+            .or(curves.sprint_to_fire.as_ref())
+    } else {
+        curves.sprint_to_fire.as_ref()
+    };
+    let Some(curve) = curve else {
+        return true;
+    };
+    // The closed form uses a scale of exactly 1 at a zero handling delta, so a
+    // curve value that differs there makes the composed function discontinuous.
+    if curve
+        .eval(0.0)
+        .map(|v| (v - 1.0).abs() > 1e-9)
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    curve_is_nonincreasing(curve)
+}
+
+fn sprint_fire_delay_max(constraints: &[Constraint]) -> Option<f64> {
+    constraints
+        .iter()
+        .find(|c| c.id == "handling-sprint-fire-delay" && c.min.is_none())
+        .and_then(|c| c.max)
+}
+
+/// Largest open-speed effect reachable by the bound range. The tuning scale
+/// `clamp_factor(1 / (1 + open / 100))` is nonincreasing except below -100,
+/// where it is already clamped to its minimum.
+fn sprint_open_for_min(open_min: f64, open_max: f64) -> f64 {
+    if open_min < -100.0 {
+        -200.0
+    } else {
+        open_max
+    }
+}
+
 fn curve_min_value(curve: &Curve) -> Option<f64> {
     let mut min_value = f64::INFINITY;
     for key in &curve.keys {
@@ -6344,6 +6451,7 @@ fn seed_candidate_margin(
     v_max: Option<f64>,
     k_max: Option<f64>,
     aim_max: Option<f64>,
+    sprint_max: Option<f64>,
     control: Option<&Curve>,
     gunkick: Option<&Curve>,
     gunkick0: f64,
@@ -6357,6 +6465,14 @@ fn seed_candidate_margin(
             metric.hs,
             metric.adsm,
             prune_open(metric.eopen_min, metric.eopen),
+        ) {
+            margin = margin.min(relative_margin(max, value));
+        }
+    }
+    if let Some(max) = sprint_max {
+        if let Some(value) = evaluator.sprint_fire_delay(
+            metric.hs,
+            sprint_open_for_min(metric.eopen_min, metric.eopen),
         ) {
             margin = margin.min(relative_margin(max, value));
         }
@@ -7384,6 +7500,49 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].cost, 5);
+    }
+
+    #[test]
+    fn pareto_sprint_keeps_the_state_with_more_handling() {
+        let mut cheap_weak = part(10.0, 5, vec![]);
+        cheap_weak.metric.hs = 10.0;
+        let mut pricey_strong = part(10.0, 10, vec![]);
+        pricey_strong.metric.hs = 20.0;
+        // Without a sprint bound the cheap state dominates on cost alone.
+        let out = dp_pareto(
+            vec![pricey_strong.clone(), cheap_weak.clone()],
+            &DpDims::default(),
+            &[],
+            AimDir::Ignore,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].cost, 5);
+        // A sprint maximum makes handling a lower-is-better dimension, so the
+        // weaker state cannot dominate the one that can meet it.
+        let dims = DpDims {
+            sprint: true,
+            eopen: true,
+            ..DpDims::default()
+        };
+        let out = dp_pareto(
+            vec![pricey_strong, cheap_weak],
+            &dims,
+            &[],
+            AimDir::Ignore,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|s| s.cost == 5));
+        assert!(out.iter().any(|s| s.cost == 10));
+    }
+
+    #[test]
+    fn sprint_open_for_min_picks_the_smallest_scale() {
+        assert_eq!(sprint_open_for_min(-50.0, 120.0), 120.0);
+        assert_eq!(sprint_open_for_min(0.0, 300.0), 300.0);
+        // The tuning scale clamps below -100, so any crossing range is at its
+        // minimum there.
+        assert_eq!(sprint_open_for_min(-150.0, 120.0), -200.0);
+        assert_eq!(sprint_open_for_min(-300.0, -200.0), -200.0);
     }
 
     #[test]

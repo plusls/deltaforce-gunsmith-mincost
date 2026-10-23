@@ -48,6 +48,49 @@ impl<'a> Evaluator<'a> {
         ))
     }
 
+    /// Sprint-to-fire delay for a handling addend and an open speed effect.
+    /// The DP tracks both inputs, so it can evaluate the same formula for
+    /// partial builds and prune on it.
+    pub fn sprint_fire_delay(&self, handling_add: f64, open_speed: f64) -> Option<f64> {
+        let profile = self.payload.numeric_profiles.get(self.weapon_id)?;
+        let stats = self.payload.weapon_stats.get(self.weapon_id)?;
+        let mode = self.mode;
+        let base_stat = |id: &str| stats.base_stat(mode, id);
+        let ops_base_10006 = stats.base_stat("operations", "10006");
+        let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
+        let handling_score = base_stat("10006").unwrap_or(0.0) + handling_add;
+        let baseline = ops_base_10006.or_else(|| base_stat("10006")).unwrap_or(0.0);
+        let handling_delta = handling_score - baseline;
+        let sprint_speed = jnum(&profile.detail.raw_weapon_attribute, "SprintToFireSpeed");
+        let curves = &profile.linked_tables.handling_curves;
+        let sprint_curve = if mode == "warfare" {
+            curves
+                .sprint_to_fire_mp
+                .as_ref()
+                .or(curves.sprint_to_fire.as_ref())
+        } else {
+            curves.sprint_to_fire.as_ref()
+        };
+        let sprint_ms = sprint_speed.and_then(|base| {
+            if base < 0.0 {
+                return None;
+            }
+            let scale = if handling_delta == 0.0 {
+                Some(1.0)
+            } else {
+                sprint_curve.and_then(|c| c.eval(handling_delta))
+            }?;
+            Some(ms_floor(base * scale) * tuning_scale)
+        });
+        sprint_ms.or_else(|| {
+            sprint_speed.map(|base| {
+                ms_floor(
+                    base * clamp_factor((1.0 - handling_add * 0.015) / (1.0 + open_speed / 100.0)),
+                )
+            })
+        })
+    }
+
     pub fn aim_inputs(&self, parts: &[&Part]) -> (f64, f64) {
         let mode = self.mode;
         let laser_index = laser_pro_index(parts, mode);
@@ -237,7 +280,6 @@ impl<'a> Evaluator<'a> {
         let move_speed = sums.move_speed;
         let breath_stability = sums.breath_stability;
         let move_stability = sums.move_stability;
-        let tuning_scale = clamp_factor(1.0 / (1.0 + open_speed / 100.0));
         let handling_score = base_stat("10006").unwrap_or(0.0) + handling;
         let baseline = ops_base_10006.or_else(|| base_stat("10006")).unwrap_or(0.0);
         let handling_delta = handling_score - baseline;
@@ -245,31 +287,7 @@ impl<'a> Evaluator<'a> {
         let curves = &profile.linked_tables.handling_curves;
         out.aim_time = self.aim_time(handling, ads_time_mult, open_speed);
 
-        let sprint_speed = jnum(&profile.detail.raw_weapon_attribute, "SprintToFireSpeed");
-        let sprint_curve = if mode == "warfare" {
-            curves
-                .sprint_to_fire_mp
-                .as_ref()
-                .or(curves.sprint_to_fire.as_ref())
-        } else {
-            curves.sprint_to_fire.as_ref()
-        };
-        let sprint_ms = sprint_speed.and_then(|base| {
-            if base < 0.0 {
-                return None;
-            }
-            let scale = if handling_delta == 0.0 {
-                Some(1.0)
-            } else {
-                sprint_curve.and_then(|c| c.eval(handling_delta))
-            }?;
-            Some(ms_floor(base * scale) * tuning_scale)
-        });
-        out.sprint_fire_delay = sprint_ms.or_else(|| {
-            sprint_speed.map(|base| {
-                ms_floor(base * clamp_factor((1.0 - handling * 0.015) / (1.0 + open_speed / 100.0)))
-            })
-        });
+        out.sprint_fire_delay = self.sprint_fire_delay(handling, open_speed);
 
         let movement = profile.linked_tables.movement_by_mode.get(mode);
         let stand_run = movement.and_then(|m| jnum(m, "StandRunSpeed"));
