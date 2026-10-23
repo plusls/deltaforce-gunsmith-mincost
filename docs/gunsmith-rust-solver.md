@@ -276,6 +276,7 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 {
   "optimal": true,
   "truncated": false,
+  "incomplete": false,
   "nodes": 5223,
   "leaves": 10169,
   "best": {
