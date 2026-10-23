@@ -1027,6 +1027,17 @@ impl<'a> Solver<'a> {
     }
 
     pub fn solve(mut self) -> SolveResult {
+        if locked_paths_conflict(self.payload, &self.options.locked_paths) {
+            return SolveResult {
+                optimal: false,
+                truncated: false,
+                nodes: 0,
+                leaves: 0,
+                best: None,
+                alternatives: Vec::new(),
+                message: "no build satisfies the constraints".to_string(),
+            };
+        }
         let has_constraints = self
             .options
             .constraints
@@ -2424,6 +2435,37 @@ impl<'a> Solver<'a> {
         }
     }
 
+    /// Whether the resolved assembly still honours every locked path. The
+    /// resolver silently drops a locked part when an earlier slot claims its
+    /// socket through `extraOccupySocketIds`, so the raw selection map alone is
+    /// no evidence that the lock was installed.
+    ///
+    /// All-virtual slots never produce a visible slot even when their virtual
+    /// part is installed; those show up as internal parts instead.
+    fn locks_honoured(&self, assembly: &crate::assembly::Assembly) -> bool {
+        self.options.locked_paths.iter().all(|(path, expected)| {
+            let visible = assembly
+                .visible_slots
+                .iter()
+                .find(|slot| &slot.path_key == path);
+            let internal = assembly
+                .internal_parts
+                .iter()
+                .find(|part| &part.slot_path_key == path);
+            let installed = visible
+                .and_then(|slot| {
+                    slot.selected_part_id
+                        .as_ref()
+                        .or(slot.internal_part_id.as_ref())
+                })
+                .or_else(|| internal.map(|part| &part.part_id));
+            match expected {
+                Some(expected) => installed == Some(expected),
+                None => visible.is_some() && installed.is_none(),
+            }
+        })
+    }
+
     fn effective_none_part(
         &self,
         selections: &FxHashMap<String, Option<String>>,
@@ -2456,6 +2498,9 @@ impl<'a> Solver<'a> {
             return;
         }
         let assembly = self.assembler.resolve(selections);
+        if !self.locks_honoured(&assembly) {
+            return;
+        }
         let installed: Vec<&Part> = self.evaluator.installed_parts(&assembly);
         let rec = self.recoil_base(&installed);
         if rec.is_none()
@@ -5954,6 +5999,45 @@ fn is_bipod(part: &Part) -> bool {
         && targets.contains("GRecoil_H")
         && targets.contains("GRecoil_V")
         && targets.iter().any(|t| t.ends_with("StandBreathFactor"))
+}
+
+/// Two locked paths can be mutually exclusive regardless of every other
+/// choice: a locked part that claims the other lock's socket through
+/// `extraOccupySocketIds` is installed before that slot is walked, so the
+/// resolver drops the other lock and no completion can restore it.
+fn locked_paths_conflict(
+    payload: &WeaponPayload,
+    locked_paths: &FxHashMap<String, Option<String>>,
+) -> bool {
+    let entries: Vec<(Option<String>, Vec<&str>)> = locked_paths
+        .iter()
+        .map(|(path, part)| {
+            let claimed = part
+                .as_ref()
+                .and_then(|id| payload.parts.get(id))
+                .map(|part| {
+                    part.extra_occupy_socket_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (crate::assembly::socket_id_from_path(path), claimed)
+        })
+        .collect();
+    for (idx, (socket, claimed)) in entries.iter().enumerate() {
+        for (other_socket, other_claimed) in &entries[idx + 1..] {
+            let (Some(socket), Some(other_socket)) = (socket, other_socket) else {
+                continue;
+            };
+            if claimed.contains(&other_socket.as_str())
+                || other_claimed.contains(&socket.as_str())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn compute_relevance(
