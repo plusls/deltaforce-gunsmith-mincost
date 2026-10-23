@@ -14,7 +14,7 @@
 //! never correctness of the reported build.
 
 use crate::metrics::{stability_metric_at, STABILITY_ATTRS};
-use crate::model::{Curve, NumericProfile, WeaponPayload};
+use crate::model::{Curve, NumericProfile, Part, WeaponPayload};
 use crate::search::Constraint;
 
 pub const REDUCIBLE_STABILITY_METRICS: [&str; 5] = [
@@ -357,23 +357,41 @@ fn classify_direction(f: &impl Fn(f64) -> Option<f64>, points: &[f64]) -> Option
 /// the panel by the same amount (returns `None`). Parts the assembler can
 /// install behind the panel keep their addends in the bracket instead.
 ///
-/// The bracket is deliberately loose. A part that is internal at one socket
-/// can also be selected visibly at another, where its addends move into the
-/// panel, so each addend is counted twice: once for the internal placement and
-/// once for a possible visible one. Conditional and `pro` addends are treated
-/// as always active on the high side and as active when negative on the low
-/// side, which can only widen the bracket. Only the display channel matters;
-/// `dS` never reads the main attribute list.
+/// A part can be installed internally more than once: every default preset
+/// node with its own `pathKey` is a separate placement, and the same sight can
+/// occupy several sockets. The bracket therefore multiplies each addend by
+/// that placement count, plus one copy for a possible visible placement. The
+/// extra copy is slack for the common `10007`-only part (a visible placement
+/// then cancels against the panel); it keeps the historic bracket for a single
+/// internal placement. Conditional addends are treated as always active on the
+/// high side and as active when negative on the low side, which can only widen
+/// the bracket. Only the display channel matters; `dS` never reads the main
+/// attribute list.
 fn stability_internal_offset(
     payload: &WeaponPayload,
     weapon_id: &str,
     mode: &str,
 ) -> Option<(f64, f64)> {
-    let internal = internal_capable_parts(payload, weapon_id);
+    let placements = internal_placement_counts(payload, weapon_id, mode)?;
     let mut lo = 0.0;
     let mut hi = 0.0;
     for part in payload.parts.values() {
-        let can_be_internal = internal.contains(part.id.as_str());
+        let Some(&count) = placements.get(part.id.as_str()) else {
+            for modifier in part.display_mods_for(weapon_id, mode) {
+                if modifier.modifier_type != "Addend" {
+                    continue;
+                }
+                let attr = modifier.attribute_id.as_deref().unwrap_or("");
+                if !STABILITY_ATTRS.contains(&attr) {
+                    continue;
+                }
+                if attr != STABILITY_PANEL_ATTR || modifier.condition_id.is_some() {
+                    return None;
+                }
+            }
+            continue;
+        };
+        let copies = (count + 1) as f64;
         for modifier in part.display_mods_for(weapon_id, mode) {
             if modifier.modifier_type != "Addend" {
                 continue;
@@ -382,45 +400,82 @@ fn stability_internal_offset(
             if !STABILITY_ATTRS.contains(&attr) {
                 continue;
             }
-            if can_be_internal {
-                let delta = modifier.delta.map(|v| v.0).unwrap_or(0.0);
-                lo += 2.0 * delta.min(0.0);
-                hi += 2.0 * delta.max(0.0);
-            } else if attr != STABILITY_PANEL_ATTR || modifier.condition_id.is_some() {
+            // A visible placement of a part carrying a non-`10007` stability
+            // addend moves `dS` without moving the panel, and the part may be
+            // selectable at more than one visible slot. That multiplicity is
+            // not bounded here, so decline the reduction instead of
+            // undercounting it.
+            if attr != STABILITY_PANEL_ATTR
+                && modifier.condition_id.is_none()
+                && modifier.delta.map(|v| v.0 != 0.0).unwrap_or(false)
+            {
                 return None;
             }
+            let delta = modifier.delta.map(|v| v.0).unwrap_or(0.0);
+            lo += copies * delta.min(0.0);
+            hi += copies * delta.max(0.0);
         }
     }
     Some((lo, hi))
 }
 
-/// Parts the assembler can install from the default preset or a virtual rule.
-/// They live in `internal_parts` and are not part of the visible panel.
-fn internal_capable_parts<'a>(
+/// Number of independent placements through which the assembler can install
+/// each part internally.
+///
+/// Default preset nodes are keyed by `pathKey` in the assembler's defaults map
+/// and each tree position is visited at most once, so distinct path keys are
+/// distinct placements. Virtual rules are not bounded by their count: a rule is
+/// keyed by socket id and the assembler applies it at every visited slot with
+/// that id, including slots under a host it installs more than once. When a
+/// virtual part carries stability addends, the caller must not reduce.
+fn internal_placement_counts<'a>(
     payload: &'a WeaponPayload,
     weapon_id: &str,
-) -> rustc_hash::FxHashSet<&'a str> {
-    let mut out = rustc_hash::FxHashSet::default();
+    mode: &str,
+) -> Option<rustc_hash::FxHashMap<&'a str, usize>> {
+    let mut out: rustc_hash::FxHashMap<&'a str, usize> = rustc_hash::FxHashMap::default();
     if let Some(preset) = payload.default_presets.get(weapon_id) {
+        let mut paths: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashSet<&'a str>> =
+            rustc_hash::FxHashMap::default();
         for node in &preset.nodes {
             if node.is_root || node.is_virtual {
                 continue;
             }
-            if !payload.parts.contains_key(&node.part_id) {
+            // The assembler only installs defaults that carry a path key.
+            let Some(path) = node.path_key.as_deref() else {
                 continue;
-            }
-            out.insert(node.part_id.as_str());
+            };
+            let Some(part) = payload.parts.get(&node.part_id) else {
+                continue;
+            };
+            paths.entry(part.id.as_str()).or_default().insert(path);
+        }
+        for (id, paths) in paths {
+            out.insert(id, paths.len());
         }
     }
     if let Some(rules) = payload.virtual_rules.get(weapon_id) {
         for rule in rules {
-            if !payload.parts.contains_key(&rule.virtual_part_id) {
+            let Some(part) = payload.parts.get(&rule.virtual_part_id) else {
                 continue;
+            };
+            if has_stability_addend(part, weapon_id, mode) {
+                return None;
             }
-            out.insert(rule.virtual_part_id.as_str());
         }
     }
-    out
+    Some(out)
+}
+
+/// Whether a part can move `dS` at all. Conditional addends never reach the
+/// stability detail sum, so they do not count.
+fn has_stability_addend(part: &Part, weapon_id: &str, mode: &str) -> bool {
+    part.display_mods_for(weapon_id, mode).any(|modifier| {
+        modifier.modifier_type == "Addend"
+            && modifier.condition_id.is_none()
+            && modifier.delta.map(|v| v.0 != 0.0).unwrap_or(false)
+            && STABILITY_ATTRS.contains(&modifier.attribute_id.as_deref().unwrap_or(""))
+    })
 }
 
 fn stability_base(payload: &WeaponPayload, weapon_id: &str, mode: &str) -> Option<f64> {
