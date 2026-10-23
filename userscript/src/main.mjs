@@ -72,14 +72,18 @@ function dataKeyOf(context) {
 }
 
 let backendPromise = null;
+let backendToken = 0;
 const payloadCache = new Map();
 
 function getBackend() {
   if (backendPromise) return backendPromise;
-  backendPromise = (async () => {
+  const token = ++backendToken;
+  const attempt = (async () => {
     const bytes = decodeBase64(MINCOST_WASM_BASE64);
     try {
-      const worker = await createSolverWorkerBackend(bytes);
+      const worker = await createSolverWorkerBackend(bytes, () => {
+        if (backendToken === token) backendPromise = null;
+      });
       return { worker };
     } catch (error) {
       console.warn("[gunsmith-mincost] solver worker unavailable, using main thread", error);
@@ -87,10 +91,14 @@ function getBackend() {
       return { local: true, engine };
     }
   })();
-  return backendPromise;
+  backendPromise = attempt;
+  attempt.catch(() => {
+    if (backendToken === token) backendPromise = null;
+  });
+  return attempt;
 }
 
-function createSolverWorkerBackend(wasmBytes) {
+function createSolverWorkerBackend(wasmBytes, onFatal) {
   return new Promise((resolve, reject) => {
     let blobUrl;
     let worker;
@@ -108,24 +116,38 @@ function createSolverWorkerBackend(wasmBytes) {
     const pending = new Map();
     let nextId = 1;
     let ready = false;
+    let failed = false;
+    let settled = false;
     const timer = setTimeout(() => {
       fail(new Error("solver worker init timeout"));
     }, 10_000);
 
     function fail(error) {
+      if (failed) return;
+      failed = true;
+      const wasReady = ready;
+      ready = false;
       clearTimeout(timer);
       worker.terminate();
       if (blobUrl) URL.revokeObjectURL(blobUrl);
       for (const entry of pending.values()) entry.reject(error);
       pending.clear();
-      reject(error);
+      if (!settled) {
+        settled = true;
+        reject(error);
+        return;
+      }
+      console.warn("[gunsmith-mincost] solver worker failed, rebuilding on next solve", error);
+      if (wasReady && onFatal) onFatal(error);
     }
 
     worker.onmessage = (event) => {
       const message = event.data;
       if (!message || typeof message !== "object") return;
       if (message.type === "ready") {
+        if (failed) return;
         ready = true;
+        settled = true;
         clearTimeout(timer);
         resolve({
           solve(context, options, key, data) {
@@ -144,6 +166,9 @@ function createSolverWorkerBackend(wasmBytes) {
             });
           },
           terminate() {
+            failed = true;
+            ready = false;
+            clearTimeout(timer);
             worker.terminate();
             if (blobUrl) URL.revokeObjectURL(blobUrl);
           },
