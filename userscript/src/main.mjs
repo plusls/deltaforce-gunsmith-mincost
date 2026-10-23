@@ -16,8 +16,6 @@ import {
 const MINCOST_WASM_BASE64 = "__WASM_BASE64__";
 const MINCOST_WORKER_SOURCE = "__WORKER_SOURCE__";
 const MINCOST_SETTINGS_KEY = "moligod:gunsmith-mincost:v1";
-const SITE_BIPOD_GROUP_SELECTOR = '[aria-label="脚架状态"]';
-const SITE_DRAFT_KEY = "moligod:gunsmith-draft:v1";
 
 const page = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 const RealPageWorker = page.Worker;
@@ -251,30 +249,6 @@ function readSiteSearchSeconds(context) {
   return selectSiteSearchSeconds({ domSeconds, storedSeconds });
 }
 
-function readSiteBipodDeployed(context) {
-  const group = document.querySelector(SITE_BIPOD_GROUP_SELECTOR);
-  if (group) {
-    const active = group.querySelector('button[aria-pressed="true"]');
-    if (active) return /展开/.test(active.textContent || "");
-  }
-
-  try {
-    const raw = page.localStorage?.getItem(SITE_DRAFT_KEY);
-    const draft = raw ? JSON.parse(raw) : null;
-    if (
-      draft &&
-      draft.weaponId === context?.weaponId &&
-      draft.mode === context?.mode
-    ) {
-      return draft.bipodDeployed === true;
-    }
-  } catch {
-    /* ignore */
-  }
-
-  return context?.bipodDeployed === true;
-}
-
 async function runMinCost(context, mode, options, requestDeadlineMs) {
   const { deadlineMs, source } = resolveDeadlineMs({
     mode,
@@ -282,10 +256,7 @@ async function runMinCost(context, mode, options, requestDeadlineMs) {
     siteSeconds: readSiteSearchSeconds(context),
     requestDeadlineMs,
   });
-  const bipodDeployed =
-    typeof options.bipodDeployed === "boolean"
-      ? options.bipodDeployed
-      : readSiteBipodDeployed(context);
+  const bipodDeployed = false;
   const merged = {
     ...options,
     mode,

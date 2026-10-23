@@ -299,7 +299,7 @@ function toSolveRequest(ctx, options) {
 
 缺价处理是必须的. Rust 核心把缺失价格当作 0, 对"最小开销"是危险的. adapter 在进入求解器前就排除缺价件, 或显式用系统价替代. CLI 的 `--prices` 也采用严格模式: 官方配件缺价直接排除, 除非传 `--allow-missing-prices`.
 
-脚架状态: 站点 worker 请求本身不带 `bipodDeployed`, 站点 UI 的 `[aria-label="脚架状态"]` 按钮和 `moligod:gunsmith-draft:v1` 草稿里有. 脚本在每次求解前读取当前展开状态: 优先用请求/override 里的布尔值, 其次读 UI 当前 `aria-pressed` 的按钮 (`展开脚架` = true), 再回退到草稿 (weaponId/mode 匹配时), 最后 false. 该值同时写入 `bipodDeployed` 求解字段与 `window.__moligodMinCostLast.options`.
+脚架状态: 站点 optimizer worker 完全不读取 `bipodDeployed` (不传 ls/or), 只有站点在线面板会应用脚架状态. 为了与 optimizer 基线一致, 脚本求解时固定传 `bipodDeployed: false`, 不再读取 UI 的 `[aria-label="脚架状态"]` 按钮或 `moligod:gunsmith-draft:v1` 草稿; 镭指等其他项仍跟随站点请求, 因此不会被 UI 状态改变. Rust/CLI 侧的 `--bipod-deployed` 保留, 直接调用求解器时仍可显式开启. `window.__moligodMinCostLast.options.bipodDeployed` 也固定为 `false`.
 
 ### 4.5 求解请求 -> 站点结果
 
