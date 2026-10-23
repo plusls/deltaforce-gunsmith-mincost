@@ -2,6 +2,7 @@ use crate::model::{Map, Part, PresetNode, SlotDef, VirtualRule, WeaponPayload};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct SlotView {
@@ -26,8 +27,8 @@ pub struct VisibleSlot {
     pub parent_slot_path_key: Option<String>,
     pub host_part_id: String,
     pub depth: usize,
-    pub slot: SlotView,
-    pub candidate_ids: Vec<String>,
+    pub slot: Rc<SlotView>,
+    pub candidate_ids: Rc<Vec<String>>,
     pub selected_part_id: Option<String>,
     pub internal_part_id: Option<String>,
     pub internal_is_default: bool,
@@ -39,7 +40,7 @@ pub struct InternalPart {
     pub parent_slot_path_key: Option<String>,
     pub host_part_id: String,
     pub depth: usize,
-    pub slot: SlotView,
+    pub slot: Rc<SlotView>,
     pub part_id: String,
     pub source: String,
 }
@@ -84,6 +85,13 @@ struct Claim {
     owner_path_key: String,
 }
 
+struct SlotData<'a> {
+    suffix: String,
+    view: Rc<SlotView>,
+    candidates: Rc<Vec<&'a Part>>,
+    candidate_ids: Rc<Vec<String>>,
+}
+
 pub struct Assembler<'a> {
     payload: &'a WeaponPayload,
     weapon_id: &'a str,
@@ -91,6 +99,7 @@ pub struct Assembler<'a> {
     virtual_groups: Vec<(String, Vec<&'a VirtualRule>)>,
     hide_overrides: Vec<&'a crate::model::CandidateOverride>,
     excluded: FxHashSet<String>,
+    slot_data: FxHashMap<usize, Rc<SlotData<'a>>>,
 }
 
 impl<'a> Assembler<'a> {
@@ -140,14 +149,42 @@ impl<'a> Assembler<'a> {
             hide_overrides.extend(list.iter());
         }
 
-        Self {
+        let mut out = Self {
             payload,
             weapon_id,
             defaults,
             virtual_groups,
             hide_overrides,
             excluded: FxHashSet::default(),
+            slot_data: FxHashMap::default(),
+        };
+        out.prepare_slots();
+        out
+    }
+
+    fn prepare_slots(&mut self) {
+        let mut cache: FxHashMap<usize, Rc<SlotData<'a>>> = FxHashMap::default();
+        for (host, slots) in &self.payload.slots_by_host {
+            for slot in slots {
+                let candidates = self.candidates(host, slot);
+                let candidate_ids: Vec<String> = candidates.iter().map(|p| p.id.clone()).collect();
+                let mut suffix = String::with_capacity(8 + slot.id.len() + slot.name.len());
+                suffix.push_str("/slot:");
+                enc_into(&mut suffix, &slot.id);
+                suffix.push(':');
+                enc_into(&mut suffix, &slot.name);
+                cache.insert(
+                    slot as *const SlotDef as usize,
+                    Rc::new(SlotData {
+                        suffix,
+                        view: Rc::new(SlotView::from_slot(slot)),
+                        candidate_ids: Rc::new(candidate_ids),
+                        candidates: Rc::new(candidates),
+                    }),
+                );
+            }
         }
+        self.slot_data = cache;
     }
 
     pub fn set_excluded(&mut self, excluded: FxHashSet<String>) {
@@ -157,6 +194,7 @@ impl<'a> Assembler<'a> {
         self.defaults
             .retain(|_, node| !excluded.contains(&node.part_id));
         self.excluded = excluded;
+        self.prepare_slots();
     }
 
     pub fn default_tune(&self, path: &str, part_id: &str, tune_id: &str) -> Option<f64> {
@@ -280,21 +318,18 @@ impl<'a> Assembler<'a> {
         claimed: &FxHashSet<String>,
     ) -> Map<String, String> {
         let mut previous: Map<String, String> = Map::default();
-        let mut current_active = active.clone();
         for _ in 0..64 {
             let mut selected: Map<String, String> = Map::default();
-            let mut claimed_now = claimed.clone();
+            let mut newly_claimed: Vec<String> = Vec::new();
+            let is_active = |id: &str| active.contains(id) || previous.values().any(|p| p == id);
             for (socket_id, rules) in &self.virtual_groups {
-                if claimed_now.contains(socket_id) {
+                if claimed.contains(socket_id) {
                     continue;
                 }
                 let mut picked = None;
                 for rule in rules {
                     if rule.condition_type == "ItemId"
-                        && rule
-                            .condition_item_ids
-                            .iter()
-                            .any(|id| current_active.contains(id))
+                        && rule.condition_item_ids.iter().any(|id| is_active(id))
                     {
                         picked = Some(*rule);
                         break;
@@ -316,22 +351,19 @@ impl<'a> Assembler<'a> {
                     continue;
                 }
                 let sockets = socket_set(socket_id, part);
-                if sockets.iter().any(|s| claimed_now.contains(s)) {
+                if sockets
+                    .iter()
+                    .any(|s| claimed.contains(s) || newly_claimed.contains(s))
+                {
                     continue;
                 }
                 selected.insert(socket_id.clone(), part.id.clone());
-                for socket in sockets {
-                    claimed_now.insert(socket);
-                }
+                newly_claimed.extend(sockets);
             }
             if same_virtual(&previous, &selected) {
                 return selected;
             }
             previous = selected;
-            current_active = active.clone();
-            for part_id in previous.values() {
-                current_active.insert(part_id.clone());
-            }
         }
         previous
     }
@@ -348,7 +380,6 @@ impl<'a> Assembler<'a> {
         self.walk(
             self.weapon_id,
             &root_path,
-            None,
             None,
             0,
             &mut seen,
@@ -395,7 +426,6 @@ impl<'a> Assembler<'a> {
         host_id: &str,
         host_path: &str,
         parent_slot_path: Option<&str>,
-        parent_slot_type: Option<&str>,
         depth: usize,
         seen: &mut FxHashSet<String>,
         selections: &Map<String, Option<String>>,
@@ -406,15 +436,30 @@ impl<'a> Assembler<'a> {
             return;
         };
         for original in slots {
-            let slot = with_label_override(original, parent_slot_type);
-            let slot: &SlotDef = &slot;
-            let path_key = format!(
-                "{}/slot:{}:{}",
-                host_path,
-                enc(&slot.id),
-                enc(&slot.name)
-            );
-            let candidates = self.candidates(host_id, &slot);
+            let meta = match self.slot_data.get(&(original as *const SlotDef as usize)) {
+                Some(meta) => meta.clone(),
+                None => {
+                    let candidates = self.candidates(host_id, original);
+                    let candidate_ids: Vec<String> =
+                        candidates.iter().map(|p| p.id.clone()).collect();
+                    let mut suffix = String::new();
+                    suffix.push_str("/slot:");
+                    enc_into(&mut suffix, &original.id);
+                    suffix.push(':');
+                    enc_into(&mut suffix, &original.name);
+                    Rc::new(SlotData {
+                        suffix,
+                        view: Rc::new(SlotView::from_slot(original)),
+                        candidate_ids: Rc::new(candidate_ids),
+                        candidates: Rc::new(candidates),
+                    })
+                }
+            };
+            let slot: &SlotDef = original;
+            let mut path_key = String::with_capacity(host_path.len() + meta.suffix.len());
+            path_key.push_str(host_path);
+            path_key.push_str(&meta.suffix);
+            let candidates = &meta.candidates;
             let has_selection = selections.contains_key(&path_key);
             let selected_raw = if has_selection {
                 selections.get(&path_key).and_then(|v| v.clone())
@@ -500,8 +545,8 @@ impl<'a> Assembler<'a> {
                     parent_slot_path_key: parent_slot_path.map(|s| s.to_string()),
                     host_part_id: host_id.to_string(),
                     depth,
-                    slot: SlotView::from_slot(&slot),
-                    candidate_ids: candidates.iter().map(|p| p.id.clone()).collect(),
+                    slot: meta.view.clone(),
+                    candidate_ids: meta.candidate_ids.clone(),
                     selected_part_id: selected_id,
                     internal_part_id: internal_id,
                     internal_is_default: internal == Some("default"),
@@ -514,7 +559,7 @@ impl<'a> Assembler<'a> {
                     parent_slot_path_key: parent_slot_path.map(|s| s.to_string()),
                     host_part_id: host_id.to_string(),
                     depth,
-                    slot: SlotView::from_slot(&slot),
+                    slot: meta.view.clone(),
                     part_id: part.id.clone(),
                     source: (*source).to_string(),
                 });
@@ -523,12 +568,15 @@ impl<'a> Assembler<'a> {
             if let Some(part) = chosen {
                 if depth < 32 && !seen.contains(&part.id) {
                     seen.insert(part.id.clone());
-                    let child_host_path = format!("{}/part:{}", path_key, enc(&part.id));
+                    let mut child_host_path =
+                        String::with_capacity(path_key.len() + 6 + part.id.len());
+                    child_host_path.push_str(&path_key);
+                    child_host_path.push_str("/part:");
+                    enc_into(&mut child_host_path, &part.id);
                     self.walk(
                         &part.id,
                         &child_host_path,
                         Some(&path_key),
-                        Some(slot.slot_type.as_str()),
                         depth + 1,
                         seen,
                         selections,
@@ -650,7 +698,27 @@ pub fn socket_id_from_path(path: &str) -> Option<String> {
 }
 
 pub fn socket_key(host_path: &str, socket_id: &str) -> String {
-    format!("{}/socket:{}", host_path, enc(socket_id))
+    let mut out = String::with_capacity(host_path.len() + 8 + socket_id.len());
+    out.push_str(host_path);
+    out.push_str("/socket:");
+    enc_into(&mut out, socket_id);
+    out
+}
+
+fn enc_into(out: &mut String, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for b in value.as_bytes() {
+        let c = *b as char;
+        if c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')')
+        {
+            out.push(c);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
 }
 
 fn is_descendant_path(path: &str, ancestor: &str) -> bool {
@@ -705,42 +773,6 @@ pub fn locks_honoured(locked_paths: &Map<String, Option<String>>, assembly: &Ass
         .all(|(path, expected)| lock_honoured(assembly, path, expected.as_deref()))
 }
 
-fn with_label_override<'b>(
-    slot: &'b SlotDef,
-    parent_type: Option<&str>,
-) -> std::borrow::Cow<'b, SlotDef> {
-    use std::borrow::Cow;
-    let Some(parent_type) = parent_type else {
-        return Cow::Borrowed(slot);
-    };
-    let options = slot
-        .parent_label_options
-        .as_ref()
-        .and_then(|v| v.get(parent_type))
-        .and_then(|v| v.as_array());
-    let label = match options {
-        Some(list) if list.len() == 1 => list[0]
-            .get("label")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        Some(list) if list.is_empty() => slot
-            .parent_labels
-            .as_ref()
-            .and_then(|v| v.get(parent_type))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        _ => None,
-    };
-    match label {
-        Some(label) if slot.label.as_deref() != Some(label.as_str()) => {
-            let mut out = slot.clone();
-            out.label = Some(label);
-            Cow::Owned(out)
-        }
-        _ => Cow::Borrowed(slot),
-    }
-}
-
 pub fn enc(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.as_bytes() {
@@ -790,43 +822,11 @@ pub fn value_str(value: &Value) -> Option<&str> {
 mod tests {
     use super::*;
 
-    fn slot(value: serde_json::Value) -> SlotDef {
-        serde_json::from_value(value).unwrap()
-    }
-
     #[test]
     fn descendant_paths_match_without_allocation() {
         assert!(is_descendant_path("weapon:w/slot:1:X/part:p", "weapon:w/slot:1:X"));
         assert!(!is_descendant_path("weapon:w/slot:1:X", "weapon:w/slot:1:X"));
         assert!(!is_descendant_path("weapon:w/slot:1:X/other:p", "weapon:w/slot:1:X"));
         assert!(!is_descendant_path("weapon:w/slot:1:XY/part:p", "weapon:w/slot:1:X"));
-    }
-
-    #[test]
-    fn label_override_borrows_when_nothing_changes() {
-        let base = slot(serde_json::json!({ "id": "1", "name": "Muzzle" }));
-        assert!(matches!(
-            with_label_override(&base, None),
-            std::borrow::Cow::Borrowed(_)
-        ));
-        assert!(matches!(
-            with_label_override(&base, Some("unknown")),
-            std::borrow::Cow::Borrowed(_)
-        ));
-    }
-
-    #[test]
-    fn label_override_clones_only_when_a_label_applies() {
-        let base = slot(serde_json::json!({
-            "id": "1",
-            "name": "Muzzle",
-            "label": "old",
-            "parentLabelOptions": {
-                "rifle": [{ "label": "new" }]
-            }
-        }));
-        let overridden = with_label_override(&base, Some("rifle"));
-        assert_eq!(overridden.label.as_deref(), Some("new"));
-        assert_eq!(base.label.as_deref(), Some("old"));
     }
 }

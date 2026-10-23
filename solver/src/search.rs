@@ -2121,7 +2121,7 @@ impl<'a> Solver<'a> {
                     });
                 }
             }
-            for id in &slot.candidate_ids {
+            for id in slot.candidate_ids.iter() {
                 if self.options.excluded_part_ids.contains(id) {
                     continue;
                 }
@@ -2222,7 +2222,7 @@ impl<'a> Solver<'a> {
             metric: base,
             detail_pro: base_detail_pro,
             panel_pro: base_panel_pro,
-            choices: Vec::new(),
+            choices: None,
         }];
         for (slot_idx, opts) in options_per_slot.iter().enumerate() {
             let rest_cost = suffix_min[slot_idx + 1];
@@ -2259,8 +2259,10 @@ impl<'a> Solver<'a> {
                             }
                         }
                     }
-                    let mut choices = st.choices.clone();
-                    choices.push(opt.choice.clone());
+                    let choices = Some(Rc::new(ChoiceNode {
+                        choice: opt.choice.clone(),
+                        prev: st.choices.clone(),
+                    }));
                     next.push(DpState {
                         cost,
                         metric,
@@ -2361,7 +2363,8 @@ impl<'a> Solver<'a> {
                 continue;
             }
             let mut trial = base_trial.clone();
-            for (path, choice) in slot_paths.iter().zip(st.choices.iter()) {
+            let choices = choice_list_rev(&st.choices);
+            for (path, choice) in slot_paths.iter().zip(choices.iter()) {
                 match choice {
                     SlotChoice::Unset => {
                         trial.remove(path);
@@ -2411,7 +2414,7 @@ impl<'a> Solver<'a> {
             metric: base.clone(),
             detail_pro: None,
             panel_pro: None,
-            choices: Vec::new(),
+            choices: None,
         }];
         for opts in options_per_slot {
             let mut scored: Vec<(f64, f64, i64, DpState)> =
@@ -2425,8 +2428,10 @@ impl<'a> Solver<'a> {
                     }
                     let mut metric = st.metric.clone();
                     metric.add(&opt.metric);
-                    let mut choices = st.choices.clone();
-                    choices.push(opt.choice.clone());
+                    let choices = Some(Rc::new(ChoiceNode {
+                        choice: opt.choice.clone(),
+                        prev: st.choices.clone(),
+                    }));
                     let margin = seed_candidate_margin(
                         &metric,
                         h_max,
@@ -2527,7 +2532,8 @@ impl<'a> Solver<'a> {
                 }
             }
             let mut trial = base_trial.clone();
-            for (path, choice) in slot_paths.iter().zip(st.choices.iter()) {
+            let choices = choice_list_rev(&st.choices);
+            for (path, choice) in slot_paths.iter().zip(choices.iter()) {
                 match choice {
                     SlotChoice::Unset => {
                         trial.remove(path);
@@ -4147,6 +4153,25 @@ enum SlotChoice {
     Part(String),
 }
 
+type ChoiceList = Option<Rc<ChoiceNode>>;
+
+#[derive(Debug)]
+struct ChoiceNode {
+    choice: SlotChoice,
+    prev: ChoiceList,
+}
+
+fn choice_list_rev(list: &ChoiceList) -> Vec<SlotChoice> {
+    let mut out = Vec::new();
+    let mut cur = list;
+    while let Some(node) = cur {
+        out.push(node.choice.clone());
+        cur = &node.prev;
+    }
+    out.reverse();
+    out
+}
+
 /// Tuning-free contribution of one laser part's `pro` modifiers. The
 /// evaluator applies the modifiers of a single laser part, the one with the
 /// highest `score`, so the DP keeps the candidate deltas out of the slot
@@ -4173,7 +4198,7 @@ struct DpState {
     metric: ExactPart,
     detail_pro: Option<Rc<LaserPro>>,
     panel_pro: Option<Rc<LaserPro>>,
-    choices: Vec<SlotChoice>,
+    choices: ChoiceList,
 }
 
 /// Optimistic completion bounds for the slots after a DP level. Each field is
@@ -4350,8 +4375,10 @@ fn dp_metric_advance(
 #[cfg(test)]
 fn dp_advance(state: &DpState, opt: &DpOption, cost: i64) -> DpState {
     let (metric, detail_pro, panel_pro) = dp_metric_advance(state, opt);
-    let mut choices = state.choices.clone();
-    choices.push(opt.choice.clone());
+    let choices = Some(Rc::new(ChoiceNode {
+        choice: opt.choice.clone(),
+        prev: state.choices.clone(),
+    }));
     DpState {
         cost,
         metric,
@@ -4952,13 +4979,77 @@ fn dp_pareto_capped(
             trim.aborted = true;
             break;
         }
+        let x = &st.metric;
+        let aim_lower = dims.hs && aim_dir == AimDir::LessHandling;
+        let aim_higher = dims.hs && aim_dir == AimDir::MoreHandling;
+        // Scalar necessary condition for `dp_dominates(o, st)`. It mirrors the
+        // first checks of `dp_dominates` exactly (same 1e-9 tolerance, same
+        // directions) and only rejects pairs that cannot dominate, so the
+        // envelope scan below is unchanged.
+        let quick = |o: &DpState| -> bool {
+            let y = &o.metric;
+            if o.cost > st.cost {
+                return false;
+            }
+            if dims.d && y.d < x.d - 1e-9 {
+                return false;
+            }
+            if dims.ah && y.ah > x.ah + 1e-9 {
+                return false;
+            }
+            if dims.av && y.av > x.av + 1e-9 {
+                return false;
+            }
+            if dims.ch && y.ch > x.ch + 1e-9 {
+                return false;
+            }
+            if dims.cv && y.cv > x.cv + 1e-9 {
+                return false;
+            }
+            if dims.ck && y.ck > x.ck + 1e-9 {
+                return false;
+            }
+            if dims.eh && y.eh < x.eh - 1e-9 {
+                return false;
+            }
+            if dims.ev && y.ev < x.ev - 1e-9 {
+                return false;
+            }
+            if dims.ek && y.ek < x.ek - 1e-9 {
+                return false;
+            }
+            if aim_higher && y.eopen < x.eopen - 1e-9 {
+                return false;
+            }
+            if aim_lower && y.eopen_min > x.eopen_min + 1e-9 {
+                return false;
+            }
+            if dims.hs {
+                match aim_dir {
+                    AimDir::MoreHandling => {
+                        if y.hs < x.hs - 1e-9 || y.adsm > x.adsm + 1e-9 {
+                            return false;
+                        }
+                    }
+                    AimDir::LessHandling => {
+                        if y.hs > x.hs + 1e-9 || y.adsm < x.adsm - 1e-9 {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            true
+        };
         if out
             .iter()
-            .any(|o| dp_dominates(o, &st, dims, panel_dirs, aim_dir))
+            .any(|o| quick(o) && dp_dominates(o, &st, dims, panel_dirs, aim_dir))
         {
             continue;
         }
-        out.retain(|o| !dp_dominates(&st, o, dims, panel_dirs, aim_dir));
+        // `dp_dominates` starts with `st.cost > o.cost -> false`, so testing
+        // the scalar first is equivalent and skips the envelope scan.
+        out.retain(|o| st.cost > o.cost || !dp_dominates(&st, o, dims, panel_dirs, aim_dir));
         out.push(st);
     }
     (out, trim)
@@ -6619,7 +6710,7 @@ mod tests {
             },
             detail_pro: None,
             panel_pro: None,
-            choices: Vec::new(),
+            choices: None,
         }
     }
 
@@ -7148,9 +7239,15 @@ mod tests {
     #[test]
     fn pareto_dedups_identical_metrics_and_keeps_the_cheapest() {
         let mut cheap = part(10.0, 5, vec![]);
-        cheap.choices.push(SlotChoice::Part("a".to_string()));
+        cheap.choices = Some(Rc::new(ChoiceNode {
+            choice: SlotChoice::Part("a".to_string()),
+            prev: None,
+        }));
         let mut pricey = part(10.0, 7, vec![]);
-        pricey.choices.push(SlotChoice::Part("b".to_string()));
+        pricey.choices = Some(Rc::new(ChoiceNode {
+            choice: SlotChoice::Part("b".to_string()),
+            prev: None,
+        }));
         let distinct = part(11.0, 6, vec![]);
         let dims = DpDims {
             d: true,
@@ -7160,7 +7257,8 @@ mod tests {
         assert_eq!(out.len(), 2);
         let deduped = out.iter().find(|s| s.metric.d == 10.0).unwrap();
         assert_eq!(deduped.cost, 5);
-        assert!(matches!(&deduped.choices[0], SlotChoice::Part(id) if id == "a"));
+        let deduped_choices = choice_list_rev(&deduped.choices);
+        assert!(matches!(&deduped_choices[0], SlotChoice::Part(id) if id == "a"));
     }
 
     fn laser_option(
@@ -7241,7 +7339,7 @@ mod tests {
             metric: ExactPart::neutral_panel(1),
             detail_pro: None,
             panel_pro: None,
-            choices: Vec::new(),
+            choices: None,
         };
 
         // The evaluator applies the modifiers of one laser, the best scoring
@@ -7349,7 +7447,7 @@ mod tests {
             metric: ExactPart::neutral_panel(1),
             detail_pro: None,
             panel_pro: None,
-            choices: Vec::new(),
+            choices: None,
         };
 
         let state = dp_advance(&dp_advance(&start, &weak, 200), &internal, 300);
@@ -7771,12 +7869,12 @@ mod tests {
             parent_slot_path_key: parent.map(str::to_string),
             host_part_id: "host".to_string(),
             depth,
-            slot: crate::assembly::SlotView {
+            slot: Rc::new(crate::assembly::SlotView {
                 id: "slot".to_string(),
                 name: "slot".to_string(),
                 virtual_candidate_ids: Vec::new(),
-            },
-            candidate_ids: Vec::new(),
+            }),
+            candidate_ids: Rc::new(Vec::new()),
             selected_part_id: selected.map(str::to_string),
             internal_part_id: internal.map(str::to_string),
             internal_is_default: false,
@@ -7794,11 +7892,11 @@ mod tests {
             parent_slot_path_key: parent.map(str::to_string),
             host_part_id: "host".to_string(),
             depth,
-            slot: crate::assembly::SlotView {
+            slot: Rc::new(crate::assembly::SlotView {
                 id: "slot".to_string(),
                 name: "slot".to_string(),
                 virtual_candidate_ids: Vec::new(),
-            },
+            }),
             part_id: part.to_string(),
             source: "default".to_string(),
         }

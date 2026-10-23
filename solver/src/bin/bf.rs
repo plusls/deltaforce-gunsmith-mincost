@@ -143,7 +143,7 @@ impl<'a> Bf<'a> {
                         opts.push(None);
                     }
                     opts.push(Some(None));
-                    for c in &slot.candidate_ids {
+                    for c in slot.candidate_ids.iter() {
                         opts.push(Some(Some(c.clone())));
                     }
                 }
@@ -639,7 +639,7 @@ impl<'a> Bf<'a> {
                         opts.push(None);
                     }
                     opts.push(Some(None));
-                    for c in &slot.candidate_ids {
+                    for c in slot.candidate_ids.iter() {
                         opts.push(Some(Some(c.clone())));
                     }
                 }

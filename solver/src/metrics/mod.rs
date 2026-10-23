@@ -302,12 +302,12 @@ pub(crate) mod test_support {
                 parent_slot_path_key: None,
                 host_part_id: "w1".to_string(),
                 depth: 1,
-                slot: crate::assembly::SlotView {
+                slot: std::rc::Rc::new(crate::assembly::SlotView {
                     id: "1".to_string(),
                     name: "Muzzle_point".to_string(),
                     virtual_candidate_ids: Vec::new(),
-                },
-                candidate_ids: vec![part_id.to_string()],
+                }),
+                candidate_ids: std::rc::Rc::new(vec![part_id.to_string()]),
                 selected_part_id: Some(part_id.to_string()),
                 internal_part_id: None,
                 internal_is_default: false,
