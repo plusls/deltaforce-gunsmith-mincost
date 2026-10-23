@@ -1193,8 +1193,26 @@ pub(crate) fn scale_factor(base: Option<f64>, current: Option<f64>) -> f64 {
     }
 }
 
+/// JavaScript `Math.round`: half values round toward +infinity, so
+/// `js_round(-0.5)` is `-0` while `f64::round(-0.5)` is `-1`.
+fn js_round(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    let rounded = (value + 0.5).floor();
+    if rounded == 0.0 {
+        if value.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else {
+        rounded
+    }
+}
+
 fn round2(value: f64) -> f64 {
-    ((value + f64::EPSILON) * 100.0).round() / 100.0
+    js_round((value + f64::EPSILON) * 100.0) / 100.0
 }
 
 /// Value of a stability detail metric when every non-`dS` input is neutral:
@@ -1727,6 +1745,56 @@ mod tests {
         .unwrap();
         let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(out["optimal"], false, "no recoil value can satisfy the bound");
+    }
+
+    #[test]
+    fn round2_uses_js_math_round_semantics() {
+        // Math.round rounds .5 toward +infinity, unlike f64::round.
+        assert_eq!(round2(-0.2550000000000002), -0.25);
+        assert_eq!(round2(-0.26500000000000024), -0.26);
+        assert_eq!(round2(-0.2950000000000002), -0.29);
+        assert_eq!(round2(0.2550000000000002), 0.26);
+        let negative_zero = round2(-0.005);
+        assert_eq!(negative_zero, 0.0);
+        assert!(negative_zero.is_sign_negative());
+    }
+
+    #[test]
+    fn hit_sway_rounds_like_js_math_round() {
+        let payload: WeaponPayload = serde_json::from_value(serde_json::json!({
+            "parts": { "w1": { "id": "w1", "name": "Gun" } },
+            "weaponStatsById": {
+                "w1": {
+                    "byMode": {
+                        "operations": {
+                            "base": { "10006": 50 },
+                            "display": { "10006": 50 }
+                        }
+                    }
+                }
+            },
+            "weaponNumericProfilesById": {
+                "w1": {
+                    "detail": {
+                        "raw_weapon_attribute": {
+                            "GunSwayBeHitScale": -0.2550000000000002
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let prices: FxHashMap<String, i64> = FxHashMap::default();
+        let ev = Evaluator {
+            payload: &payload,
+            weapon_id: "w1",
+            mode: "operations",
+            laser_enabled: false,
+            bipod_deployed: false,
+            prices: &prices,
+        };
+        let detail = ev.detail_with(&[], &DetailSums::default());
+        assert_eq!(detail.hit_sway, Some(-0.25));
     }
 
     #[test]
