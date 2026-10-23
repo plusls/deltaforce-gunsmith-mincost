@@ -342,9 +342,9 @@ fn stability_reduction_keeps_the_internal_stability_offset() {
     assert!(reduced[0].max.is_none());
 
     // Reducing the same payload without the internal addend gives the exact
-    // panel bound. The internal +6 can only be installed behind the panel, so
-    // it must widen the mapped bound by the internal bracket (counted twice,
-    // once for the internal placement and once for a possible visible one).
+    // panel bound. The internal +6 is installed at one internal placement, so
+    // the mapped bound widens by exactly that one placement. A visible
+    // placement cannot add a copy: its 10007 addend cancels against the panel.
     let mut visible_only = payload.clone();
     let part = visible_only.parts.get_mut(INTERNAL_SIGHT).unwrap();
     for list in part.display_mods.values_mut() {
@@ -352,7 +352,7 @@ fn stability_reduction_keeps_the_internal_stability_offset() {
     }
     let exact = reduce_stability_constraints(&visible_only, WEAPON, "operations", &constraints);
     let exact_min = exact[0].min.expect("exact reduction");
-    assert!((exact_min - with_internal - 12.0).abs() < 1e-6);
+    assert!((exact_min - with_internal - 6.0).abs() < 1e-6);
     assert!(with_internal < exact_min);
 }
 
@@ -382,9 +382,10 @@ fn stability_reduction_widens_the_panel_upper_bound_for_a_negative_internal_delt
     }
     let exact = reduce_stability_constraints(&visible_only, WEAPON, "operations", &constraints);
     let exact_max = exact[0].max.expect("exact reduction");
-    // A negative internal addend can only pull the panel bound down, so the
-    // mapped upper bound must sit 2 * 6 above the exact one.
-    assert!((with_internal - exact_max - 12.0).abs() < 1e-6);
+    // A negative internal addend can only pull the panel bound down. One
+    // internal placement widens it by exactly 6; a visible placement would
+    // cancel against the panel and must not be counted.
+    assert!((with_internal - exact_max - 6.0).abs() < 1e-6);
 }
 
 #[test]

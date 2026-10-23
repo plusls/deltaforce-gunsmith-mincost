@@ -358,25 +358,24 @@ fn classify_direction(f: &impl Fn(f64) -> Option<f64>, points: &[f64]) -> Option
 /// install behind the panel keep their addends in the bracket instead.
 ///
 /// A part can be installed internally more than once: every default preset
-/// node with its own `pathKey` is a separate placement, and the same sight can
-/// occupy several sockets. The bracket therefore multiplies each addend by
-/// that placement count, plus one copy for a possible visible placement. The
-/// extra copy is slack for the common `10007`-only part (a visible placement
-/// then cancels against the panel); it keeps the historic bracket for a single
-/// internal placement. Conditional addends are treated as always active on the
-/// high side and as active when negative on the low side, which can only widen
-/// the bracket. Only the display channel matters; `dS` never reads the main
-/// attribute list.
+/// node with its own `pathKey` is a separate placement, and virtual rules add
+/// more. Each internal placement contributes the addend to `dS` without
+/// touching the panel. A visible placement of a `10007` addend cancels against
+/// the panel and must not be counted; a visible placement of any other
+/// stability addend moves `dS` without the panel and adds one more copy.
+/// Conditional addends are treated as always active on the high side and as
+/// active when negative on the low side, which can only widen the bracket.
+/// Only the display channel matters; `dS` never reads the main attribute list.
 fn stability_internal_offset(
     payload: &WeaponPayload,
     weapon_id: &str,
     mode: &str,
 ) -> Option<(f64, f64)> {
-    let placements = internal_placement_counts(payload, weapon_id, mode)?;
+    let placements = placement_counts(payload, weapon_id, mode)?;
     let mut lo = 0.0;
     let mut hi = 0.0;
     for part in payload.parts.values() {
-        let Some(&count) = placements.get(part.id.as_str()) else {
+        let Some(&internal) = placements.internal.get(part.id.as_str()) else {
             for modifier in part.display_mods_for(weapon_id, mode) {
                 if modifier.modifier_type != "Addend" {
                     continue;
@@ -391,7 +390,11 @@ fn stability_internal_offset(
             }
             continue;
         };
-        let copies = (count + 1) as f64;
+        let visible = placements
+            .visible
+            .get(part.id.as_str())
+            .copied()
+            .unwrap_or(0);
         for modifier in part.display_mods_for(weapon_id, mode) {
             if modifier.modifier_type != "Addend" {
                 continue;
@@ -400,17 +403,13 @@ fn stability_internal_offset(
             if !STABILITY_ATTRS.contains(&attr) {
                 continue;
             }
-            // A visible placement of a part carrying a non-`10007` stability
-            // addend moves `dS` without moving the panel, and the part may be
-            // selectable at more than one visible slot. That multiplicity is
-            // not bounded here, so decline the reduction instead of
-            // undercounting it.
-            if attr != STABILITY_PANEL_ATTR
-                && modifier.condition_id.is_none()
-                && modifier.delta.map(|v| v.0 != 0.0).unwrap_or(false)
-            {
-                return None;
-            }
+            let copies = internal
+                + if attr == STABILITY_PANEL_ATTR {
+                    0
+                } else {
+                    visible
+                };
+            let copies = copies as f64;
             let delta = modifier.delta.map(|v| v.0).unwrap_or(0.0);
             lo += copies * delta.min(0.0);
             hi += copies * delta.max(0.0);
@@ -419,21 +418,32 @@ fn stability_internal_offset(
     Some((lo, hi))
 }
 
-/// Number of independent placements through which the assembler can install
-/// each part internally.
+#[derive(Default)]
+struct PlacementCounts<'a> {
+    /// Internal placements per part: default preset path keys plus virtual
+    /// rule socket groups.
+    internal: rustc_hash::FxHashMap<&'a str, usize>,
+    /// Visible slots whose candidate list contains the part.
+    visible: rustc_hash::FxHashMap<&'a str, usize>,
+}
+
+/// Placements through which the assembler can install each part.
 ///
 /// Default preset nodes are keyed by `pathKey` in the assembler's defaults map
 /// and each tree position is visited at most once, so distinct path keys are
-/// distinct placements. Virtual rules are not bounded by their count: a rule is
-/// keyed by socket id and the assembler applies it at every visited slot with
-/// that id, including slots under a host it installs more than once. When a
-/// virtual part carries stability addends, the caller must not reduce.
-fn internal_placement_counts<'a>(
+/// distinct placements. Virtual rules are grouped by socket id: at most one
+/// rule per socket can fire. Their part still cannot be bounded by the rule
+/// count alone because the assembler applies the selected rule at every
+/// visited slot with that id, including slots under a host it installs more
+/// than once, so virtual parts carrying stability addends decline the
+/// reduction. The visible count uses every static slot candidate list, which
+/// overcounts unreachable hosts and therefore widens the bracket.
+fn placement_counts<'a>(
     payload: &'a WeaponPayload,
     weapon_id: &str,
     mode: &str,
-) -> Option<rustc_hash::FxHashMap<&'a str, usize>> {
-    let mut out: rustc_hash::FxHashMap<&'a str, usize> = rustc_hash::FxHashMap::default();
+) -> Option<PlacementCounts<'a>> {
+    let mut out = PlacementCounts::default();
     if let Some(preset) = payload.default_presets.get(weapon_id) {
         let mut paths: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashSet<&'a str>> =
             rustc_hash::FxHashMap::default();
@@ -451,16 +461,35 @@ fn internal_placement_counts<'a>(
             paths.entry(part.id.as_str()).or_default().insert(path);
         }
         for (id, paths) in paths {
-            out.insert(id, paths.len());
+            out.internal.insert(id, paths.len());
         }
     }
     if let Some(rules) = payload.virtual_rules.get(weapon_id) {
+        let mut groups: rustc_hash::FxHashMap<&'a str, rustc_hash::FxHashSet<&'a str>> =
+            rustc_hash::FxHashMap::default();
         for rule in rules {
             let Some(part) = payload.parts.get(&rule.virtual_part_id) else {
                 continue;
             };
             if has_stability_addend(part, weapon_id, mode) {
                 return None;
+            }
+            groups
+                .entry(part.id.as_str())
+                .or_default()
+                .insert(rule.socket_id.as_str());
+        }
+        for (id, sockets) in groups {
+            *out.internal.entry(id).or_default() += sockets.len();
+        }
+    }
+    for slots in payload.slots_by_host.values() {
+        for slot in slots {
+            for id in &slot.candidate_ids {
+                let Some(part) = payload.parts.get(id) else {
+                    continue;
+                };
+                *out.visible.entry(part.id.as_str()).or_default() += 1;
             }
         }
     }

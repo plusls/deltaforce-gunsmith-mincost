@@ -72,13 +72,13 @@ fn four_internal_sights_widen_the_bound_by_every_placement() {
 }
 
 #[test]
-fn single_internal_sight_keeps_the_historic_widening() {
-    // The stock preset has one internal placement. The historic bracket counts
-    // one internal plus one visible copy, so this stays at 12.
+fn single_internal_sight_widens_by_its_one_placement() {
+    // The stock preset has one internal placement. Its 10007 addend does not
+    // cancel there, so the bracket widens by exactly one copy of +6.
     let stock = payload();
     let with_sight = mapped_min(&stock);
     let exact = mapped_min(&without_sight_stability(&stock));
-    assert!((exact - with_sight - 12.0).abs() < 1e-6);
+    assert!((exact - with_sight - 6.0).abs() < 1e-6);
 }
 
 fn fire_camera_curve() -> Value {
@@ -187,7 +187,7 @@ fn synthetic_four_internal_placements_keep_the_feasible_build() {
     );
     assert_eq!(reduced.len(), 1, "{reduced:?}");
     assert_eq!(reduced[0].id, "10007", "{reduced:?}");
-    // base 50 + threshold (~21.2) - 4 * 6 - one extra visible copy.
+    // base 50 + threshold (~18.9) - 4 * 6.
     assert!(
         reduced[0].min.unwrap() < 50.0,
         "mapped bound {:?} would prune the stock build",
