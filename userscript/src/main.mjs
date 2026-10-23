@@ -434,7 +434,11 @@ function installWorkerHook() {
               };
               const status = describeResultStatus(result, result.deadlineMs);
               reportStatus(status.text, status.tone);
-              emit({ result: toSiteResult(context, result) });
+              if (result.kind === "error" || result.kind === "incomplete") {
+                emit({ error: status.text });
+              } else {
+                emit({ result: toSiteResult(context, result) });
+              }
             } catch (error) {
               reportStatus(friendlyError(error), "error");
               emit({ error: friendlyError(error) });
