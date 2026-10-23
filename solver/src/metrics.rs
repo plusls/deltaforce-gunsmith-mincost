@@ -1514,6 +1514,11 @@ const TUNE_GRID_LIMIT: usize = 65_536;
 /// set is a superset of the site's. `truncated` covers every case where the
 /// grid cannot be enumerated completely: an oversized grid, an unrepresentable
 /// precision, or a step absorbed by floating point.
+///
+/// This bool is internal to the tuning enumeration. Search maps it to
+/// `heuristic_incomplete`/`tune_incomplete` so the result cannot claim
+/// optimality; it does not set the public `SolveResult.truncated`, which only
+/// reports deadline or node/leaf budget exhaustion.
 pub fn tune_offer_values(tune: &TuningOption) -> (Vec<f64>, bool) {
     let mut values = vec![tune.min_value, tune.max_value, tune.default_value];
     for effect in &tune.display_effects {
