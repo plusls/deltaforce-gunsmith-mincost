@@ -1,57 +1,145 @@
-## 关于数值系统
+# Delta Weapon Custom
 
-参考资料：
-https://www.bilibili.com/video/BV1x26KYTEwk
+三角洲行动（moligod 改枪页）的约束改枪求解器。核心用 Rust 实现并编译为 WASM，通过 Tampermonkey 脚本嵌入改枪页，在站点原有“生成智能配件方案”旁提供“最低开销”求解。
 
-### 后坐力
+站点的优化器是客户端 beam search，目标是偏好分数，不保证最优。本仓库给出的是另一个问题：在给定约束下求最低总价，并尽可能证明最优。
 
-后坐力分为 
+## 能力
 
-+ 全自动垂直后坐力倍率
-+ 全自动水平后坐力倍率
-+ 单点垂直后坐力倍率
-+ 单点水平后坐力倍率
-+ 开火稳定性
+- 约束求解：后坐力、开火稳定性、面板属性、操控/稳定性等细分指标，支持 min/max 区间。
+- 精确数值模型：复刻站点的曲线、取整、激光主副属性、脚架、虚拟件、内部默认件与精校规则。
+- 搜索：结构槽 DFS + 叶子槽 Pareto DP + 分支定界；可指定节点/叶子上限、截止时间、首个可行解。
+- 模式：`operations`、`warfare`、`blackhawk`（黑鹰爆破），支持当前价/系统价与缺价策略。
+- 浏览器端单线程：WASM 求解默认放在独立 Web Worker（创建失败时回退主线程），页面主线程只做数据转换与结果回填。
 
-上述数值均为倍率，也就是不同配件之间的倍率会进行乘法运算, 面板的后坐力控制数值仅供参考 (个人理解无实际意义, 直接参考子属性即可)
+## 仓库结构
 
-### 操控速度
+```text
+solver/src/            Rust 求解器
+solver/src/bin/solve.rs  原生 CLI
+solver/js/             WASM 封装、站点适配、时限处理、smoke 脚本
+solver/tests/          Rust 集成测试与真实 payload fixture
+userscript/src/        油猴脚本入口与 Worker 源码
+userscript/build.mjs   打包单文件 userscript（内联 wasm）
+userscript/test/       构建与 worker 协议测试
+docs/                  数值模型、站点 worker 协议、求解器算法、脚本设计
+```
 
-操控分为以下子属性
+## 构建
 
-+ 开镜时间
-+ 跑射延迟
-+ 开镜移速
+依赖：
 
-其中配件可能只影响某个子属性，例如幻影的 +8 操控，只影响开镜时间
-
-#### 开镜时间
-
-开镜时间和操控速度的数值直接相关，讲人话就是，两把不同的枪，只要操控数值相同那么开镜时间就相同（整体是对的，但是幻影垂直握把除外）
-
-变化趋势：
-
-操控越大，开镜时间越短。操控越大，开镜时间降低的趋势越小（斜率变小，存在边际效应）
-
-#### 跑射延迟
-
-由子属性变化值影响
-
-
-
-
-## 文档与工具
-
-- `docs/gunsmith-numerical-model.md`: 站点数值模型, 后坐力/精校/曲线公式
-- `docs/gunsmith-smart-build.md`: 站点"生成智能配件方案"的 worker 协议与 beam search 分析
-- `docs/gunsmith-rust-solver.md`: 约束下最低总价求解器 (Rust + WASM), 算法与实测结果
-- `docs/gunsmith-userscript.md`: 油猴脚本的数据来源, 接口约定, 构建与真实页面验证
-- `userscript/`: 油猴脚本源码与构建脚本
+- Rust stable，以及 `wasm32-unknown-unknown` target
+- Node.js 18+（使用内置 `node:test`）
 
 ```bash
+rustup target add wasm32-unknown-unknown
+
 cargo build --release
 cargo build --release --target wasm32-unknown-unknown -p delta-weapon-solver
-node solver/js/smoke.mjs target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm weapon.json request.json
-node userscript/build.mjs   # 生成 userscript/dist/gunsmith-mincost.user.js
+node userscript/build.mjs
+# 产物: userscript/dist/gunsmith-mincost.user.js
+```
+
+## 原生 CLI
+
+```bash
+# 完整请求（含 weaponPayload）从 stdin 读取
+target/release/solve < request.json
+
+# 或 payload 与请求分开
+target/release/solve --payload weapon.json --request request.json
+
+# 或直接指定 payload 和约束
+target/release/solve --payload weapon.json --prices prices.json \
+  --weapon 18010000049 --mode operations \
+  --constraint recoil-continuous-vertical:0.6 \
+  --constraint recoil-continuous-horizontal:0.6 \
+  --constraint recoil-fire-stability:0.8
+```
+
+`--help` 列出全部参数。常用选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `--request request.json` | 完整请求或仅含求解参数的请求；不能与 `--prices` 同时使用 |
+| `--prices prices.json` | 文件格式 `{"prices": {"partId": 12345}}`；缺价默认排除，`--allow-missing-prices` 视为 0 |
+| `--constraint id:max` / `id:min:max` | 指标约束，可重复 |
+| `--laser-off` | 关闭激光 |
+| `--bipod-deployed` | 两脚架展开 |
+| `--first` | 找到第一个可行解即停止，不证明最优 |
+| `--deadline-ms N` | 软截止时间，超时返回当前最好解并标记 `truncated` |
+| `--max-nodes N` / `--max-leaves N` | 搜索预算 |
+| `--exclude partId` | 排除配件，可重复 |
+
+支持的指标：`recoil-continuous-horizontal`、`recoil-continuous-vertical`、`recoil-single-horizontal`、`recoil-single-vertical`、`recoil-fire-stability`、面板属性 id `10001`、`10005`、`10006`、`10007`、`10008`，以及 `handling-*`、`stability-*`、`hipfire-*` 细分指标（完整列表见 `solver/src/metrics.rs` 的 `DETAIL_METRICS`）。
+
+请求 JSON 的字段定义见 `solver/src/lib.rs` 的 `SolveRequest`，核心字段：
+
+```json
+{
+  "weaponPayload": { "...": "站点解密后的完整 payload" },
+  "weaponId": "18010000049",
+  "mode": "operations",
+  "laserEnabled": true,
+  "bipodDeployed": false,
+  "prices": { "18010000049": 93765, "partId": 12345 },
+  "lockedPathKeys": {},
+  "lockedTuningKeys": {},
+  "excludedPartIds": [],
+  "constraints": [
+    { "id": "recoil-continuous-vertical", "max": 0.6 },
+    { "id": "10005", "min": 50 }
+  ],
+  "maxEvaluations": 5000000,
+  "maxLeaves": 2000000,
+  "maxResults": 10,
+  "deadlineMs": 5000,
+  "firstSolution": false
+}
+```
+
+### WASM
+
+```bash
+node solver/js/smoke.mjs \
+  target/wasm32-unknown-unknown/release/delta_weapon_solver.wasm \
+  weapon.json request.json
+```
+
+## 油猴脚本
+
+1. 用 Tampermonkey 新建脚本，粘贴 `userscript/dist/gunsmith-mincost.user.js`。
+2. 打开 moligod 改枪页，站点“生成智能配件方案”按钮下方会出现“最低开销”按钮和设置项。
+3. 在站点面板设置至少一个硬阈值，再点“最低开销”。
+
+设置：
+
+- 完整模式：开启时完整搜索并证明最优；关闭时只找第一个可行解。
+- 市场价：使用当前市场价或系统价。
+- 缺价排除：缺价配件不参与求解；关闭时按缺失价格处理。
+- 时限：留空跟随站点“搜索”时长；填 1-300 覆盖。
+
+脚本在 `document-start` 包装页面的 `Worker`，只拦截 optimizer worker 的请求，从中取得已解密的 payload、价格、锁定项和当前装配。数据不会上传到任何地方。
+
+## 测试
+
+```bash
+cargo test
+CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --release
+CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --release -- --ignored   # 慢回归
 node --test solver/js/*.test.mjs userscript/test/*.test.mjs
 ```
+
+`Cargo.toml` 的 release profile 设置了 `panic = "abort"`，release 模式下直接跑测试会链接失败，因此需要上面的环境变量。发布 WASM/userscript 时不要带该变量。
+
+## 说明
+
+本项目与游戏发行商、站点运营方无关。所有武器数据、价格和配装都由浏览器页面在本地提供，脚本只在本机内存中处理，不上传数据。使用前请自行确认符合站点条款与所在地法规。
+
+## 文档
+
+- `docs/gunsmith-numerical-model.md`：站点数值模型，后坐力/精校/曲线公式
+- `docs/gunsmith-smart-build.md`：站点“生成智能配件方案”的 worker 协议与 beam search 分析
+- `docs/gunsmith-rust-solver.md`：求解器算法、复杂度与实测结果
+- `docs/gunsmith-userscript.md`：脚本数据来源、接口约定、构建与真实页面验证
