@@ -1,0 +1,1 @@
+{"weaponId": "w1", "mode": "operations", "laserEnabled": true, "bipodDeployed": false, "prices": {"w1": 1000}, "constraints": [{"id": "recoil-fire-stability", "max": 0.999999999999}], "maxEvaluations": 2000000, "maxLeaves": 2000000, "maxResults": 3, "deadlineMs": 30000}
