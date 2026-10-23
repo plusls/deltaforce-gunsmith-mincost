@@ -360,6 +360,25 @@ fn stability_max_constraint_keeps_the_internal_part_solution() {
 }
 
 #[test]
+fn stability_min_constraint_keeps_the_reduced_search_path() {
+    let payload = payload();
+    let prices = prices();
+    // `stability-fire-camera` falls as stability rises, so a min bound maps to
+    // a panel upper bound. With only positive internal stability the mapped
+    // bound stays valid and must keep the leaf DP instead of falling back to
+    // full enumeration.
+    let out = solve(
+        &payload,
+        &prices,
+        vec![Constraint::new("stability-fire-camera", Some(0.5), None)],
+    );
+
+    assert!(out.optimal);
+    let best = out.best.expect("feasible fire-camera build");
+    assert!(best.detail.fire_camera.unwrap() >= 0.5 - 1e-9);
+}
+
+#[test]
 fn stability_reduction_still_applies_without_internal_stability_modifiers() {
     let mut payload = payload();
     let part = payload.parts.get_mut(INTERNAL_SIGHT).unwrap();
