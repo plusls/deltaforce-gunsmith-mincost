@@ -20,7 +20,7 @@ pub struct SolveRequest {
     pub weapon_id: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
-    #[serde(rename = "laserEnabled", default = "default_true")]
+    #[serde(rename = "laserEnabled", default)]
     pub laser_enabled: bool,
     #[serde(rename = "bipodDeployed", default)]
     pub bipod_deployed: bool,
@@ -46,9 +46,6 @@ pub struct SolveRequest {
     pub deadline_ms: Option<u64>,
 }
 
-fn default_true() -> bool {
-    true
-}
 fn default_max_nodes() -> u64 {
     5_000_000
 }
@@ -126,7 +123,7 @@ pub fn solve_slices(payload_json: &[u8], request_json: &[u8]) -> Result<Vec<u8>,
         weapon_id: Option<String>,
         #[serde(default)]
         mode: Option<String>,
-        #[serde(rename = "laserEnabled", default = "default_true")]
+        #[serde(rename = "laserEnabled", default)]
         laser_enabled: bool,
         #[serde(rename = "bipodDeployed", default)]
         bipod_deployed: bool,

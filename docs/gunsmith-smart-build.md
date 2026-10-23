@@ -127,7 +127,7 @@ moligod:gunsmith-optimizer-inputs:v1:{weaponId}:{mode}:preparedness
 | `data` | object? | 完整 weapon payload; 仅当 `dataKey` 变化时发送 |
 | `weaponId` | string | 武器 id |
 | `mode` | string | `operations` / `warfare` / `blackhawk` |
-| `laserEnabled` | boolean | 激光是否开启, 影响镭射词条 |
+| `laserEnabled` | boolean | 激光是否开启, 影响镭射词条; 缺省 false |
 | `currentSelections` | object | `slotPathKey -> partId` |
 | `tuningState` | object | `slotPathKey\0partId\0tuneId -> number` |
 | `lockedPathKeys` | string[] | 用户锁定的槽位 |

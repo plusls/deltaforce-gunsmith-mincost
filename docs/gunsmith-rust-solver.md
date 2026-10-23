@@ -262,6 +262,8 @@ RM277 查询从 2.3 s 降到 0.9 s, WASM 从 3.2 s 降到 1.25 s.
 
 `weaponPayload` 可以在同一个对象里, 也可由 `solve_slices` 单独传入. 价格 key 用 `officialObjectId`, 缺失时回落到 `id`.
 
+`laserEnabled` 缺省为 `false`, 与站点 optimizer 的 `!!laserEnabled` 一致.
+
 ### 6.2 输出
 
 ```json

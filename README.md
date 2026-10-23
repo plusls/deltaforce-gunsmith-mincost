@@ -108,6 +108,8 @@ target/release/solve --payload weapon.json --prices prices.json \
 }
 ```
 
+`laserEnabled` 缺省为 `false`，与站点 optimizer 的 `!!laserEnabled` 一致。
+
 ### WASM
 
 ```bash
