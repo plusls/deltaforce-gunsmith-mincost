@@ -1,5 +1,5 @@
 use crate::assembly::{Assembler, VisibleSlot};
-use crate::constraint_reduction::reduce_stability_constraints;
+use crate::constraint_reduction::{reduce_stability_constraints, REDUCIBLE_STABILITY_METRICS};
 use crate::metrics::{
     eval_curve_points, quantize, scale_factor, scale_ratio, tune_channels, tune_offer,
     tune_offer_values, tuning_available, DetailMetrics, DetailSums, Evaluator, TuningInstance,
@@ -321,6 +321,13 @@ pub struct Solver<'a> {
     seed_panel_attrs: Vec<usize>,
     seed_aim: f64,
     dp_metric_cache: FxHashMap<(String, String, bool), ExactPart>,
+    /// Parts whose display stability addend is hidden from the panel, so the
+    /// DP cannot tell their contribution apart from not installing them.
+    hidden_stab_parts: FxHashSet<String>,
+    /// Whether a single-sided stability constraint was rewritten to a panel
+    /// bound. The reduction stays valid, but the DP abstraction loses the
+    /// internal-part offset the original metric still sees.
+    has_reduced_stability: bool,
     tune_frontier_cache: FxHashMap<String, CachedFrontier>,
     tune_cap: usize,
     tune_next: usize,
@@ -894,6 +901,32 @@ impl<'a> Solver<'a> {
                 structural_parts.insert(id.clone());
             }
         }
+        // The reduced 10007 bound is necessary but not equivalent: internal
+        // parts contribute their stability addend to the original metric
+        // without entering the panel, and the DP neither dedups nor dominates
+        // on that hidden offset. Force the explicit Unset/Remove actions for
+        // slots whose internal part carries such an addend so the DP never
+        // folds two different offsets into one state.
+        let has_reduced_stability = options.constraints.iter().any(|c| {
+            REDUCIBLE_STABILITY_METRICS.contains(&c.id.as_str())
+                && (c.min.is_some() != c.max.is_some())
+                && !search_constraints
+                    .iter()
+                    .any(|s| s.id == c.id && s.min == c.min && s.max == c.max)
+        });
+        let mut hidden_stab_parts: FxHashSet<String> = FxHashSet::default();
+        for (id, part) in &payload.parts {
+            for modifier in part.display_mods_for(weapon_id, &options.mode) {
+                if modifier.modifier_type != "Addend" {
+                    continue;
+                }
+                let attr = normalize_attr(modifier.attribute_id.as_deref());
+                if STABILITY_ATTRS.contains(&attr) {
+                    hidden_stab_parts.insert(id.clone());
+                    break;
+                }
+            }
+        }
         let mut panel_attrs: Vec<String> = search_constraints
             .iter()
             .filter(|c| is_panel_attr(&c.id))
@@ -991,6 +1024,8 @@ impl<'a> Solver<'a> {
             seed_aim: seed_aim_weight(&search_constraints),
             search_constraints,
             dp_metric_cache: FxHashMap::default(),
+            hidden_stab_parts,
+            has_reduced_stability,
             tune_frontier_cache: FxHashMap::default(),
             tune_cap: TUNE_CAP,
             tune_next: TUNE_NEXT_LIMIT,
@@ -1379,7 +1414,14 @@ impl<'a> Solver<'a> {
             // A structural default suppresses Defer, so the DP can never pick a
             // non-structural alternative for this slot. Keep those alternatives
             // in the explicit action list; otherwise they are unreachable.
-            if !unset_structural {
+            // Same for an internal part carrying a hidden stability addend:
+            // the DP would fold Unset and Remove into one state.
+            let hidden_unset = self.has_reduced_stability
+                && unset
+                    .as_ref()
+                    .map(|id| self.hidden_stab_parts.contains(id))
+                    .unwrap_or(false);
+            if !unset_structural && !hidden_unset {
                 parts.retain(|id| self.structural_parts.contains(id));
             }
             let remove = if slot.internal_is_default {
@@ -1391,13 +1433,15 @@ impl<'a> Solver<'a> {
                 .as_ref()
                 .map(|id| self.structural_parts.contains(id))
                 .unwrap_or(false);
-            if unset_structural {
+            if unset_structural || hidden_unset {
                 forced.push(Action::Unset);
             }
-            if (remove_structural || unset_structural) && remove.as_deref() != unset.as_deref() {
+            if (remove_structural || unset_structural || hidden_unset)
+                && remove.as_deref() != unset.as_deref()
+            {
                 forced.push(Action::Remove);
             }
-            can_defer = !unset_structural;
+            can_defer = !unset_structural && !hidden_unset;
         } else if unset.is_some() {
             forced.push(Action::Unset);
             if slot.internal_is_default {
