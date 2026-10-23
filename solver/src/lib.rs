@@ -64,7 +64,7 @@ const LOCK_CONFLICT: &str = "当前配装与锁定条件不一致";
 /// applies the site's implicit slot lock: a locked tuning value only exists
 /// for a part installed in the current build, so its slot is locked to that
 /// part. Returns the parsed triples for validation against the assembly.
-fn expand_locked_tuning(
+pub fn expand_locked_tuning(
     locked_paths: &mut FxHashMap<String, Option<String>>,
     locked_tuning: &FxHashMap<String, f64>,
 ) -> Result<Vec<(String, String, String)>, String> {
@@ -145,7 +145,7 @@ fn locked_path_exists(payload: &WeaponPayload, weapon_id: &str, path: &str) -> b
 /// a lock whose slot is no longer resolvable, a locked part that is also
 /// excluded, and a locked tuning that does not belong to the installed part,
 /// instead of searching with a silently different build.
-fn validate_locks(
+pub fn validate_locks(
     payload: &WeaponPayload,
     weapon_id: &str,
     locked_paths: &FxHashMap<String, Option<String>>,
@@ -176,25 +176,8 @@ fn validate_locks(
         .collect();
     let assembler = assembly::Assembler::new(payload, weapon_id);
     let assembly = assembler.resolve(&selections);
-    let installed_at = |path: &str| -> Option<&str> {
-        if let Some(slot) = assembly
-            .visible_slots
-            .iter()
-            .find(|slot| slot.path_key == path)
-        {
-            return slot
-                .selected_part_id
-                .as_deref()
-                .or(slot.internal_part_id.as_deref());
-        }
-        assembly
-            .internal_parts
-            .iter()
-            .find(|part| part.slot_path_key == path)
-            .map(|part| part.part_id.as_str())
-    };
     for (path, part_id, tune_id) in locked_tuning {
-        if installed_at(path) != Some(part_id.as_str()) {
+        if assembly::installed_part_id(&assembly, path) != Some(part_id.as_str()) {
             return Err(format!("{STALE_LOCKED_TUNING}: {path}"));
         }
         let known = payload

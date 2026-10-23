@@ -78,6 +78,10 @@ const FRONTIER_ABORT_LEVEL_MS: u64 = 1_000;
 const SEED_IMPROVE_WORK: u64 = 10_000;
 /// Hard wall-clock cap on the heuristic improvement pass.
 const SEED_IMPROVE_MS: u64 = 8_000;
+/// Tolerance of every final constraint comparison. Pruning bounds and the
+/// tuning requirement inversion must use the same value: a value the final
+/// check accepts must never be rejected earlier as a rounding-level violation.
+const CONSTRAINT_EPS: f64 = 1e-9;
 
 pub const PANEL_ATTRS: [&str; 5] = ["10001", "10005", "10006", "10007", "10008"];
 pub const RECOIL_METRICS: [&str; 5] = [
@@ -2620,27 +2624,7 @@ impl<'a> Solver<'a> {
     /// All-virtual slots never produce a visible slot even when their virtual
     /// part is installed; those show up as internal parts instead.
     fn locks_honoured(&self, assembly: &crate::assembly::Assembly) -> bool {
-        self.options.locked_paths.iter().all(|(path, expected)| {
-            let visible = assembly
-                .visible_slots
-                .iter()
-                .find(|slot| &slot.path_key == path);
-            let internal = assembly
-                .internal_parts
-                .iter()
-                .find(|part| &part.slot_path_key == path);
-            let installed = visible
-                .and_then(|slot| {
-                    slot.selected_part_id
-                        .as_ref()
-                        .or(slot.internal_part_id.as_ref())
-                })
-                .or_else(|| internal.map(|part| &part.part_id));
-            match expected {
-                Some(expected) => installed == Some(expected),
-                None => visible.is_some() && installed.is_none(),
-            }
-        })
+        crate::assembly::locks_honoured(&self.options.locked_paths, assembly)
     }
 
     fn effective_none_part(
@@ -2720,8 +2704,8 @@ impl<'a> Solver<'a> {
                     let Some(value) = metric_value(c.id.as_str(), &metrics) else {
                         return;
                     };
-                    let min_ok = c.min.map(|m| value >= m - 1e-9).unwrap_or(true);
-                    let max_ok = c.max.map(|m| value <= m + 1e-9).unwrap_or(true);
+                    let min_ok = c.min.map(|m| value >= m - CONSTRAINT_EPS).unwrap_or(true);
+                    let max_ok = c.max.map(|m| value <= m + CONSTRAINT_EPS).unwrap_or(true);
                     let ok_this = min_ok && max_ok;
                     ok &= ok_this;
                     constraint_results.push(ConstraintResult {
@@ -5848,19 +5832,26 @@ fn apply_exact_req(
     }
     if k == 0.0 {
         let value = metric(0.0);
-        if (is_max && value > threshold) || (!is_max && value < threshold) {
+        let violates = if is_max {
+            value > threshold + CONSTRAINT_EPS
+        } else {
+            value < threshold - CONSTRAINT_EPS
+        };
+        if violates {
             *impossible = true;
         }
         return;
     }
     let linear = 100.0 * (base - threshold / k);
     let feasible_right = (k > 0.0) == is_max;
+    // Same tolerance as the final leaf check, so the inversion never rejects a
+    // tuning total that the exact evaluation would accept.
     let ok = |t: f64| {
         let value = metric(t);
         if is_max {
-            value <= threshold
+            value <= threshold + CONSTRAINT_EPS
         } else {
-            value >= threshold
+            value >= threshold - CONSTRAINT_EPS
         }
     };
     let mut lo = linear;

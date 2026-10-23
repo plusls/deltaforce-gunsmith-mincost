@@ -23,7 +23,12 @@ fn request(threshold: f64) -> Value {
     })
 }
 
-fn run_bf(payload: Value, request: Value, max_values: u64, tag: &str) -> Value {
+fn run_bf_output(
+    payload: Value,
+    request: Value,
+    max_values: u64,
+    tag: &str,
+) -> std::process::Output {
     let spec = json!({
         "payload": payload,
         "request": request,
@@ -39,6 +44,11 @@ fn run_bf(payload: Value, request: Value, max_values: u64, tag: &str) -> Value {
         .output()
         .expect("run bf");
     let _ = std::fs::remove_file(&path);
+    out
+}
+
+fn run_bf(payload: Value, request: Value, max_values: u64, tag: &str) -> Value {
+    let out = run_bf_output(payload, request, max_values, tag);
     assert!(
         out.status.success(),
         "bf failed: {}",
@@ -229,4 +239,147 @@ fn brute_treats_missing_laser_enabled_as_false() {
     request["laserEnabled"] = json!(true);
     let on = run_bf(laser_payload(), request, 64, "laser-enabled");
     assert_eq!(on["brute"]["witness"]["panel"]["10005"], json!(60.0));
+}
+
+fn tunable_part_payload() -> Value {
+    json!({
+        "dataVersion": "locked-tuning",
+        "parts": {
+            "w1": {"id": "w1", "name": "gun"},
+            "a": {
+                "id": "a",
+                "name": "a",
+                "tuningOptions": [{
+                    "tune_id": "t0",
+                    "min_value": 0.0,
+                    "max_value": 10.0,
+                    "step_value": 1.0,
+                    "default_value": 0.0,
+                    "display_effects": [{
+                        "attribute_name_snapshot": "x",
+                        "curve_points": [
+                            {"Time": 0.0, "Value": 0.0},
+                            {"Time": 10.0, "Value": 10.0}
+                        ]
+                    }],
+                    "runtime_targets": [{"runtime_target": "GRecoil_H"}]
+                }]
+            }
+        },
+        "slotsByHost": {
+            "w1": [{"id": "1", "name": "Muzzle_point", "candidateIds": ["a"]}]
+        },
+        "weaponStatsById": {
+            "w1": {
+                "byMode": {
+                    "operations": {
+                        "base": {"10001": 55},
+                        "display": {"10001": 55}
+                    }
+                }
+            }
+        }
+    })
+}
+
+const TUNING_PATH: &str = "weapon:w1/slot:1:Muzzle_point";
+
+#[test]
+fn brute_derives_an_implicit_slot_lock_from_a_locked_tuning_key() {
+    let request = json!({
+        "weaponId": "w1",
+        "mode": "operations",
+        "prices": {"w1": 1000, "a": 100},
+        "constraints": [],
+        "lockedTuningKeys": {format!("{TUNING_PATH}\0a\0t0"): 0.0}
+    });
+    let result = run_bf(tunable_part_payload(), request, 64, "implicit-tune-lock");
+    let brute = &result["brute"];
+    assert_eq!(brute["minTotalPrice"], json!(1100));
+    assert_eq!(brute["lockRejectedAssemblies"], json!(0));
+    assert_eq!(
+        brute["witness"]["selections"][TUNING_PATH],
+        json!("a"),
+        "the implicit lock must prevent the empty-slot witness"
+    );
+    assert_eq!(brute["witnessLock"]["valid"], json!(true));
+    assert_eq!(
+        brute["witnessLock"]["checked"][0]["path"],
+        json!(TUNING_PATH)
+    );
+    assert_eq!(brute["witnessLock"]["checked"][0]["actual"], json!("a"));
+    assert_eq!(result["solve"]["totalPrice"], json!(1100));
+}
+
+#[test]
+fn brute_fails_on_a_locked_tuning_key_the_part_does_not_have() {
+    let request = json!({
+        "weaponId": "w1",
+        "mode": "operations",
+        "prices": {"w1": 1000, "a": 100},
+        "constraints": [],
+        "lockedTuningKeys": {format!("{TUNING_PATH}\0a\0missing"): 0.0}
+    });
+    let out = run_bf_output(tunable_part_payload(), request, 64, "bad-tune-lock");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("error:"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn hidden_default_payload() -> Value {
+    json!({
+        "dataVersion": "hidden-default",
+        "parts": {
+            "w1": {"id": "w1", "name": "gun"},
+            "h": {"id": "h", "name": "h", "hidden": true}
+        },
+        "slotsByHost": {
+            "w1": [{"id": "1", "name": "Muzzle_point", "candidateIds": ["h"]}]
+        },
+        "defaultPresetsByWeapon": {
+            "w1": {
+                "nodes": [
+                    {"isRoot": true, "partId": "w1"},
+                    {"partId": "h", "pathKey": "weapon:w1/slot:1:Muzzle_point"}
+                ]
+            }
+        },
+        "weaponStatsById": {
+            "w1": {
+                "byMode": {
+                    "operations": {
+                        "base": {"10001": 55},
+                        "display": {"10001": 55}
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[test]
+fn brute_accepts_a_lock_installed_as_a_hidden_internal_default() {
+    let request = json!({
+        "weaponId": "w1",
+        "mode": "operations",
+        "prices": {"w1": 1000, "h": 100},
+        "constraints": [],
+        "lockedPathKeys": {"weapon:w1/slot:1:Muzzle_point": "h"}
+    });
+    let result = run_bf(
+        hidden_default_payload(),
+        request,
+        64,
+        "hidden-internal-lock",
+    );
+    let brute = &result["brute"];
+    assert_eq!(brute["minTotalPrice"], json!(1000));
+    assert_eq!(brute["lockRejectedAssemblies"], json!(0));
+    assert_eq!(brute["witnessLock"]["valid"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"][0]["slotFound"], json!(true));
+    assert_eq!(brute["witnessLock"]["checked"][0]["actual"], json!("h"));
+    assert_eq!(result["solve"]["totalPrice"], json!(1000));
 }

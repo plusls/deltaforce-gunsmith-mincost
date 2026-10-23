@@ -163,23 +163,11 @@ impl<'a> Bf<'a> {
         }
     }
 
-    /// Verifies the resolved assembly still honours every lockedPathKeys entry.
-    /// The resolver silently drops a locked part when an earlier slot claims its
-    /// socket through extraOccupySocketIds, so the raw selection map alone is not
-    /// evidence that the lock was installed.
+    /// Verifies the resolved assembly still honours every effective lock,
+    /// including the implicit slot locks derived from lockedTuningKeys. The
+    /// primitive is shared with the solver so the oracle cannot drift from it.
     fn locks_ok(&self, asm: &Assembly) -> bool {
-        self.locks.iter().all(|(path, expected)| {
-            match asm.visible_slots.iter().find(|s| &s.path_key == path) {
-                None => false,
-                Some(slot) => {
-                    let actual = slot
-                        .selected_part_id
-                        .clone()
-                        .or_else(|| slot.internal_part_id.clone());
-                    actual == *expected
-                }
-            }
-        })
+        gunsmith_mincost::assembly::locks_honoured(&self.locks, asm)
     }
 
     fn lock_report(&self, asm: &Assembly) -> Value {
@@ -189,34 +177,18 @@ impl<'a> Bf<'a> {
         paths.sort();
         for path in paths {
             let expected = self.locks.get(path).cloned().flatten();
-            let entry = match asm.visible_slots.iter().find(|s| &s.path_key == path) {
-                None => {
-                    valid = false;
-                    json!({
-                        "path": path,
-                        "expected": expected,
-                        "actual": Value::Null,
-                        "slotFound": false,
-                        "ok": false,
-                    })
-                }
-                Some(slot) => {
-                    let actual = slot
-                        .selected_part_id
-                        .clone()
-                        .or_else(|| slot.internal_part_id.clone());
-                    let ok = actual == expected;
-                    valid &= ok;
-                    json!({
-                        "path": path,
-                        "expected": expected,
-                        "actual": actual,
-                        "slotFound": true,
-                        "ok": ok,
-                    })
-                }
-            };
-            checked.push(entry);
+            let slot_found = asm.visible_slots.iter().any(|s| &s.path_key == path)
+                || asm.internal_parts.iter().any(|p| &p.slot_path_key == path);
+            let actual = gunsmith_mincost::assembly::installed_part_id(asm, path);
+            let ok = gunsmith_mincost::assembly::lock_honoured(asm, path, expected.as_deref());
+            valid &= ok;
+            checked.push(json!({
+                "path": path,
+                "expected": expected,
+                "actual": actual,
+                "slotFound": slot_found,
+                "ok": ok,
+            }));
         }
         json!({"valid": valid, "checked": checked})
     }
@@ -397,7 +369,7 @@ fn main() {
     let bipod = spec.request["bipodDeployed"].as_bool().unwrap_or(false);
     let constraints: Vec<Constraint> =
         serde_json::from_value(spec.request["constraints"].clone()).unwrap_or_default();
-    let locks: Map<String, Option<String>> =
+    let mut locks: Map<String, Option<String>> =
         serde_json::from_value(spec.request["lockedPathKeys"].clone()).unwrap_or_default();
     let locked_tuning: FxHashMap<String, f64> =
         serde_json::from_value(spec.request["lockedTuningKeys"].clone()).unwrap_or_default();
@@ -410,8 +382,30 @@ fn main() {
         .map(|(k, v)| (k.clone(), v.round() as i64))
         .collect();
 
+    // Mirror the request preprocessing of solve_request so the oracle sees the
+    // same effective locks: a locked tuning key implies a slot lock on its part.
+    let locked_tuning_keys =
+        match gunsmith_mincost::expand_locked_tuning(&mut locks, &locked_tuning) {
+            Ok(keys) => keys,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
+    let excluded_set: rustc_hash::FxHashSet<String> = excluded.iter().cloned().collect();
+    if let Err(e) = gunsmith_mincost::validate_locks(
+        &payload,
+        &weapon_id,
+        &locks,
+        &excluded_set,
+        &locked_tuning_keys,
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     let mut assembler = Assembler::new(&payload, &weapon_id);
-    assembler.set_excluded(excluded.iter().cloned().collect());
+    assembler.set_excluded(excluded_set);
     let evaluator = Evaluator {
         payload: &payload,
         weapon_id: &weapon_id,

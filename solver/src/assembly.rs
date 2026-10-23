@@ -659,6 +659,52 @@ fn is_descendant_path(path: &str, ancestor: &str) -> bool {
         && path.as_bytes()[ancestor.len()..].starts_with(b"/part:")
 }
 
+/// The part a resolved slot actually installs, whether it is a visible
+/// selection, a default/virtual part shown inside a visible slot, or an
+/// internal part of a slot that never becomes visible (hidden or all-virtual
+/// slots).
+pub fn installed_part_id<'a>(assembly: &'a Assembly, path: &str) -> Option<&'a str> {
+    if let Some(slot) = assembly
+        .visible_slots
+        .iter()
+        .find(|slot| slot.path_key == path)
+    {
+        return slot
+            .selected_part_id
+            .as_deref()
+            .or(slot.internal_part_id.as_deref());
+    }
+    assembly
+        .internal_parts
+        .iter()
+        .find(|part| part.slot_path_key == path)
+        .map(|part| part.part_id.as_str())
+}
+
+/// Whether a locked path is still honoured by the resolved assembly. The
+/// resolver silently drops a locked part when an earlier slot claims its
+/// socket through `extraOccupySocketIds`, so the raw selection map alone is
+/// no evidence that the lock was installed. All-virtual slots never produce a
+/// visible slot even when their virtual part is installed; those show up as
+/// internal parts instead.
+pub fn lock_honoured(assembly: &Assembly, path: &str, expected: Option<&str>) -> bool {
+    let visible = assembly
+        .visible_slots
+        .iter()
+        .any(|slot| slot.path_key == path);
+    let installed = installed_part_id(assembly, path);
+    match expected {
+        Some(expected) => installed == Some(expected),
+        None => visible && installed.is_none(),
+    }
+}
+
+pub fn locks_honoured(locked_paths: &Map<String, Option<String>>, assembly: &Assembly) -> bool {
+    locked_paths
+        .iter()
+        .all(|(path, expected)| lock_honoured(assembly, path, expected.as_deref()))
+}
+
 fn with_label_override<'b>(
     slot: &'b SlotDef,
     parent_type: Option<&str>,
