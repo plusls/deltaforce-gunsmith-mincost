@@ -2806,10 +2806,19 @@ impl<'a> Solver<'a> {
                 laser_parts.push((idx, score));
             }
         }
-        let laser_idx = laser_parts
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
-            .map(|(i, _)| *i);
+        // The evaluator and the DP keep the first laser on a score tie, so the
+        // base recoil has to rank them the same way.
+        let laser_idx = {
+            let mut best: Option<usize> = None;
+            let mut best_score = f64::NEG_INFINITY;
+            for (idx, score) in &laser_parts {
+                if *score > best_score {
+                    best = Some(*idx);
+                    best_score = *score;
+                }
+            }
+            best
+        };
 
         for (idx, part) in parts.iter().enumerate() {
             let laser_part = crate::metrics::has_laser(part);
@@ -6175,7 +6184,11 @@ fn compute_relevance(
     let want_stability_tune = want_stability;
 
     for (id, part) in &payload.parts {
-        let mut relevant = !part.extra_occupy_socket_ids.is_empty();
+        // A laser can win the single-laser selection and suppress the pro
+        // modifiers of another laser even when its own modifiers would not
+        // move a constrained metric, so every laser part stays relevant.
+        let mut relevant =
+            !part.extra_occupy_socket_ids.is_empty() || crate::metrics::has_laser(part);
         for list in part.main_mods.values().chain(
             part.main_baseline_mods
                 .get(weapon_id)

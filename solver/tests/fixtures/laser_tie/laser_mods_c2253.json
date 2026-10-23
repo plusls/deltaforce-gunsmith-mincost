@@ -1,0 +1,462 @@
+{
+ "payload": {
+  "dataVersion": "fuzz",
+  "parts": {
+   "w1": {
+    "id": "w1",
+    "name": "gun"
+   },
+   "s0c0": {
+    "id": "s0c0",
+    "name": "s0c0",
+    "mainAttributeModifiersByMode": {
+     "blackhawk": [
+      {
+       "attributeId": "10005",
+       "modifierType": "Addend",
+       "delta": 24.3735
+      }
+     ]
+    },
+    "uiEffectsByMode": {
+     "operations": [
+      {
+       "conditionId": 10038
+      }
+     ]
+    }
+   },
+   "s1c0": {
+    "id": "s1c0",
+    "name": "s1c0",
+    "tuningOptions": [
+     {
+      "tune_id": "t0",
+      "min_value": -10.0,
+      "max_value": 5.0,
+      "step_value": 0.5,
+      "default_value": 0.0,
+      "display_effects": [
+       {
+        "attribute_name_snapshot": "%\u989d\u5916\u540e\u5750\u529b\u63a7\u5236",
+        "curve_points": [
+         {
+          "Time": 0.0,
+          "Value": 20.0
+         },
+         {
+          "Time": 0.0,
+          "Value": 0.0
+         },
+         {
+          "Time": 10.0,
+          "Value": 0.0
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "uiEffectsByMode": {
+     "operations": [
+      {
+       "conditionId": 10038
+      }
+     ]
+    }
+   }
+  },
+  "slotsByHost": {
+   "w1": [
+    {
+     "id": "1",
+     "name": "Slot1",
+     "candidateIds": [
+      "s0c0"
+     ]
+    },
+    {
+     "id": "2",
+     "name": "Slot1",
+     "candidateIds": [
+      "s1c0"
+     ]
+    }
+   ]
+  },
+  "weaponStatsById": {
+   "w1": {
+    "byMode": {
+     "operations": {
+      "base": {
+       "10001": 55,
+       "10005": 54,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      },
+      "display": {
+       "10001": 55,
+       "10005": 48,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      }
+     },
+     "warfare": {
+      "base": {
+       "10001": 55,
+       "10005": 48,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      },
+      "display": {
+       "10001": 55,
+       "10005": 48,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      }
+     },
+     "blackhawk": {
+      "base": {
+       "10001": 55,
+       "10005": 48,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      },
+      "display": {
+       "10001": 55,
+       "10005": 48,
+       "10006": 50,
+       "10007": 50,
+       "10008": 50
+      }
+     }
+    }
+   }
+  },
+  "weaponNumericProfilesById": {
+   "w1": {
+    "linkedTables": {
+     "aimRecoil": {
+      "ContinueShootRecoil": {
+       "HorizontalScale": 1.5,
+       "VerticalScale": 1.7
+      },
+      "SingleOrBurstShootRecoil": {
+       "HorizontalScale": 1.2,
+       "VerticalScale": 1.3
+      },
+      "RecoilShakePitchWithCurve": {
+       "WholeAmplitude": 1.0
+      },
+      "RecoilShakeYawWithCurve": {
+       "WholeAmplitude": 1.0
+      }
+     },
+     "recoilCurves": {
+      "recoilControl": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.25
+        },
+        {
+         "Time": 8.0,
+         "Value": 0.95
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.7
+        },
+        {
+         "Time": 24.0,
+         "Value": 0.55
+        }
+       ]
+      },
+      "gunkick": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.1
+        },
+        {
+         "Time": 8.0,
+         "Value": 0.8
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.6
+        },
+        {
+         "Time": 24.0,
+         "Value": 0.45
+        }
+       ]
+      },
+      "recoilControlMP": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.15
+        },
+        {
+         "Time": 8.0,
+         "Value": 0.9
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.65
+        }
+       ]
+      },
+      "gunkickMP": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 8.0,
+         "Value": 0.75
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.5
+        }
+       ]
+      }
+     },
+     "handlingCurves": {
+      "adsTime": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.2
+        },
+        {
+         "Time": 16.0,
+         "Value": 1.35
+        }
+       ]
+      },
+      "sprintToFire": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.1
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.35
+        },
+        {
+         "Time": 16.0,
+         "Value": 1.5
+        }
+       ]
+      },
+      "adsStrafeSpeed": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.3
+        },
+        {
+         "Time": 16.0,
+         "Value": 1.6
+        }
+       ]
+      },
+      "hipSpread": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.2
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.6
+        },
+        {
+         "Time": 16.0,
+         "Value": 2.0
+        }
+       ]
+      }
+     },
+     "stabilityCurves": {
+      "breathScale": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 8.0,
+         "Value": 0.8
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.65
+        }
+       ]
+      },
+      "breathTime": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.3
+        },
+        {
+         "Time": 16.0,
+         "Value": 1.6
+        }
+       ]
+      },
+      "fireCameraStability": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.8
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.3
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.9
+        },
+        {
+         "Time": 24.0,
+         "Value": 0.6
+        }
+       ]
+      },
+      "movementCameraStability": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.6
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.2
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.8
+        }
+       ]
+      },
+      "holdBreathRecoil": {
+       "keys": [
+        {
+         "Time": 0.0,
+         "Value": 1.4
+        },
+        {
+         "Time": 8.0,
+         "Value": 1.0
+        },
+        {
+         "Time": 16.0,
+         "Value": 0.7
+        }
+       ]
+      }
+     },
+     "waistSpread": {
+      "AreaSize": [
+       10.0
+      ],
+      "SpreadMax": {
+       "X": 20.0,
+       "Y": 20.0
+      },
+      "LuaDisplaySpreadFactor": 1.0,
+      "LuaDisplaySpreadUIFactor": 1.25
+     },
+     "aiming": {
+      "AimingOnAnimTime": 0.5
+     },
+     "movementByMode": {
+      "operations": {
+       "StandRunSpeed": 300.0,
+       "StandAimSpeedFactor": -0.5
+      }
+     },
+     "holdBreath": [
+      {
+       "StandBreathFactor": 1.0,
+       "WeaponBreathConfig": {
+        "AttenSpeed": 1.0
+       },
+       "RecoilScale": {
+        "X": 1.0,
+        "Y": 1.0
+       }
+      }
+     ]
+    },
+    "detail": {
+     "raw_weapon_attribute": {
+      "ChangeClipTime": 2.0,
+      "ChangeClipTimeWhenEmpty": 2.5,
+      "EquipTime": 0.7,
+      "UnEquipTime": 0.8,
+      "SprintToFireSpeed": 0.3,
+      "GunSwayBeHitScale": 1.0
+     },
+     "raw_supporting_values": {
+      "handling": {
+       "AimingOnAnimTime": 0.5
+      },
+      "stability": {
+       "GSMovement_CameraScale": 1.0
+      }
+     }
+    }
+   }
+  }
+ },
+ "request": {
+  "weaponId": "w1",
+  "mode": "blackhawk",
+  "laserEnabled": true,
+  "bipodDeployed": false,
+  "prices": {
+   "w1": 1355,
+   "s0c0": 0,
+   "s1c0": 60
+  },
+  "constraints": [
+   {
+    "id": "recoil-single-horizontal",
+    "max": 0.47
+   }
+  ],
+  "maxEvaluations": 2000000,
+  "maxLeaves": 2000000,
+  "maxResults": 3,
+  "deadlineMs": 30000
+ },
+ "expectedPrice": 1415
+}
