@@ -466,16 +466,27 @@ function mapBuild(raw) {
 const TRUNCATED_MESSAGE =
   "time budget exhausted before a feasible build was found";
 
+// Rust reports completions that hit internal caps separately from deadline
+// truncation. Until every build exposes the boolean flag, the message it emits
+// for that case is the compatibility fallback.
+function solverIncomplete(output) {
+  if (typeof output.incomplete === "boolean") return output.incomplete;
+  return /internal limits/.test(String(output.message ?? ""));
+}
+
 export function fromSolverOutput(raw) {
   const output = asObject(raw);
   const optimal = output.optimal === true;
   const truncated = output.truncated === true;
+  const incomplete = solverIncomplete(output);
 
   let kind;
   if (output.best) {
     kind = optimal ? "optimal" : "feasible";
   } else if (truncated) {
     kind = "error";
+  } else if (incomplete) {
+    kind = "incomplete";
   } else {
     kind = "infeasible";
   }
@@ -484,6 +495,7 @@ export function fromSolverOutput(raw) {
     kind,
     optimal,
     truncated,
+    incomplete,
     nodes: output.nodes ?? 0,
     leaves: output.leaves ?? 0,
     elapsedMs: 0,

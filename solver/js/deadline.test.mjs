@@ -198,6 +198,27 @@ test("result status never claims optimal for a truncated run", () => {
   assert.match(provenInfeasible.text, /当前约束无解/);
 });
 
+test("internal-limit stop is reported as incomplete, not proven infeasible", () => {
+  const status = describeResultStatus(
+    { kind: "incomplete", optimal: false, truncated: false, elapsedMs: 900 },
+    5000,
+  );
+  assert.equal(status.tone, "error");
+  assert.match(status.text, /内部上限提前停止/);
+  assert.match(status.text, /未证明无解/);
+  assert.doesNotMatch(status.text, /当前约束无解/);
+});
+
+test("solver failures never claim the constraints were proven infeasible", () => {
+  const status = describeResultStatus(
+    { kind: "error", truncated: false, message: "boom" },
+    5000,
+  );
+  assert.equal(status.tone, "error");
+  assert.match(status.text, /求解失败/);
+  assert.match(status.text, /未证明无解/);
+});
+
 test("fast-mode result found before the deadline does not claim the limit was hit", () => {
   const fast = describeResultStatus(
     { kind: "feasible", optimal: false, truncated: false, elapsedMs: 70 },

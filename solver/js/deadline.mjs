@@ -148,8 +148,15 @@ export function describeResultStatus(result, deadlineMs) {
       text: `找到可行方案 · 用时 ${formatDuration(elapsed)} · 未证明最优`,
     };
   }
+  if (mapped.kind === "incomplete") {
+    return {
+      tone: "error",
+      text: "搜索因内部上限提前停止 · 未证明无解",
+    };
+  }
   if (mapped.kind === "error") {
-    return { tone: "error", text: `求解失败 · ${mapped.message ?? ""}`.trim() };
+    const reason = mapped.message ? `求解失败 · ${mapped.message}` : "求解失败";
+    return { tone: "error", text: `${reason} · 未证明无解` };
   }
   return { tone: "error", text: `当前约束无解 · 用时 ${formatDuration(elapsed)}` };
 }

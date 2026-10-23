@@ -819,6 +819,60 @@ test("fromSolverOutput maps infeasible and truncated results", () => {
   );
 });
 
+test("fromSolverOutput separates incomplete from proven infeasible", () => {
+  const build = {
+    selections: {},
+    tuning: {},
+    installed_part_keys: [],
+    panel: {},
+    recoil: {},
+    total_price: 0,
+    attachment_price: 0,
+  };
+  const base = { optimal: false, truncated: false, nodes: 1, leaves: 2 };
+
+  assert.equal(
+    fromSolverOutput({ ...base, optimal: true, best: build }).kind,
+    "optimal",
+  );
+  assert.equal(fromSolverOutput({ ...base, best: build }).kind, "feasible");
+  assert.equal(
+    fromSolverOutput({ ...base, truncated: true, best: null }).kind,
+    "error",
+  );
+  assert.equal(
+    fromSolverOutput({ ...base, incomplete: true, best: null }).kind,
+    "incomplete",
+  );
+  assert.equal(
+    fromSolverOutput({ ...base, incomplete: false, best: null }).kind,
+    "infeasible",
+  );
+});
+
+test("incomplete falls back to the solver message until the field exists", () => {
+  const legacy = fromSolverOutput({
+    optimal: false,
+    truncated: false,
+    best: null,
+    message:
+      "search stopped early by internal limits; result is the best found so far",
+  });
+  assert.equal(legacy.kind, "incomplete");
+  assert.equal(legacy.incomplete, true);
+
+  // The explicit boolean wins over message text once Rust starts emitting it.
+  const explicit = fromSolverOutput({
+    optimal: false,
+    truncated: false,
+    best: null,
+    incomplete: false,
+    message: "search stopped early by internal limits",
+  });
+  assert.equal(explicit.kind, "infeasible");
+  assert.equal(explicit.incomplete, false);
+});
+
 test("toSiteResult produces a recommendation with a candidate", () => {
   const context = makeContext({
     currentSelections: { s1: "old", s2: null },
