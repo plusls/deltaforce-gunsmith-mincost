@@ -52,7 +52,15 @@ fn run_case_with_payload_and_leaves(
 #[test]
 #[ignore = "slow regression; run with --release -- --ignored"]
 fn live_request_aim_regression() {
+    // The tuning reachability pass used to prove infeasibility one state at a
+    // time. The weighted certificate should keep this well under the bound.
+    let started = Instant::now();
     run_case("live_request_aim.request.json", 254841);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "live_request_aim took {elapsed:?}; the tuning certificate may have regressed"
+    );
 }
 
 #[test]
