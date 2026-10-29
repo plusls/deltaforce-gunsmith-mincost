@@ -722,7 +722,222 @@ enum ExactTune {
     Unsupported,
 }
 
+fn reach_channel(x: &(i64, i64, i64, i64), c: usize) -> i64 {
+    match c {
+        0 => x.0,
+        1 => x.1,
+        2 => x.2,
+        _ => x.3,
+    }
+}
+
+fn reach_advance(state: &[i64; 4], x: &(i64, i64, i64, i64), targets: &[Option<i64>; 4]) -> [i64; 4] {
+    let mut next = [0i64; 4];
+    for c in 0..4 {
+        let value = state[c].saturating_add(reach_channel(x, c));
+        next[c] = match targets[c] {
+            Some(t) => value.min(t),
+            None => value,
+        };
+    }
+    next
+}
+
+/// Cheap Farkas-style infeasibility certificate. For every non-negative weight
+/// vector, the best achievable weighted sum is the sum of per-group maxima. If
+/// that cannot reach the weighted target, no assignment can satisfy all
+/// channels at once, even though each channel alone might.
+///
+/// Weights are always zero on channels without a target: such channels may end
+/// up negative, and weighing them would break the certificate.
+fn reach_weights_infeasible(
+    increments: &[Vec<(i64, i64, i64, i64)>],
+    targets: &[Option<i64>; 4],
+) -> bool {
+    const WEIGHTS: [[i64; 4]; 15] = [
+        [1, 1, 0, 0],
+        [1, 0, 1, 0],
+        [1, 0, 0, 1],
+        [0, 1, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 1],
+        [1, 1, 1, 0],
+        [1, 1, 0, 1],
+        [1, 0, 1, 1],
+        [0, 1, 1, 1],
+        [1, 1, 1, 1],
+        [2, 1, 1, 1],
+        [1, 2, 1, 1],
+        [1, 1, 2, 1],
+        [1, 1, 1, 2],
+    ];
+    for mut weights in WEIGHTS {
+        for c in 0..4 {
+            if targets[c].is_none() {
+                weights[c] = 0;
+            }
+        }
+        if weights.iter().all(|w| *w == 0) {
+            continue;
+        }
+        let mut target = 0i64;
+        for c in 0..4 {
+            if let Some(t) = targets[c] {
+                target = target.saturating_add(weights[c].saturating_mul(t));
+            }
+        }
+        let mut possible = 0i64;
+        for offers in increments {
+            let best = offers
+                .iter()
+                .map(|x| {
+                    (0..4)
+                        .map(|c| weights[c].saturating_mul(reach_channel(x, c)))
+                        .sum::<i64>()
+                })
+                .max()
+                .unwrap_or(0);
+            possible = possible.saturating_add(best);
+        }
+        if target > possible {
+            return true;
+        }
+    }
+    false
+}
+
+/// Every target is a lower bound, so at a given level a state that is at least
+/// as large on all four channels can only be easier to complete than one it
+/// dominates. Keeping one dominance frontier per level turns the exact visited
+/// set into a much smaller memo without losing solutions.
+fn reach_state_dominated(front: &[[i64; 4]], state: &[i64; 4]) -> bool {
+    front.iter().any(|other| {
+        other[0] >= state[0]
+            && other[1] >= state[1]
+            && other[2] >= state[2]
+            && other[3] >= state[3]
+    })
+}
+
+fn reach_state_insert(front: &mut Vec<[i64; 4]>, state: [i64; 4]) {
+    front.retain(|other| {
+        !(state[0] >= other[0]
+            && state[1] >= other[1]
+            && state[2] >= other[2]
+            && state[3] >= other[3])
+    });
+    front.push(state);
+}
+
 fn reach_targets(
+    increments: &[Vec<(i64, i64, i64, i64)>],
+    targets: [Option<i64>; 4],
+    budget: usize,
+) -> ReachResult {
+    reach_targets_work(increments, targets, budget).0
+}
+
+/// Returns the reachability result together with the number of visited search
+/// states, so tests can pin the pruning behavior.
+fn reach_targets_work(
+    increments: &[Vec<(i64, i64, i64, i64)>],
+    targets: [Option<i64>; 4],
+    budget: usize,
+) -> (ReachResult, usize) {
+    let n = increments.len();
+    for c in 0..4 {
+        if let Some(t) = targets[c] {
+            let max_sum: i64 = increments
+                .iter()
+                .map(|offers| offers.iter().map(|x| reach_channel(x, c)).max().unwrap_or(0))
+                .sum();
+            if t > max_sum {
+                return (ReachResult::Infeasible, 0);
+            }
+        }
+    }
+    if reach_weights_infeasible(increments, &targets) {
+        return (ReachResult::Infeasible, 0);
+    }
+    let mut fronts: Vec<Vec<[i64; 4]>> = vec![Vec::new(); n + 1];
+    let mut chosen = vec![0usize; n];
+    let mut used = 0usize;
+    let zeros = [0i64; 4];
+    fn rec(
+        i: usize,
+        state: [i64; 4],
+        increments: &[Vec<(i64, i64, i64, i64)>],
+        targets: [Option<i64>; 4],
+        fronts: &mut [Vec<[i64; 4]>],
+        chosen: &mut [usize],
+        used: &mut usize,
+        budget: usize,
+    ) -> Result<bool, ()> {
+        *used += 1;
+        if *used > budget {
+            return Err(());
+        }
+        if i == increments.len() {
+            return Ok((0..4).all(|c| targets[c].map(|t| state[c] >= t).unwrap_or(true)));
+        }
+        if reach_state_dominated(&fronts[i], &state) {
+            return Ok(false);
+        }
+        reach_state_insert(&mut fronts[i], state);
+        let mut order: Vec<usize> = (0..increments[i].len()).collect();
+        let mut score: Vec<i64> = increments[i]
+            .iter()
+            .map(|x| {
+                let xs = [x.0, x.1, x.2, x.3];
+                (0..4)
+                    .map(|c| match targets[c] {
+                        Some(t) => xs[c].min((t - state[c]).max(0)),
+                        None => 0,
+                    })
+                    .sum()
+            })
+            .collect();
+        order.sort_by(|&a, &b| score[b].cmp(&score[a]));
+        score.clear();
+        for &oi in &order {
+            let next = reach_advance(&state, &increments[i][oi], &targets);
+            chosen[i] = oi;
+            if rec(
+                i + 1,
+                next,
+                increments,
+                targets,
+                fronts,
+                chosen,
+                used,
+                budget,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    let result = match rec(
+        0,
+        zeros,
+        increments,
+        targets,
+        &mut fronts,
+        &mut chosen,
+        &mut used,
+        budget,
+    ) {
+        Ok(true) => ReachResult::Found(chosen),
+        Ok(false) => ReachResult::Infeasible,
+        Err(()) => ReachResult::Budget,
+    };
+    (result, used)
+}
+
+/// Reference implementation kept as a differential oracle for tests. It is the
+/// original depth-first search with an exact visited set.
+#[cfg(test)]
+fn reach_targets_dfs(
     increments: &[Vec<(i64, i64, i64, i64)>],
     targets: [Option<i64>; 4],
     budget: usize,
@@ -8585,6 +8800,133 @@ mod tests {
         let decided = decided_set(&["w/slot:1:A/part:P/slot:2:B"]);
         let roots = bound_roots(&visible, &[], &decided, |_| false);
         assert_eq!(roots, vec![BoundRoot::DecidedVisible(1)]);
+    }
+
+    fn reach_rng_next(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn reach_rand_channel(state: &mut u64) -> i64 {
+        (reach_rng_next(state) % 9) as i64 - 3
+    }
+
+    fn reach_chosen_meets(
+        increments: &[Vec<(i64, i64, i64, i64)>],
+        targets: [Option<i64>; 4],
+        chosen: &[usize],
+    ) -> bool {
+        if chosen.len() != increments.len() {
+            return false;
+        }
+        let mut sums = [0i64; 4];
+        for (offers, idx) in increments.iter().zip(chosen) {
+            let Some(x) = offers.get(*idx) else {
+                return false;
+            };
+            sums[0] += x.0;
+            sums[1] += x.1;
+            sums[2] += x.2;
+            sums[3] += x.3;
+        }
+        (0..4).all(|c| targets[c].map(|t| sums[c] >= t).unwrap_or(true))
+    }
+
+    #[test]
+    fn reach_targets_matches_reference_on_random_inputs() {
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let mut found = 0usize;
+        let mut infeasible = 0usize;
+        let mut budgeted = 0usize;
+        for case in 0..3000 {
+            let n = (reach_rng_next(&mut seed) % 6) as usize;
+            let mut increments = Vec::with_capacity(n);
+            for _ in 0..n {
+                let count = 1 + (reach_rng_next(&mut seed) % 5) as usize;
+                let mut offers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let a = reach_rand_channel(&mut seed);
+                    let b = reach_rand_channel(&mut seed);
+                    let c = reach_rand_channel(&mut seed);
+                    let d = reach_rand_channel(&mut seed);
+                    offers.push((a, b, c, d));
+                }
+                increments.push(offers);
+            }
+            let mut targets = [None; 4];
+            for target in &mut targets {
+                if reach_rng_next(&mut seed) % 2 == 0 {
+                    *target = Some((reach_rng_next(&mut seed) % 20) as i64);
+                }
+            }
+            let budget = 2_000_000;
+            let reference = reach_targets_dfs(&increments, targets, budget);
+            let (actual, used) = reach_targets_work(&increments, targets, budget);
+            match (&reference, &actual) {
+                (ReachResult::Budget, _) | (_, ReachResult::Budget) => {
+                    budgeted += 1;
+                    continue;
+                }
+                (ReachResult::Found(_), ReachResult::Found(chosen)) => {
+                    found += 1;
+                    assert!(
+                        reach_chosen_meets(&increments, targets, chosen),
+                        "case {case} chose an infeasible assignment: {increments:?} targets {targets:?} chosen {chosen:?}"
+                    );
+                }
+                (ReachResult::Infeasible, ReachResult::Infeasible) => infeasible += 1,
+                _ => panic!(
+                    "case {case}: reference {reference:?} != actual {actual:?} for {increments:?} targets {targets:?} used {used}"
+                ),
+            }
+        }
+        assert!(found > 100, "random cases should exercise feasible inputs, got {found}");
+        assert!(infeasible > 100, "random cases should exercise infeasible inputs, got {infeasible}");
+        println!("reach differential: found={found} infeasible={infeasible} budget={budgeted}");
+    }
+
+    #[test]
+    fn reach_targets_certificate_rejects_jointly_infeasible_targets() {
+        let increments = vec![
+            vec![(10, 0, 0, 0), (0, 10, 0, 0)],
+            vec![(10, 0, 0, 0), (0, 10, 0, 0)],
+        ];
+        let (result, used) =
+            reach_targets_work(&increments, [Some(20), Some(20), None, None], 1_000_000);
+        assert_eq!(result, ReachResult::Infeasible);
+        assert_eq!(used, 0, "the weighted certificate should reject before searching");
+    }
+
+    #[test]
+    fn reach_targets_certificate_ignores_unconstrained_channels() {
+        let increments = vec![vec![(10, 0, 0, -100), (0, 0, 0, 0)]];
+        assert_eq!(
+            reach_targets(&increments, [Some(10), None, None, None], 1000),
+            ReachResult::Found(vec![0])
+        );
+    }
+
+    #[test]
+    fn reach_targets_dominance_drops_covered_states() {
+        // Both groups can contribute to either channel but not both at once.
+        // Feasible choices still exist, so the bound must not reject them.
+        let increments = vec![
+            vec![(10, 0, 0, 0), (0, 10, 0, 0)],
+            vec![(10, 0, 0, 0), (0, 10, 0, 0)],
+        ];
+        let (result, used) =
+            reach_targets_work(&increments, [Some(10), Some(10), None, None], 1_000_000);
+        match result {
+            ReachResult::Found(chosen) => {
+                assert!(reach_chosen_meets(&increments, [Some(10), Some(10), None, None], &chosen));
+            }
+            other => panic!("expected a feasible assignment, got {other:?}"),
+        }
+        assert!(used <= 8, "dominance should keep the search tiny, used {used}");
     }
 
     #[test]
